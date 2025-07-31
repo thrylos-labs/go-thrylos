@@ -9,7 +9,7 @@ import (
 
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/chain"
-	"github.com/thrylos-labs/go-thrylos/proto/core"
+	core "github.com/thrylos-labs/go-thrylos/proto/core/proto"
 )
 
 func main() {
@@ -45,7 +45,7 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
-	fmt.Println("🎉 Thrylos V2 node running! Press Ctrl+C to stop.")
+	fmt.Println("🎉 Go Thrylos node running! Press Ctrl+C to stop.")
 	<-c
 
 	fmt.Println("🛑 Shutting down Thrylos V2...")

@@ -1,0 +1,72 @@
+Day 1-2: Project Setup & Core Types
+go// Start with these core files:
+
+// core/account/account.go
+// core/transaction/transaction.go  
+// core/block/block.go
+// core/state/worldstate.go
+
+Day 3-4: Basic Transaction Processing
+go// core/transaction/executor.go
+// core/transaction/pool.go
+// core/transaction/validator.go
+
+Day 5-7: Basic Blockchain Logic
+go// core/chain/blockchain.go
+// core/chain/genesis.go
+
+Week 2: Consensus & Validation
+Day 1-3: Proof of Stake
+go// consensus/pos/consensus.go
+// consensus/validator/validator.go
+// consensus/validator/selection.go
+Day 4-7: Block Creation & Validation
+go// core/block/creator.go
+// core/block/validator.go
+// consensus/pos/proposer.go
+Week 3: Staking System
+Day 1-4: Liquid Staking
+go// staking/liquid/service.go
+// staking/delegation/manager.go
+// consensus/rewards/distributor.go
+Day 5-7: Validator Management
+go// consensus/validator/lifecycle.go
+// staking/slashing/conditions.go
+Week 4: Network Integration
+Day 1-3: P2P Layer (Reuse your libp2p knowledge)
+go// network/p2p/manager.go
+// network/sync/synchronizer.go
+// network/gossip/protocol.go
+Day 4-7: Transaction & Block Propagation
+go// network/gossip/tx_gossip.go
+// network/gossip/block_gossip.go
+// network/sync/state_sync.go
+
+Key Design Decisions Explained
+1. Account-Based State
+
+Single source of truth - WorldState map
+Simple balance tracking - no UTXO complexity
+Efficient queries - O(1) account lookups
+Easy debugging - clear state representation
+
+2. Liquid Staking First
+
+No unbonding periods - immediate liquidity
+Better UX - no lock-up anxiety
+Higher participation - easier to stake
+DeFi ready - staked tokens remain liquid
+
+3. Modular Architecture
+
+Clean interfaces - easy to test and mock
+Separation of concerns - each package has single responsibility
+Extensible - easy to add smart contracts later
+Maintainable - clear code organization
+
+4. Modern Patterns
+
+Context-based - proper Go patterns
+Interface-driven - dependency injection ready
+Concurrent-safe - proper mutex usage
+Event-driven - pubsub for loose coupling
