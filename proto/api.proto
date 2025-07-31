@@ -1,0 +1,51 @@
+syntax = "proto3";
+package thrylos.api;
+
+import "account.proto";
+import "consensus.proto";
+
+option go_package = "github.com/thrylos-labs/go-thrylos/proto/core";
+
+// Request/Response messages for JSON-RPC
+message GetBalanceRequest {
+  string address = 1;
+}
+
+message GetBalanceResponse {
+  string address = 1;
+  int64 balance = 2;
+  int64 staked_amount = 3;
+  uint64 nonce = 4;
+  map<string, int64> delegated_to = 5;
+  int64 rewards = 6;
+}
+
+message SendTransactionRequest {
+  string from = 1;
+  string to = 2;
+  int64 amount = 3;
+  int64 gas = 4;
+  int64 gas_price = 5;
+  uint64 nonce = 6;
+  bytes data = 7;
+  thrylos.core.TransactionType type = 8;
+  bytes signature = 9;
+}
+
+message SendTransactionResponse {
+  string tx_hash = 1;
+  string status = 2;
+}
+
+message StakeRequest {
+  string delegator = 1;
+  string validator = 2;
+  int64 amount = 3;
+  bytes signature = 4;
+}
+
+message StakeResponse {
+  string tx_hash = 1;
+  string status = 2;
+  int64 new_staked_amount = 3;
+}

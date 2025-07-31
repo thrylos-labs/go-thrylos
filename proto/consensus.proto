@@ -1,0 +1,50 @@
+syntax = "proto3";
+package thrylos.consensus;
+
+option go_package = "github.com/thrylos-labs/thrylos-v2/proto/consensus";
+
+message Validator {
+  string address = 1;
+  bytes pubkey = 2;
+  int64 stake = 3;
+  int64 self_stake = 4;
+  int64 delegated_stake = 5;
+  map<string, int64> delegators = 6;
+  double commission = 7;
+  bool active = 8;
+  int64 blocks_proposed = 9;
+  int64 blocks_missed = 10;
+  repeated SlashEvent slash_events = 11;
+  int64 jail_until = 12;
+}
+
+message SlashEvent {
+  int64 height = 1;
+  SlashType type = 2;
+  int64 amount = 3;
+  int64 timestamp = 4;
+}
+
+enum SlashType {
+  DOUBLE_SIGN = 0;
+  UNAVAILABLE = 1;
+  INVALID_BLOCK = 2;
+}
+
+message Delegation {
+  string delegator = 1;
+  string validator = 2;
+  int64 amount = 3;
+  int64 timestamp = 4;
+}
+
+message WorldState {
+  map<string, Account> accounts = 1;
+  map<string, Validator> validators = 2;
+  int64 total_supply = 3;
+  int64 total_staked = 4;
+  int64 current_height = 5;
+  string last_block_hash = 6;
+  repeated string active_validators = 7;
+  map<string, int64> validator_set = 8; // validator -> voting power
+}

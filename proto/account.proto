@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package thrylos.core;
+
+option go_package = "github.com/thrylos-labs/go-thrylos/proto/core";
+
+message Account {
+  string address = 1;
+  int64 balance = 2;
+  uint64 nonce = 3;
+  int64 staked_amount = 4;
+  map<string, int64> delegated_to = 5;
+  int64 rewards = 6;
+  bytes code_hash = 7;
+  bytes storage_root = 8;
+}
+
+message Transaction {
+  string id = 1;
+  string from = 2;
+  string to = 3;
+  int64 amount = 4;
+  int64 gas = 5;
+  int64 gas_price = 6;
+  uint64 nonce = 7;
+  bytes data = 8;
+  TransactionType type = 9;
+  bytes signature = 10;
+  string hash = 11;
+}
+
+enum TransactionType {
+  TRANSFER = 0;
+  STAKE = 1;
+  UNSTAKE = 2;
+  DELEGATE = 3;
+  UNDELEGATE = 4;
+  CLAIM_REWARDS = 5;
+}
+
+message Block {
+  BlockHeader header = 1;
+  repeated Transaction transactions = 2;
+  string hash = 3;
+  bytes signature = 4;
+}
+
+message BlockHeader {
+  int64 index = 1;
+  string prev_hash = 2;
+  int64 timestamp = 3;
+  string validator = 4;
+  string tx_root = 5;
+  string state_root = 6;
+  int64 gas_used = 7;
+  int64 gas_limit = 8;
+}
