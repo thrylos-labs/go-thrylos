@@ -1,3 +1,5 @@
+// protoc --go_out=. --go_opt=paths=source_relative proto/account.proto
+
 syntax = "proto3";
 
 package thrylos.core;
@@ -55,6 +57,10 @@ message BlockHeader {
   string state_root = 6;
   int64 gas_used = 7;
   int64 gas_limit = 8;
+  uint64 slot = 9;
+  uint64 epoch = 10;
+  int64 total_fees = 11;
+  string merkle_root = 12;
 }
 
 message Validator {

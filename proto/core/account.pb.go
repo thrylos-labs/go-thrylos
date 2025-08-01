@@ -7,11 +7,12 @@
 package core
 
 import (
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -439,6 +440,10 @@ type BlockHeader struct {
 	StateRoot     string                 `protobuf:"bytes,6,opt,name=state_root,json=stateRoot,proto3" json:"state_root,omitempty"`
 	GasUsed       int64                  `protobuf:"varint,7,opt,name=gas_used,json=gasUsed,proto3" json:"gas_used,omitempty"`
 	GasLimit      int64                  `protobuf:"varint,8,opt,name=gas_limit,json=gasLimit,proto3" json:"gas_limit,omitempty"`
+	Slot          uint64                 `protobuf:"varint,9,opt,name=slot,proto3" json:"slot,omitempty"`
+	Epoch         uint64                 `protobuf:"varint,10,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	TotalFees     int64                  `protobuf:"varint,11,opt,name=total_fees,json=totalFees,proto3" json:"total_fees,omitempty"`
+	MerkleRoot    string                 `protobuf:"bytes,12,opt,name=merkle_root,json=merkleRoot,proto3" json:"merkle_root,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -527,6 +532,34 @@ func (x *BlockHeader) GetGasLimit() int64 {
 		return x.GasLimit
 	}
 	return 0
+}
+
+func (x *BlockHeader) GetSlot() uint64 {
+	if x != nil {
+		return x.Slot
+	}
+	return 0
+}
+
+func (x *BlockHeader) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *BlockHeader) GetTotalFees() int64 {
+	if x != nil {
+		return x.TotalFees
+	}
+	return 0
+}
+
+func (x *BlockHeader) GetMerkleRoot() string {
+	if x != nil {
+		return x.MerkleRoot
+	}
+	return ""
 }
 
 type Validator struct {
@@ -765,7 +798,7 @@ const file_proto_account_proto_rawDesc = "" +
 	"\x06header\x18\x01 \x01(\v2\x19.thrylos.core.BlockHeaderR\x06header\x12=\n" +
 	"\ftransactions\x18\x02 \x03(\v2\x19.thrylos.core.TransactionR\ftransactions\x12\x12\n" +
 	"\x04hash\x18\x03 \x01(\tR\x04hash\x12\x1c\n" +
-	"\tsignature\x18\x04 \x01(\fR\tsignature\"\xec\x01\n" +
+	"\tsignature\x18\x04 \x01(\fR\tsignature\"\xd6\x02\n" +
 	"\vBlockHeader\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x03R\x05index\x12\x1b\n" +
 	"\tprev_hash\x18\x02 \x01(\tR\bprevHash\x12\x1c\n" +
@@ -775,7 +808,14 @@ const file_proto_account_proto_rawDesc = "" +
 	"\n" +
 	"state_root\x18\x06 \x01(\tR\tstateRoot\x12\x19\n" +
 	"\bgas_used\x18\a \x01(\x03R\agasUsed\x12\x1b\n" +
-	"\tgas_limit\x18\b \x01(\x03R\bgasLimit\"\x86\x04\n" +
+	"\tgas_limit\x18\b \x01(\x03R\bgasLimit\x12\x12\n" +
+	"\x04slot\x18\t \x01(\x04R\x04slot\x12\x14\n" +
+	"\x05epoch\x18\n" +
+	" \x01(\x04R\x05epoch\x12\x1d\n" +
+	"\n" +
+	"total_fees\x18\v \x01(\x03R\ttotalFees\x12\x1f\n" +
+	"\vmerkle_root\x18\f \x01(\tR\n" +
+	"merkleRoot\"\x86\x04\n" +
 	"\tValidator\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x16\n" +
 	"\x06pubkey\x18\x02 \x01(\fR\x06pubkey\x12\x14\n" +

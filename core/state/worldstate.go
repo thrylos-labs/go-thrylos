@@ -23,13 +23,16 @@ import (
 
 // WorldState manages the global state for a shard
 type WorldState struct {
+	// Configuration
+	config *config.Config
+
 	// Account management
 	accountManager *account.AccountManager
 
 	// Transaction pool and services
 	txPool      *transaction.Pool
 	txValidator *transaction.Validator
-	txExecutor  *transaction.Executor // Add this
+	txExecutor  *transaction.Executor
 
 	// Shard configuration
 	shardID     account.ShardID
@@ -51,31 +54,50 @@ type WorldState struct {
 	// State root for Merkle tree
 	stateRoot string
 
+	// Cross-shard manager
+	crossShardManager *CrossShardManager
+
 	// Synchronization
 	mu sync.RWMutex
 }
 
-// NewWorldState creates a new world state for a shard
-func NewWorldState(shardID account.ShardID, totalShards int, maxTxs int, cfg *config.Config, minGasPrice int64) *WorldState {
-	return &WorldState{
+// NewWorldState creates a new world state for a shard with config-driven initialization
+func NewWorldState(shardID account.ShardID, totalShards int, cfg *config.Config) *WorldState {
+	ws := &WorldState{
+		config:         cfg,
 		accountManager: account.NewAccountManager(shardID, totalShards),
-		txPool:         transaction.NewPool(shardID, totalShards, maxTxs, minGasPrice),
+		txPool:         transaction.NewPool(shardID, totalShards, cfg.Consensus.MaxTxPerBlock, cfg.Consensus.MinGasPrice),
 		txValidator:    transaction.NewValidator(shardID, totalShards, cfg),
 		txExecutor:     transaction.NewExecutor(shardID, totalShards),
 		shardID:        shardID,
 		totalShards:    totalShards,
 		blocks:         make([]*core.Block, 0),
 		validators:     make(map[string]*core.Validator),
-		totalSupply:    0,
+		totalSupply:    cfg.Economics.GenesisSupply,
 		totalStaked:    0,
 		lastTimestamp:  time.Now().Unix(),
 	}
+
+	// Initialize cross-shard manager
+	ws.crossShardManager = NewCrossShardManager(ws)
+
+	return ws
 }
 
 // InitializeGenesis initializes the world state with genesis data
 func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply int64, genesisValidators []*core.Validator) error {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+
+	// Validate genesis account address format
+	if err := account.ValidateAddress(genesisAccount); err != nil {
+		return fmt.Errorf("invalid genesis account address: %v", err)
+	}
+
+	// Use config supply if not specified
+	if initialSupply <= 0 {
+		initialSupply = ws.config.Economics.GenesisSupply
+	}
 
 	// Create genesis account
 	if err := ws.accountManager.CreateGenesisAccount(genesisAccount, initialSupply); err != nil {
@@ -113,13 +135,13 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 
 	// Execute all transactions in the block
 	for _, tx := range block.Transactions {
-		// Use the executor instance, not a package-level function
+		// Use the executor instance
 		receipt, err := ws.txExecutor.ExecuteTransaction(tx, ws.accountManager)
 		if err != nil {
 			return fmt.Errorf("failed to execute transaction %s: %v", tx.Id, err)
 		}
 
-		// Log receipt if needed (optional)
+		// Check receipt status
 		if receipt.Status == 0 {
 			return fmt.Errorf("transaction %s failed: %s", tx.Id, receipt.Error)
 		}
@@ -143,6 +165,38 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 	block.Header.StateRoot = ws.stateRoot
 
 	return nil
+}
+
+// ValidateTransaction validates a transaction using the transaction validator
+func (ws *WorldState) ValidateTransaction(tx *core.Transaction) error {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	return ws.txValidator.ValidateTransaction(tx, ws.accountManager)
+}
+
+// ExecuteTransaction executes a single transaction (helper method)
+func (ws *WorldState) ExecuteTransaction(tx *core.Transaction) (*transaction.ExecutionReceipt, error) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	return ws.txExecutor.ExecuteTransaction(tx, ws.accountManager)
+}
+
+// ExecuteBatchTransactions executes multiple transactions
+func (ws *WorldState) ExecuteBatchTransactions(transactions []*core.Transaction) ([]*transaction.ExecutionReceipt, error) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	return ws.txExecutor.ExecuteBatch(transactions, ws.accountManager)
+}
+
+// ValidateTransactionExecution validates that a transaction can be executed
+func (ws *WorldState) ValidateTransactionExecution(tx *core.Transaction) error {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	return ws.txExecutor.ValidateExecution(tx, ws.accountManager)
 }
 
 // GetAccount retrieves an account by address
@@ -171,6 +225,11 @@ func (ws *WorldState) GetNonce(address string) (uint64, error) {
 
 // AddTransaction adds a transaction to the pool
 func (ws *WorldState) AddTransaction(tx *core.Transaction) error {
+	// First validate the transaction
+	if err := ws.ValidateTransaction(tx); err != nil {
+		return fmt.Errorf("transaction validation failed: %v", err)
+	}
+
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 
@@ -275,7 +334,7 @@ func (ws *WorldState) GetActiveValidators() []*core.Validator {
 
 	var active []*core.Validator
 	for _, validator := range ws.validators {
-		if validator.Active {
+		if validator.Active && !ws.isValidatorJailed(validator) {
 			active = append(active, validator)
 		}
 	}
@@ -290,6 +349,11 @@ func (ws *WorldState) UpdateValidator(validator *core.Validator) error {
 
 	if _, exists := ws.validators[validator.Address]; !exists {
 		return fmt.Errorf("validator %s not found", validator.Address)
+	}
+
+	// Validate validator address format
+	if err := account.ValidateAddress(validator.Address); err != nil {
+		return fmt.Errorf("invalid validator address: %v", err)
 	}
 
 	ws.validators[validator.Address] = validator
@@ -322,10 +386,23 @@ func (ws *WorldState) GetTotalShards() int {
 	return ws.totalShards
 }
 
+// GetConfig returns the configuration
+func (ws *WorldState) GetConfig() *config.Config {
+	return ws.config
+}
+
+// GetCrossShardManager returns the cross-shard manager
+func (ws *WorldState) GetCrossShardManager() *CrossShardManager {
+	return ws.crossShardManager
+}
+
 // GetStatus returns a status summary of the world state
 func (ws *WorldState) GetStatus() map[string]interface{} {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
+
+	poolStats := ws.txPool.GetStats()
+	accountStats := ws.accountManager.GetAccountStats()
 
 	return map[string]interface{}{
 		"shard_id":        ws.shardID,
@@ -335,16 +412,27 @@ func (ws *WorldState) GetStatus() map[string]interface{} {
 		"total_supply":    ws.totalSupply,
 		"total_staked":    ws.totalStaked,
 		"block_count":     len(ws.blocks),
-		"pending_txs":     len(ws.txPool.GetPendingTransactions()),
+		"pending_txs":     poolStats.PendingCount,
 		"validator_count": len(ws.validators),
 		"last_timestamp":  ws.lastTimestamp,
+		"pool_stats":      poolStats,
+		"account_stats":   accountStats,
 	}
+}
+
+// isValidatorJailed checks if a validator is currently jailed
+func (ws *WorldState) isValidatorJailed(validator *core.Validator) bool {
+	return validator.JailUntil > time.Now().Unix()
 }
 
 // validateBlockForAddition validates that a block can be added to the chain
 func (ws *WorldState) validateBlockForAddition(block *core.Block) error {
 	if block == nil {
 		return fmt.Errorf("block cannot be nil")
+	}
+
+	if block.Header == nil {
+		return fmt.Errorf("block header cannot be nil")
 	}
 
 	// Check if this is genesis block
@@ -375,6 +463,18 @@ func (ws *WorldState) validateBlockForAddition(block *core.Block) error {
 		return fmt.Errorf("block timestamp must be greater than previous block")
 	}
 
+	// Validate block size
+	if block.Header.GasUsed > ws.config.Consensus.MaxBlockSize {
+		return fmt.Errorf("block gas used (%d) exceeds maximum block size (%d)",
+			block.Header.GasUsed, ws.config.Consensus.MaxBlockSize)
+	}
+
+	// Validate transaction count
+	if len(block.Transactions) > ws.config.Consensus.MaxTxPerBlock {
+		return fmt.Errorf("block contains %d transactions, maximum allowed is %d",
+			len(block.Transactions), ws.config.Consensus.MaxTxPerBlock)
+	}
+
 	return nil
 }
 
@@ -388,12 +488,18 @@ func (ws *WorldState) addValidator(validator *core.Validator) error {
 		return fmt.Errorf("validator address cannot be empty")
 	}
 
+	// Validate address format
+	if err := account.ValidateAddress(validator.Address); err != nil {
+		return fmt.Errorf("invalid validator address: %v", err)
+	}
+
 	if len(validator.Pubkey) == 0 {
 		return fmt.Errorf("validator public key cannot be empty")
 	}
 
-	if validator.Stake < 0 {
-		return fmt.Errorf("validator stake cannot be negative")
+	if validator.Stake < ws.config.Staking.MinValidatorStake {
+		return fmt.Errorf("validator stake %d below minimum %d",
+			validator.Stake, ws.config.Staking.MinValidatorStake)
 	}
 
 	// Check if validator already exists
@@ -404,6 +510,14 @@ func (ws *WorldState) addValidator(validator *core.Validator) error {
 	// Initialize validator fields if needed
 	if validator.Delegators == nil {
 		validator.Delegators = make(map[string]int64)
+	}
+
+	// Set creation time if not set
+	if validator.CreatedAt == 0 {
+		validator.CreatedAt = time.Now().Unix()
+	}
+	if validator.UpdatedAt == 0 {
+		validator.UpdatedAt = time.Now().Unix()
 	}
 
 	ws.validators[validator.Address] = validator
@@ -453,6 +567,16 @@ func (ws *WorldState) updateStateRoot() error {
 		rewardsBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(rewardsBytes, uint64(account.Rewards))
 		stateData = append(stateData, rewardsBytes...)
+
+		// Include delegation data for deterministic state
+		if account.DelegatedTo != nil {
+			for validator, amount := range account.DelegatedTo {
+				stateData = append(stateData, []byte(validator)...)
+				delegationBytes := make([]byte, 8)
+				binary.BigEndian.PutUint64(delegationBytes, uint64(amount))
+				stateData = append(stateData, delegationBytes...)
+			}
+		}
 	}
 
 	// Add validator data (sorted by address)
@@ -496,6 +620,67 @@ func (ws *WorldState) updateStateRoot() error {
 	return nil
 }
 
+// ValidateStateConsistency validates the consistency of the world state
+func (ws *WorldState) ValidateStateConsistency() error {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	// Validate account balances are non-negative
+	accounts := ws.accountManager.GetAllAccounts()
+	for addr, acc := range accounts {
+		if acc.Balance < 0 {
+			return fmt.Errorf("account %s has negative balance: %d", addr, acc.Balance)
+		}
+		if acc.StakedAmount < 0 {
+			return fmt.Errorf("account %s has negative staked amount: %d", addr, acc.StakedAmount)
+		}
+		if acc.Rewards < 0 {
+			return fmt.Errorf("account %s has negative rewards: %d", addr, acc.Rewards)
+		}
+
+		// Validate address format
+		if err := account.ValidateAddress(addr); err != nil {
+			return fmt.Errorf("account %s has invalid address format: %v", addr, err)
+		}
+	}
+
+	// Validate validator stakes and addresses
+	for addr, validator := range ws.validators {
+		if validator.Stake < 0 {
+			return fmt.Errorf("validator %s has negative stake: %d", addr, validator.Stake)
+		}
+		if validator.SelfStake < 0 {
+			return fmt.Errorf("validator %s has negative self stake: %d", addr, validator.SelfStake)
+		}
+		if validator.DelegatedStake < 0 {
+			return fmt.Errorf("validator %s has negative delegated stake: %d", addr, validator.DelegatedStake)
+		}
+
+		// Validate address format
+		if err := account.ValidateAddress(addr); err != nil {
+			return fmt.Errorf("validator %s has invalid address format: %v", addr, err)
+		}
+
+		// Validate minimum stake requirement
+		if validator.Stake < ws.config.Staking.MinValidatorStake {
+			return fmt.Errorf("validator %s stake %d below minimum %d",
+				addr, validator.Stake, ws.config.Staking.MinValidatorStake)
+		}
+	}
+
+	// Validate state root can be recalculated
+	originalRoot := ws.stateRoot
+	if err := ws.updateStateRoot(); err != nil {
+		return fmt.Errorf("failed to recalculate state root: %v", err)
+	}
+
+	if ws.stateRoot != originalRoot {
+		return fmt.Errorf("state root mismatch: stored=%s, calculated=%s", originalRoot, ws.stateRoot)
+	}
+
+	return nil
+}
+
 // CrossShardTransfer represents a transfer between shards
 type CrossShardTransfer struct {
 	FromShard account.ShardID
@@ -506,6 +691,7 @@ type CrossShardTransfer struct {
 	Nonce     uint64
 	Hash      string
 	Timestamp int64
+	Status    string // "pending", "completed", "failed"
 }
 
 // CrossShardManager manages cross-shard operations
@@ -541,6 +727,20 @@ func (csm *CrossShardManager) InitiateTransfer(from, to string, amount int64, no
 			csm.worldState.shardID, fromShard)
 	}
 
+	// Validate sender account
+	senderAccount, err := csm.worldState.GetAccount(from)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sender account: %v", err)
+	}
+
+	if senderAccount.Balance < amount {
+		return nil, fmt.Errorf("insufficient balance: have %d, need %d", senderAccount.Balance, amount)
+	}
+
+	if senderAccount.Nonce != nonce {
+		return nil, fmt.Errorf("invalid nonce: expected %d, got %d", senderAccount.Nonce, nonce)
+	}
+
 	// Create transfer record
 	transfer := &CrossShardTransfer{
 		FromShard: fromShard,
@@ -550,6 +750,7 @@ func (csm *CrossShardManager) InitiateTransfer(from, to string, amount int64, no
 		Amount:    amount,
 		Nonce:     nonce,
 		Timestamp: time.Now().Unix(),
+		Status:    "pending",
 	}
 
 	// Calculate transfer hash
@@ -565,24 +766,14 @@ func (csm *CrossShardManager) InitiateTransfer(from, to string, amount int64, no
 	binary.BigEndian.PutUint64(nonceBytes, nonce)
 	buf = append(buf, nonceBytes...)
 
+	timestampBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(timestampBytes, uint64(transfer.Timestamp))
+	buf = append(buf, timestampBytes...)
+
 	hash := blake2b.Sum256(buf)
 	transfer.Hash = fmt.Sprintf("%x", hash)
 
 	// Debit sender account
-	senderAccount, err := csm.worldState.GetAccount(from)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get sender account: %v", err)
-	}
-
-	if senderAccount.Balance < amount {
-		return nil, fmt.Errorf("insufficient balance: have %d, need %d", senderAccount.Balance, amount)
-	}
-
-	if senderAccount.Nonce != nonce {
-		return nil, fmt.Errorf("invalid nonce: expected %d, got %d", senderAccount.Nonce, nonce)
-	}
-
-	// Update sender
 	senderAccount.Balance -= amount
 	senderAccount.Nonce++
 
@@ -612,20 +803,37 @@ func (csm *CrossShardManager) CompleteTransfer(transferHash string) error {
 			csm.worldState.shardID, transfer.ToShard)
 	}
 
-	// Credit recipient account
+	// Get or create recipient account
 	recipientAccount, err := csm.worldState.GetAccount(transfer.To)
 	if err != nil {
-		return fmt.Errorf("failed to get recipient account: %v", err)
+		// Create account if it doesn't exist
+		recipientAccount = &core.Account{
+			Address:      transfer.To,
+			Balance:      0,
+			Nonce:        0,
+			StakedAmount: 0,
+			DelegatedTo:  make(map[string]int64),
+			Rewards:      0,
+		}
 	}
 
+	// Credit recipient account
 	recipientAccount.Balance += transfer.Amount
 
 	if err := csm.worldState.accountManager.UpdateAccount(recipientAccount); err != nil {
 		return fmt.Errorf("failed to update recipient account: %v", err)
 	}
 
-	// Remove from pending transfers
-	delete(csm.pendingTransfers, transferHash)
+	// Update transfer status
+	transfer.Status = "completed"
+
+	// Remove from pending transfers after a delay (keep for history)
+	go func() {
+		time.Sleep(time.Hour) // Keep completed transfers for 1 hour
+		csm.mu.Lock()
+		delete(csm.pendingTransfers, transferHash)
+		csm.mu.Unlock()
+	}()
 
 	return nil
 }
@@ -643,6 +851,19 @@ func (csm *CrossShardManager) GetPendingTransfers() []*CrossShardTransfer {
 	return transfers
 }
 
+// GetTransfer returns a specific cross-shard transfer
+func (csm *CrossShardManager) GetTransfer(hash string) (*CrossShardTransfer, error) {
+	csm.mu.RLock()
+	defer csm.mu.RUnlock()
+
+	transfer, exists := csm.pendingTransfers[hash]
+	if !exists {
+		return nil, fmt.Errorf("transfer %s not found", hash)
+	}
+
+	return transfer, nil
+}
+
 // StateSnapshot represents a point-in-time snapshot of the world state
 type StateSnapshot struct {
 	Height      int64
@@ -652,6 +873,7 @@ type StateSnapshot struct {
 	TotalStaked int64
 	Accounts    map[string]*core.Account
 	Validators  map[string]*core.Validator
+	Config      *config.Config
 }
 
 // CreateSnapshot creates a snapshot of the current world state
@@ -664,8 +886,10 @@ func (ws *WorldState) CreateSnapshot() *StateSnapshot {
 	for addr, account := range ws.accountManager.GetAllAccounts() {
 		// Deep copy account
 		delegatedTo := make(map[string]int64)
-		for k, v := range account.DelegatedTo {
-			delegatedTo[k] = v
+		if account.DelegatedTo != nil {
+			for k, v := range account.DelegatedTo {
+				delegatedTo[k] = v
+			}
 		}
 
 		accounts[addr] = &core.Account{
@@ -685,8 +909,10 @@ func (ws *WorldState) CreateSnapshot() *StateSnapshot {
 	for addr, validator := range ws.validators {
 		// Deep copy validator
 		delegators := make(map[string]int64)
-		for k, v := range validator.Delegators {
-			delegators[k] = v
+		if validator.Delegators != nil {
+			for k, v := range validator.Delegators {
+				delegators[k] = v
+			}
 		}
 
 		validators[addr] = &core.Validator{
@@ -701,6 +927,8 @@ func (ws *WorldState) CreateSnapshot() *StateSnapshot {
 			BlocksProposed: validator.BlocksProposed,
 			BlocksMissed:   validator.BlocksMissed,
 			JailUntil:      validator.JailUntil,
+			CreatedAt:      validator.CreatedAt,
+			UpdatedAt:      validator.UpdatedAt,
 		}
 	}
 
@@ -712,6 +940,7 @@ func (ws *WorldState) CreateSnapshot() *StateSnapshot {
 		TotalStaked: ws.totalStaked,
 		Accounts:    accounts,
 		Validators:  validators,
+		Config:      ws.config, // Reference to config
 	}
 }
 
@@ -723,6 +952,14 @@ func (ws *WorldState) RestoreFromSnapshot(snapshot *StateSnapshot) error {
 
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+
+	// Validate snapshot compatibility
+	if snapshot.Config != nil {
+		if ws.config.Economics.GenesisSupply != snapshot.Config.Economics.GenesisSupply {
+			return fmt.Errorf("incompatible genesis supply: current=%d, snapshot=%d",
+				ws.config.Economics.GenesisSupply, snapshot.Config.Economics.GenesisSupply)
+		}
+	}
 
 	// Clear current state
 	ws.accountManager = account.NewAccountManager(ws.shardID, ws.totalShards)
@@ -747,50 +984,331 @@ func (ws *WorldState) RestoreFromSnapshot(snapshot *StateSnapshot) error {
 	ws.totalSupply = snapshot.TotalSupply
 	ws.totalStaked = snapshot.TotalStaked
 
+	// Validate restored state
+	if err := ws.ValidateStateConsistency(); err != nil {
+		return fmt.Errorf("restored state failed consistency check: %v", err)
+	}
+
 	return nil
 }
 
-// ValidateStateConsistency validates the consistency of the world state
-func (ws *WorldState) ValidateStateConsistency() error {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+// StakingManager provides staking-related functionality
+type StakingManager struct {
+	worldState *WorldState
+}
 
-	// Validate account balances are non-negative
-	accounts := ws.accountManager.GetAllAccounts()
-	for addr, account := range accounts {
-		if account.Balance < 0 {
-			return fmt.Errorf("account %s has negative balance: %d", addr, account.Balance)
-		}
-		if account.StakedAmount < 0 {
-			return fmt.Errorf("account %s has negative staked amount: %d", addr, account.StakedAmount)
-		}
-		if account.Rewards < 0 {
-			return fmt.Errorf("account %s has negative rewards: %d", addr, account.Rewards)
-		}
+// NewStakingManager creates a new staking manager
+func (ws *WorldState) GetStakingManager() *StakingManager {
+	return &StakingManager{worldState: ws}
+}
+
+// Delegate stakes tokens to a validator
+func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount int64) error {
+	ws := sm.worldState
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Validate addresses
+	if err := account.ValidateAddress(delegatorAddr); err != nil {
+		return fmt.Errorf("invalid delegator address: %v", err)
+	}
+	if err := account.ValidateAddress(validatorAddr); err != nil {
+		return fmt.Errorf("invalid validator address: %v", err)
 	}
 
-	// Validate validator stakes
-	for addr, validator := range ws.validators {
-		if validator.Stake < 0 {
-			return fmt.Errorf("validator %s has negative stake: %d", addr, validator.Stake)
-		}
-		if validator.SelfStake < 0 {
-			return fmt.Errorf("validator %s has negative self stake: %d", addr, validator.SelfStake)
-		}
-		if validator.DelegatedStake < 0 {
-			return fmt.Errorf("validator %s has negative delegated stake: %d", addr, validator.DelegatedStake)
-		}
+	// Check minimum delegation amount
+	if amount < ws.config.Staking.MinDelegation {
+		return fmt.Errorf("delegation amount %d below minimum %d",
+			amount, ws.config.Staking.MinDelegation)
 	}
 
-	// Validate state root can be recalculated
-	originalRoot := ws.stateRoot
-	if err := ws.updateStateRoot(); err != nil {
-		return fmt.Errorf("failed to recalculate state root: %v", err)
+	// Get delegator account
+	delegator, err := ws.accountManager.GetAccount(delegatorAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	if ws.stateRoot != originalRoot {
-		return fmt.Errorf("state root mismatch: stored=%s, calculated=%s", originalRoot, ws.stateRoot)
+	// Check balance
+	if delegator.Balance < amount {
+		return fmt.Errorf("insufficient balance: have %d, need %d", delegator.Balance, amount)
+	}
+
+	// Get validator
+	validator, exists := ws.validators[validatorAddr]
+	if !exists {
+		return fmt.Errorf("validator %s not found", validatorAddr)
+	}
+
+	if !validator.Active {
+		return fmt.Errorf("validator %s is not active", validatorAddr)
+	}
+
+	// Update delegator account
+	delegator.Balance -= amount
+	delegator.StakedAmount += amount
+	if delegator.DelegatedTo == nil {
+		delegator.DelegatedTo = make(map[string]int64)
+	}
+	delegator.DelegatedTo[validatorAddr] += amount
+
+	// Update validator
+	validator.DelegatedStake += amount
+	validator.Stake += amount
+	if validator.Delegators == nil {
+		validator.Delegators = make(map[string]int64)
+	}
+	validator.Delegators[delegatorAddr] += amount
+	validator.UpdatedAt = time.Now().Unix()
+
+	// Update accounts
+	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
+		return fmt.Errorf("failed to update delegator account: %v", err)
+	}
+
+	// Update total staked
+	ws.totalStaked += amount
+
+	return nil
+}
+
+// Undelegate unstakes tokens from a validator
+func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount int64) error {
+	ws := sm.worldState
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Validate addresses
+	if err := account.ValidateAddress(delegatorAddr); err != nil {
+		return fmt.Errorf("invalid delegator address: %v", err)
+	}
+	if err := account.ValidateAddress(validatorAddr); err != nil {
+		return fmt.Errorf("invalid validator address: %v", err)
+	}
+
+	// Get delegator account
+	delegator, err := ws.accountManager.GetAccount(delegatorAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get delegator account: %v", err)
+	}
+
+	// Check delegation exists
+	if delegator.DelegatedTo == nil {
+		return fmt.Errorf("no delegations found for account %s", delegatorAddr)
+	}
+
+	delegatedAmount, exists := delegator.DelegatedTo[validatorAddr]
+	if !exists || delegatedAmount < amount {
+		return fmt.Errorf("insufficient delegation: have %d, need %d", delegatedAmount, amount)
+	}
+
+	// Get validator
+	validator, exists := ws.validators[validatorAddr]
+	if !exists {
+		return fmt.Errorf("validator %s not found", validatorAddr)
+	}
+
+	// Update delegator account (with unbonding period)
+	delegator.StakedAmount -= amount
+	delegator.DelegatedTo[validatorAddr] -= amount
+	if delegator.DelegatedTo[validatorAddr] == 0 {
+		delete(delegator.DelegatedTo, validatorAddr)
+	}
+
+	// Update validator
+	validator.DelegatedStake -= amount
+	validator.Stake -= amount
+	if validator.Delegators != nil {
+		validator.Delegators[delegatorAddr] -= amount
+		if validator.Delegators[delegatorAddr] == 0 {
+			delete(validator.Delegators, delegatorAddr)
+		}
+	}
+	validator.UpdatedAt = time.Now().Unix()
+
+	// Apply unbonding period (tokens will be available after period)
+	// For now, immediately return tokens (in production, implement unbonding queue)
+	delegator.Balance += amount
+
+	// Update accounts
+	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
+		return fmt.Errorf("failed to update delegator account: %v", err)
+	}
+
+	// Update total staked
+	ws.totalStaked -= amount
+
+	return nil
+}
+
+// DistributeRewards distributes staking rewards to validators and delegators
+func (sm *StakingManager) DistributeRewards(totalRewards int64) error {
+	ws := sm.worldState
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	if totalRewards <= 0 {
+		return fmt.Errorf("total rewards must be positive")
+	}
+
+	activeValidators := ws.GetActiveValidators()
+	if len(activeValidators) == 0 {
+		return fmt.Errorf("no active validators to distribute rewards")
+	}
+
+	// Calculate total voting power
+	totalVotingPower := int64(0)
+	for _, validator := range activeValidators {
+		totalVotingPower += validator.Stake
+	}
+
+	if totalVotingPower == 0 {
+		return fmt.Errorf("total voting power is zero")
+	}
+
+	// Distribute rewards proportionally
+	for _, validator := range activeValidators {
+		// Calculate validator's share
+		validatorReward := (totalRewards * validator.Stake) / totalVotingPower
+
+		// Calculate commission (handle float64 commission rate)
+		commission := (validatorReward * int64(validator.Commission)) / 10000 // Commission in basis points
+		delegatorReward := validatorReward - commission
+
+		// Reward validator (commission)
+		validatorAccount, err := ws.accountManager.GetAccount(validator.Address)
+		if err != nil {
+			continue // Skip if validator account not found
+		}
+		validatorAccount.Rewards += commission
+		validatorAccount.Balance += commission
+		ws.accountManager.UpdateAccount(validatorAccount)
+
+		// Distribute remaining rewards to delegators proportionally
+		if validator.DelegatedStake > 0 && len(validator.Delegators) > 0 {
+			for delegatorAddr, delegatedAmount := range validator.Delegators {
+				delegatorShare := (delegatorReward * delegatedAmount) / validator.DelegatedStake
+
+				delegatorAccount, err := ws.accountManager.GetAccount(delegatorAddr)
+				if err != nil {
+					continue // Skip if delegator account not found
+				}
+
+				delegatorAccount.Rewards += delegatorShare
+				delegatorAccount.Balance += delegatorShare
+				ws.accountManager.UpdateAccount(delegatorAccount)
+			}
+		} else {
+			// If no delegators, validator gets all rewards
+			validatorAccount.Rewards += delegatorReward
+			validatorAccount.Balance += delegatorReward
+			ws.accountManager.UpdateAccount(validatorAccount)
+		}
+
+		// Update total supply
+		ws.totalSupply += validatorReward
 	}
 
 	return nil
+}
+
+// GetDelegations returns all delegations for an account
+func (sm *StakingManager) GetDelegations(delegatorAddr string) (map[string]int64, error) {
+	ws := sm.worldState
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	account, err := ws.accountManager.GetAccount(delegatorAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get account: %v", err)
+	}
+
+	if account.DelegatedTo == nil {
+		return make(map[string]int64), nil
+	}
+
+	// Return copy to prevent external modification
+	delegations := make(map[string]int64)
+	for validator, amount := range account.DelegatedTo {
+		delegations[validator] = amount
+	}
+
+	return delegations, nil
+}
+
+// Helper methods for transaction pool integration
+func (ws *WorldState) GetTransactionPool() *transaction.Pool {
+	return ws.txPool
+}
+
+func (ws *WorldState) GetTransactionValidator() *transaction.Validator {
+	return ws.txValidator
+}
+
+func (ws *WorldState) GetTransactionExecutor() *transaction.Executor {
+	return ws.txExecutor
+}
+
+func (ws *WorldState) GetAccountManager() *account.AccountManager {
+	return ws.accountManager
+}
+
+// UpdateTotalStaked recalculates total staked amount (useful for consistency checks)
+func (ws *WorldState) UpdateTotalStaked() {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	total := int64(0)
+	for _, validator := range ws.validators {
+		total += validator.Stake
+	}
+	ws.totalStaked = total
+}
+
+// GetValidatorCount returns the number of validators
+func (ws *WorldState) GetValidatorCount() int {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	return len(ws.validators)
+}
+
+// GetActiveValidatorCount returns the number of active validators
+func (ws *WorldState) GetActiveValidatorCount() int {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	count := 0
+	for _, validator := range ws.validators {
+		if validator.Active && !ws.isValidatorJailed(validator) {
+			count++
+		}
+	}
+	return count
+}
+
+// GetAccountCount returns the number of accounts
+func (ws *WorldState) GetAccountCount() int {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	accounts := ws.accountManager.GetAllAccounts()
+	return len(accounts)
+}
+
+// Cleanup removes old completed transactions and performs maintenance
+func (ws *WorldState) Cleanup() {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Clean up stale transactions (older than 1 hour)
+	maxAge := time.Hour
+	removedCount := ws.txPool.CleanupStaleTransactions(maxAge)
+
+	// Log cleanup if any transactions were removed
+	if removedCount > 0 {
+		// Could add logging here if needed
+		_ = removedCount // Acknowledge the return value
+	}
+
+	// Update state root after cleanup
+	ws.updateStateRoot()
 }
