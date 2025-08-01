@@ -79,16 +79,66 @@ func (TransactionType) EnumDescriptor() ([]byte, []int) {
 	return file_proto_account_proto_rawDescGZIP(), []int{0}
 }
 
+// You might also want to add validator-related transaction types
+type ValidatorTransactionType int32
+
+const (
+	ValidatorTransactionType_CREATE_VALIDATOR ValidatorTransactionType = 0
+	ValidatorTransactionType_EDIT_VALIDATOR   ValidatorTransactionType = 1
+	ValidatorTransactionType_UNJAIL_VALIDATOR ValidatorTransactionType = 2
+)
+
+// Enum value maps for ValidatorTransactionType.
+var (
+	ValidatorTransactionType_name = map[int32]string{
+		0: "CREATE_VALIDATOR",
+		1: "EDIT_VALIDATOR",
+		2: "UNJAIL_VALIDATOR",
+	}
+	ValidatorTransactionType_value = map[string]int32{
+		"CREATE_VALIDATOR": 0,
+		"EDIT_VALIDATOR":   1,
+		"UNJAIL_VALIDATOR": 2,
+	}
+)
+
+func (x ValidatorTransactionType) Enum() *ValidatorTransactionType {
+	p := new(ValidatorTransactionType)
+	*p = x
+	return p
+}
+
+func (x ValidatorTransactionType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ValidatorTransactionType) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_account_proto_enumTypes[1].Descriptor()
+}
+
+func (ValidatorTransactionType) Type() protoreflect.EnumType {
+	return &file_proto_account_proto_enumTypes[1]
+}
+
+func (x ValidatorTransactionType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ValidatorTransactionType.Descriptor instead.
+func (ValidatorTransactionType) EnumDescriptor() ([]byte, []int) {
+	return file_proto_account_proto_rawDescGZIP(), []int{1}
+}
+
 type Account struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Address       string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
 	Balance       int64                  `protobuf:"varint,2,opt,name=balance,proto3" json:"balance,omitempty"`
 	Nonce         uint64                 `protobuf:"varint,3,opt,name=nonce,proto3" json:"nonce,omitempty"`
 	StakedAmount  int64                  `protobuf:"varint,4,opt,name=staked_amount,json=stakedAmount,proto3" json:"staked_amount,omitempty"`
-	DelegatedTo   map[string]int64       `protobuf:"bytes,5,rep,name=delegated_to,json=delegatedTo,proto3" json:"delegated_to,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	DelegatedTo   map[string]int64       `protobuf:"bytes,5,rep,name=delegated_to,json=delegatedTo,proto3" json:"delegated_to,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"` // validator -> amount
 	Rewards       int64                  `protobuf:"varint,6,opt,name=rewards,proto3" json:"rewards,omitempty"`
-	CodeHash      []byte                 `protobuf:"bytes,7,opt,name=code_hash,json=codeHash,proto3" json:"code_hash,omitempty"`
-	StorageRoot   []byte                 `protobuf:"bytes,8,opt,name=storage_root,json=storageRoot,proto3" json:"storage_root,omitempty"`
+	CodeHash      []byte                 `protobuf:"bytes,7,opt,name=code_hash,json=codeHash,proto3" json:"code_hash,omitempty"`          // Future: smart contracts
+	StorageRoot   []byte                 `protobuf:"bytes,8,opt,name=storage_root,json=storageRoot,proto3" json:"storage_root,omitempty"` // Future: contract storage
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -192,6 +242,7 @@ type Transaction struct {
 	Type          TransactionType        `protobuf:"varint,9,opt,name=type,proto3,enum=thrylos.core.TransactionType" json:"type,omitempty"`
 	Signature     []byte                 `protobuf:"bytes,10,opt,name=signature,proto3" json:"signature,omitempty"`
 	Hash          string                 `protobuf:"bytes,11,opt,name=hash,proto3" json:"hash,omitempty"`
+	Timestamp     int64                  `protobuf:"varint,12,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -301,6 +352,13 @@ func (x *Transaction) GetHash() string {
 		return x.Hash
 	}
 	return ""
+}
+
+func (x *Transaction) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
 }
 
 type Block struct {
@@ -471,6 +529,207 @@ func (x *BlockHeader) GetGasLimit() int64 {
 	return 0
 }
 
+type Validator struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Address        string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	Pubkey         []byte                 `protobuf:"bytes,2,opt,name=pubkey,proto3" json:"pubkey,omitempty"`
+	Stake          int64                  `protobuf:"varint,3,opt,name=stake,proto3" json:"stake,omitempty"`
+	SelfStake      int64                  `protobuf:"varint,4,opt,name=self_stake,json=selfStake,proto3" json:"self_stake,omitempty"`
+	DelegatedStake int64                  `protobuf:"varint,5,opt,name=delegated_stake,json=delegatedStake,proto3" json:"delegated_stake,omitempty"`
+	Delegators     map[string]int64       `protobuf:"bytes,6,rep,name=delegators,proto3" json:"delegators,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"` // delegator address -> amount
+	Commission     float64                `protobuf:"fixed64,7,opt,name=commission,proto3" json:"commission,omitempty"`                                                                          // commission rate (0.0 to 1.0)
+	Active         bool                   `protobuf:"varint,8,opt,name=active,proto3" json:"active,omitempty"`
+	BlocksProposed int64                  `protobuf:"varint,9,opt,name=blocks_proposed,json=blocksProposed,proto3" json:"blocks_proposed,omitempty"`
+	BlocksMissed   int64                  `protobuf:"varint,10,opt,name=blocks_missed,json=blocksMissed,proto3" json:"blocks_missed,omitempty"`
+	JailUntil      int64                  `protobuf:"varint,11,opt,name=jail_until,json=jailUntil,proto3" json:"jail_until,omitempty"` // Unix timestamp, 0 means not jailed
+	CreatedAt      int64                  `protobuf:"varint,12,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // When validator was created
+	UpdatedAt      int64                  `protobuf:"varint,13,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // Last update timestamp
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *Validator) Reset() {
+	*x = Validator{}
+	mi := &file_proto_account_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Validator) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Validator) ProtoMessage() {}
+
+func (x *Validator) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_account_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Validator.ProtoReflect.Descriptor instead.
+func (*Validator) Descriptor() ([]byte, []int) {
+	return file_proto_account_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Validator) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *Validator) GetPubkey() []byte {
+	if x != nil {
+		return x.Pubkey
+	}
+	return nil
+}
+
+func (x *Validator) GetStake() int64 {
+	if x != nil {
+		return x.Stake
+	}
+	return 0
+}
+
+func (x *Validator) GetSelfStake() int64 {
+	if x != nil {
+		return x.SelfStake
+	}
+	return 0
+}
+
+func (x *Validator) GetDelegatedStake() int64 {
+	if x != nil {
+		return x.DelegatedStake
+	}
+	return 0
+}
+
+func (x *Validator) GetDelegators() map[string]int64 {
+	if x != nil {
+		return x.Delegators
+	}
+	return nil
+}
+
+func (x *Validator) GetCommission() float64 {
+	if x != nil {
+		return x.Commission
+	}
+	return 0
+}
+
+func (x *Validator) GetActive() bool {
+	if x != nil {
+		return x.Active
+	}
+	return false
+}
+
+func (x *Validator) GetBlocksProposed() int64 {
+	if x != nil {
+		return x.BlocksProposed
+	}
+	return 0
+}
+
+func (x *Validator) GetBlocksMissed() int64 {
+	if x != nil {
+		return x.BlocksMissed
+	}
+	return 0
+}
+
+func (x *Validator) GetJailUntil() int64 {
+	if x != nil {
+		return x.JailUntil
+	}
+	return 0
+}
+
+func (x *Validator) GetCreatedAt() int64 {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return 0
+}
+
+func (x *Validator) GetUpdatedAt() int64 {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return 0
+}
+
+// And potentially a ValidatorSet message for consensus
+type ValidatorSet struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Validators       []*Validator           `protobuf:"bytes,1,rep,name=validators,proto3" json:"validators,omitempty"`
+	TotalVotingPower int64                  `protobuf:"varint,2,opt,name=total_voting_power,json=totalVotingPower,proto3" json:"total_voting_power,omitempty"`
+	Height           int64                  `protobuf:"varint,3,opt,name=height,proto3" json:"height,omitempty"` // Block height this validator set is for
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ValidatorSet) Reset() {
+	*x = ValidatorSet{}
+	mi := &file_proto_account_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidatorSet) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidatorSet) ProtoMessage() {}
+
+func (x *ValidatorSet) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_account_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidatorSet.ProtoReflect.Descriptor instead.
+func (*ValidatorSet) Descriptor() ([]byte, []int) {
+	return file_proto_account_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ValidatorSet) GetValidators() []*Validator {
+	if x != nil {
+		return x.Validators
+	}
+	return nil
+}
+
+func (x *ValidatorSet) GetTotalVotingPower() int64 {
+	if x != nil {
+		return x.TotalVotingPower
+	}
+	return 0
+}
+
+func (x *ValidatorSet) GetHeight() int64 {
+	if x != nil {
+		return x.Height
+	}
+	return 0
+}
+
 var File_proto_account_proto protoreflect.FileDescriptor
 
 const file_proto_account_proto_rawDesc = "" +
@@ -487,7 +746,7 @@ const file_proto_account_proto_rawDesc = "" +
 	"\fstorage_root\x18\b \x01(\fR\vstorageRoot\x1a>\n" +
 	"\x10DelegatedToEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\x97\x02\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\xb5\x02\n" +
 	"\vTransaction\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\tR\x04from\x12\x0e\n" +
@@ -500,7 +759,8 @@ const file_proto_account_proto_rawDesc = "" +
 	"\x04type\x18\t \x01(\x0e2\x1d.thrylos.core.TransactionTypeR\x04type\x12\x1c\n" +
 	"\tsignature\x18\n" +
 	" \x01(\fR\tsignature\x12\x12\n" +
-	"\x04hash\x18\v \x01(\tR\x04hash\"\xab\x01\n" +
+	"\x04hash\x18\v \x01(\tR\x04hash\x12\x1c\n" +
+	"\ttimestamp\x18\f \x01(\x03R\ttimestamp\"\xab\x01\n" +
 	"\x05Block\x121\n" +
 	"\x06header\x18\x01 \x01(\v2\x19.thrylos.core.BlockHeaderR\x06header\x12=\n" +
 	"\ftransactions\x18\x02 \x03(\v2\x19.thrylos.core.TransactionR\ftransactions\x12\x12\n" +
@@ -515,7 +775,39 @@ const file_proto_account_proto_rawDesc = "" +
 	"\n" +
 	"state_root\x18\x06 \x01(\tR\tstateRoot\x12\x19\n" +
 	"\bgas_used\x18\a \x01(\x03R\agasUsed\x12\x1b\n" +
-	"\tgas_limit\x18\b \x01(\x03R\bgasLimit*h\n" +
+	"\tgas_limit\x18\b \x01(\x03R\bgasLimit\"\x86\x04\n" +
+	"\tValidator\x12\x18\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x16\n" +
+	"\x06pubkey\x18\x02 \x01(\fR\x06pubkey\x12\x14\n" +
+	"\x05stake\x18\x03 \x01(\x03R\x05stake\x12\x1d\n" +
+	"\n" +
+	"self_stake\x18\x04 \x01(\x03R\tselfStake\x12'\n" +
+	"\x0fdelegated_stake\x18\x05 \x01(\x03R\x0edelegatedStake\x12G\n" +
+	"\n" +
+	"delegators\x18\x06 \x03(\v2'.thrylos.core.Validator.DelegatorsEntryR\n" +
+	"delegators\x12\x1e\n" +
+	"\n" +
+	"commission\x18\a \x01(\x01R\n" +
+	"commission\x12\x16\n" +
+	"\x06active\x18\b \x01(\bR\x06active\x12'\n" +
+	"\x0fblocks_proposed\x18\t \x01(\x03R\x0eblocksProposed\x12#\n" +
+	"\rblocks_missed\x18\n" +
+	" \x01(\x03R\fblocksMissed\x12\x1d\n" +
+	"\n" +
+	"jail_until\x18\v \x01(\x03R\tjailUntil\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\f \x01(\x03R\tcreatedAt\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\r \x01(\x03R\tupdatedAt\x1a=\n" +
+	"\x0fDelegatorsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\x8d\x01\n" +
+	"\fValidatorSet\x127\n" +
+	"\n" +
+	"validators\x18\x01 \x03(\v2\x17.thrylos.core.ValidatorR\n" +
+	"validators\x12,\n" +
+	"\x12total_voting_power\x18\x02 \x01(\x03R\x10totalVotingPower\x12\x16\n" +
+	"\x06height\x18\x03 \x01(\x03R\x06height*h\n" +
 	"\x0fTransactionType\x12\f\n" +
 	"\bTRANSFER\x10\x00\x12\t\n" +
 	"\x05STAKE\x10\x01\x12\v\n" +
@@ -523,7 +815,11 @@ const file_proto_account_proto_rawDesc = "" +
 	"\bDELEGATE\x10\x03\x12\x0e\n" +
 	"\n" +
 	"UNDELEGATE\x10\x04\x12\x11\n" +
-	"\rCLAIM_REWARDS\x10\x05B/Z-github.com/thrylos-labs/go-thrylos/proto/coreb\x06proto3"
+	"\rCLAIM_REWARDS\x10\x05*Z\n" +
+	"\x18ValidatorTransactionType\x12\x14\n" +
+	"\x10CREATE_VALIDATOR\x10\x00\x12\x12\n" +
+	"\x0eEDIT_VALIDATOR\x10\x01\x12\x14\n" +
+	"\x10UNJAIL_VALIDATOR\x10\x02B/Z-github.com/thrylos-labs/thrylos-v2/proto/coreb\x06proto3"
 
 var (
 	file_proto_account_proto_rawDescOnce sync.Once
@@ -537,26 +833,32 @@ func file_proto_account_proto_rawDescGZIP() []byte {
 	return file_proto_account_proto_rawDescData
 }
 
-var file_proto_account_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_account_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_proto_account_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_proto_account_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_proto_account_proto_goTypes = []any{
-	(TransactionType)(0), // 0: thrylos.core.TransactionType
-	(*Account)(nil),      // 1: thrylos.core.Account
-	(*Transaction)(nil),  // 2: thrylos.core.Transaction
-	(*Block)(nil),        // 3: thrylos.core.Block
-	(*BlockHeader)(nil),  // 4: thrylos.core.BlockHeader
-	nil,                  // 5: thrylos.core.Account.DelegatedToEntry
+	(TransactionType)(0),          // 0: thrylos.core.TransactionType
+	(ValidatorTransactionType)(0), // 1: thrylos.core.ValidatorTransactionType
+	(*Account)(nil),               // 2: thrylos.core.Account
+	(*Transaction)(nil),           // 3: thrylos.core.Transaction
+	(*Block)(nil),                 // 4: thrylos.core.Block
+	(*BlockHeader)(nil),           // 5: thrylos.core.BlockHeader
+	(*Validator)(nil),             // 6: thrylos.core.Validator
+	(*ValidatorSet)(nil),          // 7: thrylos.core.ValidatorSet
+	nil,                           // 8: thrylos.core.Account.DelegatedToEntry
+	nil,                           // 9: thrylos.core.Validator.DelegatorsEntry
 }
 var file_proto_account_proto_depIdxs = []int32{
-	5, // 0: thrylos.core.Account.delegated_to:type_name -> thrylos.core.Account.DelegatedToEntry
+	8, // 0: thrylos.core.Account.delegated_to:type_name -> thrylos.core.Account.DelegatedToEntry
 	0, // 1: thrylos.core.Transaction.type:type_name -> thrylos.core.TransactionType
-	4, // 2: thrylos.core.Block.header:type_name -> thrylos.core.BlockHeader
-	2, // 3: thrylos.core.Block.transactions:type_name -> thrylos.core.Transaction
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	5, // 2: thrylos.core.Block.header:type_name -> thrylos.core.BlockHeader
+	3, // 3: thrylos.core.Block.transactions:type_name -> thrylos.core.Transaction
+	9, // 4: thrylos.core.Validator.delegators:type_name -> thrylos.core.Validator.DelegatorsEntry
+	6, // 5: thrylos.core.ValidatorSet.validators:type_name -> thrylos.core.Validator
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_proto_account_proto_init() }
@@ -569,8 +871,8 @@ func file_proto_account_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_account_proto_rawDesc), len(file_proto_account_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   5,
+			NumEnums:      2,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -33,6 +33,10 @@ func NewSignature(sigBytes []byte) Signature {
 	return &signature{sig: s}
 }
 
+func SignatureFromBytes(sigBytes []byte) (Signature, error) {
+	return NewSignatureWithError(sigBytes)
+}
+
 // NewSignatureWithError is an alternative constructor if errors are preferred
 func NewSignatureWithError(sigBytes []byte) (Signature, error) {
 	if len(sigBytes) != mldsa44.SignatureSize {

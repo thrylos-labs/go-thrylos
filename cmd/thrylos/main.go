@@ -9,7 +9,7 @@ import (
 
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/chain"
-	core "github.com/thrylos-labs/go-thrylos/proto/core/proto"
+	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
 func main() {

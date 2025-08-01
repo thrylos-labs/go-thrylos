@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	"github.com/thrylos-labs/go-thrylos/config"
-	core "github.com/thrylos-labs/go-thrylos/proto/core/proto"
+	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
 type Blockchain struct {

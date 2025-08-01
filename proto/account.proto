@@ -2,17 +2,17 @@ syntax = "proto3";
 
 package thrylos.core;
 
-option go_package = "github.com/thrylos-labs/go-thrylos/proto/core";
+option go_package = "github.com/thrylos-labs/thrylos-v2/proto/core";
 
 message Account {
   string address = 1;
   int64 balance = 2;
   uint64 nonce = 3;
   int64 staked_amount = 4;
-  map<string, int64> delegated_to = 5;
+  map<string, int64> delegated_to = 5; // validator -> amount
   int64 rewards = 6;
-  bytes code_hash = 7;
-  bytes storage_root = 8;
+  bytes code_hash = 7; // Future: smart contracts
+  bytes storage_root = 8; // Future: contract storage
 }
 
 message Transaction {
@@ -27,6 +27,7 @@ message Transaction {
   TransactionType type = 9;
   bytes signature = 10;
   string hash = 11;
+  int64 timestamp = 12;
 }
 
 enum TransactionType {
@@ -54,4 +55,34 @@ message BlockHeader {
   string state_root = 6;
   int64 gas_used = 7;
   int64 gas_limit = 8;
+}
+
+message Validator {
+  string address = 1;
+  bytes pubkey = 2;
+  int64 stake = 3;
+  int64 self_stake = 4;
+  int64 delegated_stake = 5;
+  map<string, int64> delegators = 6; // delegator address -> amount
+  double commission = 7; // commission rate (0.0 to 1.0)
+  bool active = 8;
+  int64 blocks_proposed = 9;
+  int64 blocks_missed = 10;
+  int64 jail_until = 11; // Unix timestamp, 0 means not jailed
+  int64 created_at = 12; // When validator was created
+  int64 updated_at = 13; // Last update timestamp
+}
+
+// You might also want to add validator-related transaction types
+enum ValidatorTransactionType {
+  CREATE_VALIDATOR = 0;
+  EDIT_VALIDATOR = 1;
+  UNJAIL_VALIDATOR = 2;
+}
+
+// And potentially a ValidatorSet message for consensus
+message ValidatorSet {
+  repeated Validator validators = 1;
+  int64 total_voting_power = 2;
+  int64 height = 3; // Block height this validator set is for
 }

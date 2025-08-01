@@ -1,12 +1,13 @@
 syntax = "proto3";
+
 package thrylos.api;
 
-import "account.proto";
-import "consensus.proto";
+import "proto/account.proto";
 
-option go_package = "github.com/thrylos-labs/go-thrylos/proto/core";
+option go_package = "github.com/thrylos-labs/go-thrylos/proto/api";
 
-// Request/Response messages for JSON-RPC
+// Request/Response messages for JSON-RPC API
+
 message GetBalanceRequest {
   string address = 1;
 }
@@ -35,17 +36,328 @@ message SendTransactionRequest {
 message SendTransactionResponse {
   string tx_hash = 1;
   string status = 2;
+  string error = 3;
+}
+
+message GetTransactionRequest {
+  string tx_hash = 1;
+}
+
+message GetTransactionResponse {
+  thrylos.core.Transaction transaction = 1;
+  TransactionReceipt receipt = 2;
+}
+
+message TransactionReceipt {
+  string tx_hash = 1;
+  int32 status = 2; // 1 = success, 0 = failure
+  int64 gas_used = 3;
+  int64 block_height = 4;
+  string block_hash = 5;
+  string error = 6;
+  int64 timestamp = 7;
+}
+
+message GetBlockRequest {
+  oneof identifier {
+    int64 height = 1;
+    string hash = 2;
+  }
+}
+
+message GetBlockResponse {
+  thrylos.core.Block block = 1;
 }
 
 message StakeRequest {
   string delegator = 1;
   string validator = 2;
   int64 amount = 3;
-  bytes signature = 4;
+  int64 gas = 4;
+  int64 gas_price = 5;
+  uint64 nonce = 6;
+  bytes signature = 7;
 }
 
 message StakeResponse {
   string tx_hash = 1;
   string status = 2;
   int64 new_staked_amount = 3;
+  string error = 4;
+}
+
+message UnstakeRequest {
+  string delegator = 1;
+  int64 amount = 2;
+  int64 gas = 3;
+  int64 gas_price = 4;
+  uint64 nonce = 5;
+  bytes signature = 6;
+}
+
+message UnstakeResponse {
+  string tx_hash = 1;
+  string status = 2;
+  int64 new_staked_amount = 3;
+  string error = 4;
+}
+
+message GetValidatorsRequest {
+  bool active_only = 1;
+}
+
+message GetValidatorsResponse {
+  repeated thrylos.core.Validator validators = 1;
+  int64 total_stake = 2;
+}
+
+message GetValidatorRequest {
+  string address = 1;
+}
+
+message GetValidatorResponse {
+  thrylos.core.Validator validator = 1;
+}
+
+message GetNetworkStatusRequest {}
+
+message GetNetworkStatusResponse {
+  int64 height = 1;
+  string latest_block_hash = 2;
+  int64 total_transactions = 3;
+  int64 pending_transactions = 4;
+  int32 active_validators = 5;
+  int64 total_supply = 6;
+  int64 total_staked = 7;
+  int32 shard_id = 8;
+  int32 total_shards = 9;
+  string state_root = 10;
+}
+
+message GetPendingTransactionsRequest {
+  string address = 1; // Optional: filter by address
+  int32 limit = 2; // Optional: limit number of results
+}
+
+message GetPendingTransactionsResponse {
+  repeated thrylos.core.Transaction transactions = 1;
+  int32 total_count = 2;
+}
+
+message EstimateGasRequest {
+  string from = 1;
+  string to = 2;
+  int64 amount = 3;
+  bytes data = 4;
+  thrylos.core.TransactionType type = 5;
+}
+
+message EstimateGasResponse {
+  int64 gas_estimate = 1;
+  int64 gas_price = 2;
+  int64 total_cost = 3;
+}
+
+// WebSocket subscription messages
+message SubscribeRequest {
+  SubscriptionType type = 1;
+  string filter = 2; // Optional filter (e.g., address for balance updates)
+}
+
+enum SubscriptionType {
+  NEW_BLOCKS = 0;
+  NEW_TRANSACTIONS = 1;
+  BALANCE_UPDATES = 2;
+  VALIDATOR_UPDATES = 3;
+}
+
+message SubscribeResponse {
+  string subscription_id = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message NotificationMessage {
+  string subscription_id = 1;
+  SubscriptionType type = 2;
+  bytes data = 3; // Serialized data based on subscription type
+  int64 timestamp = 4;
+}
+
+// Request/Response messages for JSON-RPC API
+
+message GetBalanceRequest {
+  string address = 1;
+}
+
+message GetBalanceResponse {
+  string address = 1;
+  int64 balance = 2;
+  int64 staked_amount = 3;
+  uint64 nonce = 4;
+  map<string, int64> delegated_to = 5;
+  int64 rewards = 6;
+}
+
+message SendTransactionRequest {
+  string from = 1;
+  string to = 2;
+  int64 amount = 3;
+  int64 gas = 4;
+  int64 gas_price = 5;
+  uint64 nonce = 6;
+  bytes data = 7;
+  thrylos.core.TransactionType type = 8;
+  bytes signature = 9;
+}
+
+message SendTransactionResponse {
+  string tx_hash = 1;
+  string status = 2;
+  string error = 3;
+}
+
+message GetTransactionRequest {
+  string tx_hash = 1;
+}
+
+message GetTransactionResponse {
+  thrylos.core.Transaction transaction = 1;
+  TransactionReceipt receipt = 2;
+}
+
+message TransactionReceipt {
+  string tx_hash = 1;
+  int32 status = 2; // 1 = success, 0 = failure
+  int64 gas_used = 3;
+  int64 block_height = 4;
+  string block_hash = 5;
+  string error = 6;
+  int64 timestamp = 7;
+}
+
+message GetBlockRequest {
+  oneof identifier {
+    int64 height = 1;
+    string hash = 2;
+  }
+}
+
+message GetBlockResponse {
+  thrylos.core.Block block = 1;
+}
+
+message StakeRequest {
+  string delegator = 1;
+  string validator = 2;
+  int64 amount = 3;
+  int64 gas = 4;
+  int64 gas_price = 5;
+  uint64 nonce = 6;
+  bytes signature = 7;
+}
+
+message StakeResponse {
+  string tx_hash = 1;
+  string status = 2;
+  int64 new_staked_amount = 3;
+  string error = 4;
+}
+
+message UnstakeRequest {
+  string delegator = 1;
+  int64 amount = 2;
+  int64 gas = 3;
+  int64 gas_price = 4;
+  uint64 nonce = 5;
+  bytes signature = 6;
+}
+
+message UnstakeResponse {
+  string tx_hash = 1;
+  string status = 2;
+  int64 new_staked_amount = 3;
+  string error = 4;
+}
+
+message GetValidatorsRequest {
+  bool active_only = 1;
+}
+
+message GetValidatorsResponse {
+  repeated thrylos.core.Validator validators = 1;
+  int64 total_stake = 2;
+}
+
+message GetValidatorRequest {
+  string address = 1;
+}
+
+message GetValidatorResponse {
+  thrylos.core.Validator validator = 1;
+}
+
+message GetNetworkStatusRequest {}
+
+message GetNetworkStatusResponse {
+  int64 height = 1;
+  string latest_block_hash = 2;
+  int64 total_transactions = 3;
+  int64 pending_transactions = 4;
+  int32 active_validators = 5;
+  int64 total_supply = 6;
+  int64 total_staked = 7;
+  int32 shard_id = 8;
+  int32 total_shards = 9;
+  string state_root = 10;
+}
+
+message GetPendingTransactionsRequest {
+  string address = 1; // Optional: filter by address
+  int32 limit = 2; // Optional: limit number of results
+}
+
+message GetPendingTransactionsResponse {
+  repeated thrylos.core.Transaction transactions = 1;
+  int32 total_count = 2;
+}
+
+message EstimateGasRequest {
+  string from = 1;
+  string to = 2;
+  int64 amount = 3;
+  bytes data = 4;
+  thrylos.core.TransactionType type = 5;
+}
+
+message EstimateGasResponse {
+  int64 gas_estimate = 1;
+  int64 gas_price = 2;
+  int64 total_cost = 3;
+}
+
+// WebSocket subscription messages
+message SubscribeRequest {
+  SubscriptionType type = 1;
+  string filter = 2; // Optional filter (e.g., address for balance updates)
+}
+
+enum SubscriptionType {
+  NEW_BLOCKS = 0;
+  NEW_TRANSACTIONS = 1;
+  BALANCE_UPDATES = 2;
+  VALIDATOR_UPDATES = 3;
+}
+
+message SubscribeResponse {
+  string subscription_id = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message NotificationMessage {
+  string subscription_id = 1;
+  SubscriptionType type = 2;
+  bytes data = 3; // Serialized data based on subscription type
+  int64 timestamp = 4;
 }
