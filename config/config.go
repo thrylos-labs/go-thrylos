@@ -68,6 +68,19 @@ type Config struct {
 
 	// API configuration
 	API APIConfig `json:"api"`
+
+	// P2P networking configuration
+	P2P P2PConfig `json:"p2p" yaml:"p2p"`
+}
+
+// P2PConfig represents P2P networking configuration
+type P2PConfig struct {
+	Enabled        bool     `json:"enabled" yaml:"enabled"`
+	ListenPort     int      `json:"listen_port" yaml:"listen_port"`
+	BootstrapPeers []string `json:"bootstrap_peers" yaml:"bootstrap_peers"`
+	MaxPeers       int      `json:"max_peers" yaml:"max_peers"`
+	EnableMDNS     bool     `json:"enable_mdns" yaml:"enable_mdns"`
+	EnableDHT      bool     `json:"enable_dht" yaml:"enable_dht"`
 }
 
 type NetworkConfig struct {
@@ -164,7 +177,6 @@ type APIConfig struct {
 	EnableMetrics bool   `json:"enable_metrics"`
 }
 
-// Load returns a default configuration with 100M supply
 func Load() (*Config, error) {
 	return &Config{
 		NodeID:   "thrylos-v2-node",
@@ -257,6 +269,16 @@ func Load() (*Config, error) {
 			EnableCORS:    true,
 			RateLimit:     1000, // 1000 requests per minute
 			EnableMetrics: true,
+		},
+
+		// ADD THIS P2P CONFIGURATION:
+		P2P: P2PConfig{
+			Enabled:        true,
+			ListenPort:     9000,
+			BootstrapPeers: []string{},
+			MaxPeers:       50,
+			EnableMDNS:     true,
+			EnableDHT:      true,
 		},
 	}, nil
 }

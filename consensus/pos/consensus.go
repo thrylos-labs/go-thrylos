@@ -187,6 +187,14 @@ func (ce *ConsensusEngine) consensusLoop() {
 	}
 }
 
+func (ce *ConsensusEngine) ValidateBlock(block *core.Block) error {
+	if ce.blockValidator == nil {
+		return fmt.Errorf("block validator not initialized")
+	}
+
+	return ce.blockValidator.ValidateBlock(block)
+}
+
 // processSlot handles consensus for a single slot
 func (ce *ConsensusEngine) processSlot() {
 	ce.mu.Lock()
@@ -215,7 +223,7 @@ func (ce *ConsensusEngine) processSlot() {
 	}
 
 	// Always create attestation if we're a validator
-	if ce.isValidator() {
+	if ce.isCurrentNodeValidator() {
 		if err := ce.createAttestation(); err != nil {
 			fmt.Printf("Failed to create attestation: %v\n", err)
 		} else {
@@ -375,13 +383,18 @@ func (ce *ConsensusEngine) getRandomnessSeed(slot uint64) []byte {
 	return hash[:]
 }
 
-// isValidator checks if this node is an active validator
-func (ce *ConsensusEngine) isValidator() bool {
-	validator, err := ce.worldState.GetValidator(ce.nodeAddress)
+// IsValidator implements the chain.ConsensusEngine interface
+func (ce *ConsensusEngine) IsValidator(address string) bool {
+	validator, err := ce.worldState.GetValidator(address)
 	if err != nil {
 		return false
 	}
 	return validator.Active
+}
+
+// Helper method for internal use
+func (ce *ConsensusEngine) isCurrentNodeValidator() bool {
+	return ce.IsValidator(ce.nodeAddress)
 }
 
 // processAttestations processes received attestations
@@ -603,7 +616,7 @@ func (ce *ConsensusEngine) GetStats() map[string]interface{} {
 		"blocks_proposed":   ce.blocksProposed,
 		"blocks_missed":     ce.blocksMissed,
 		"attestations_made": ce.attestationsMade,
-		"is_validator":      ce.isValidator(),
+		"is_validator":      ce.isCurrentNodeValidator(),
 		"validator_count":   ce.validatorSet.Size(),
 		"active_validators": len(ce.worldState.GetActiveValidators()),
 		"attestation_count": len(ce.attestations),

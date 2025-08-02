@@ -1,3 +1,5 @@
+run thrylos: go build -o bin/thrylos ./cmd/thrylos && ./bin/thrylos
+
 Day 1-2: Project Setup & Core Types
 go// Start with these core files:
 

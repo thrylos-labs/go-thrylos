@@ -4,6 +4,8 @@ go 1.23.8
 
 toolchain go1.23.11
 
+require github.com/onsi/gomega v1.38.0
+
 require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
