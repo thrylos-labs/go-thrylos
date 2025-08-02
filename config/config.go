@@ -18,7 +18,7 @@ const (
 	MinimumTransfer       = BaseUnit / 100  // 0.01 THRYLOS (10,000,000 base units)
 	MinimumStakeAmount    = BaseUnit * 1    // 1 THRYLOS (1,000,000,000 base units)
 	MinimumDelegation     = BaseUnit / 10   // 0.1 THRYLOS (100,000,000 base units)
-	MinimumValidatorStake = BaseUnit * 32   // 32 THRYLOS (32,000,000,000 base units)
+	MinimumValidatorStake = BaseUnit * 34   // 34 THRYLOS (34,000,000,000 base units)
 
 	// Gas economics
 	BaseGasPrice   = int64(1000)     // 0.000001 THRYLOS per gas unit
@@ -92,9 +92,9 @@ type ConsensusConfig struct {
 }
 
 type StakingConfig struct {
-	MinValidatorStake          int64         `json:"min_validator_stake"` // 32 THRYLOS
+	MinValidatorStake          int64         `json:"min_validator_stake"` // 34 THRYLOS
 	MinDelegation              int64         `json:"min_delegation"`      // 0.1 THRYLOS
-	MinSelfStake               int64         `json:"min_self_stake"`      // 3.2 THRYLOS (10% of validator stake)
+	MinSelfStake               int64         `json:"min_self_stake"`      // 3.4 THRYLOS (10% of validator stake)
 	MaxCommission              float64       `json:"max_commission"`
 	CommissionChangeMax        float64       `json:"commission_change_max"` // Max commission change per day
 	UnbondingTime              time.Duration `json:"unbonding_time"`

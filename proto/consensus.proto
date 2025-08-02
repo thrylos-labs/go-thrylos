@@ -1,3 +1,5 @@
+// Not being used yet
+
 syntax = "proto3";
 package thrylos.consensus;
 
