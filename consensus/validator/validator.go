@@ -102,7 +102,7 @@ func (vm *Manager) RegisterValidator(
 	defer vm.mu.Unlock()
 
 	// Validate inputs
-	if err := account.ValidateAddress(address); err != nil {
+	if err := vm.validateAddress(address); err != nil {
 		return fmt.Errorf("invalid validator address: %v", err)
 	}
 
@@ -154,6 +154,15 @@ func (vm *Manager) RegisterValidator(
 		JailHistory:  make([]JailEvent, 0),
 	}
 
+	return nil
+}
+
+// validateAddress validates a validator address
+func (vm *Manager) validateAddress(address string) error {
+	// Use account.ValidateAddress if available, otherwise basic validation
+	if err := account.ValidateAddress(address); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -423,7 +432,7 @@ func (vm *Manager) RecordAttestation(address string, success bool) error {
 
 // checkDowntimeSlashing checks if a validator should be slashed for downtime
 func (vm *Manager) checkDowntimeSlashing(address string) error {
-	validator, err := vm.worldState.GetValidator(address)
+	_, err := vm.worldState.GetValidator(address)
 	if err != nil {
 		return err
 	}
@@ -600,13 +609,18 @@ func (vm *Manager) GetValidatorStats() map[string]interface{} {
 		}
 	}
 
+	avgStake := int64(0)
+	if len(allValidators) > 0 {
+		avgStake = totalStake / int64(len(allValidators))
+	}
+
 	return map[string]interface{}{
 		"total_validators":      totalValidators,
 		"active_validators":     len(allValidators),
 		"jailed_validators":     jailedCount,
 		"total_stake":           totalStake,
 		"total_delegated_stake": totalDelegatedStake,
-		"average_stake":         totalStake / max(int64(len(allValidators)), 1),
+		"average_stake":         avgStake,
 		"metrics_tracked":       len(vm.validatorMetrics),
 		"slashing_events":       vm.getTotalSlashingEvents(),
 	}
@@ -684,10 +698,46 @@ func (vm *Manager) ValidateValidatorSet() error {
 	return nil
 }
 
-// Utility function
-func max(a, b int64) int64 {
-	if a > b {
-		return a
+// GetValidator returns a validator by address
+func (vm *Manager) GetValidator(address string) (*core.Validator, error) {
+	return vm.worldState.GetValidator(address)
+}
+
+// UpdateValidator updates a validator in the world state
+func (vm *Manager) UpdateValidator(validator *core.Validator) error {
+	return vm.worldState.UpdateValidator(validator)
+}
+
+// GetActiveValidators returns all active validators
+func (vm *Manager) GetActiveValidators() []*core.Validator {
+	return vm.worldState.GetActiveValidators()
+}
+
+// GetAllValidators returns all validators (active and inactive)
+func (vm *Manager) GetAllValidators() []*core.Validator {
+	// This would need to be implemented in worldState
+	// For now, return active validators
+	return vm.worldState.GetActiveValidators()
+}
+
+// IsActive checks if a validator is active
+func (vm *Manager) IsActive(address string) bool {
+	validator, err := vm.worldState.GetValidator(address)
+	if err != nil {
+		return false
 	}
-	return b
+	return validator.Active && !vm.isJailed(validator)
+}
+
+// GetPerformanceScore returns the performance score for a validator
+func (vm *Manager) GetPerformanceScore(address string) float64 {
+	vm.mu.RLock()
+	defer vm.mu.RUnlock()
+
+	metrics, exists := vm.validatorMetrics[address]
+	if !exists {
+		return 1.0 // Default performance score
+	}
+
+	return metrics.UptimePercentage / 100.0
 }

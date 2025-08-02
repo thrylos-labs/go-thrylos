@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	// === UTILITY-BASED TOKEN ECONOMICS ===
+	// === UTILITY-BASED TOKEN ECONOMICS WITH DYNAMIC INFLATION ===
 
 	// Token denomination (1 THRYLOS = 1e9 base units)
 	BaseUnit      = int64(1000000000) // 1 THRYLOS
@@ -26,16 +26,23 @@ const (
 	StandardTxGas  = int64(21000)    // Standard transaction gas
 	StakingTxGas   = int64(50000)    // Staking transaction gas
 
-	// Reward economics (adjusted for 100M supply)
-	BlockReward     = BaseUnit / 50        // 0.02 THRYLOS per block (lower due to smaller supply)
-	ValidatorReward = BlockReward * 8 / 10 // 80% to validator
-	DelegatorReward = BlockReward * 2 / 10 // 20% to delegators
+	// Dynamic reward economics (no longer fixed)
+	// Note: Block rewards are now calculated dynamically based on inflation
+	BaseBlockReward = BaseUnit / 100 // 0.01 THRYLOS base (will be adjusted dynamically)
 
-	// Distribution constants
-	GenesisDistribution = TotalSupply * 20 / 100 // 20M THRYLOS (20%)
+	// Add missing constants
+	BlockReward         = BaseUnit / 50          // 0.02 THRYLOS per block
+	ValidatorReward     = BaseUnit / 100         // 0.01 THRYLOS validator reward
+	DelegatorReward     = BaseUnit / 200         // 0.005 THRYLOS delegator reward
 	ValidatorRewardPool = TotalSupply * 50 / 100 // 50M THRYLOS (50%)
+
+	// Distribution constants (unchanged)
+	GenesisDistribution = TotalSupply * 20 / 100 // 20M THRYLOS (20%)
 	LiquidityPool       = TotalSupply * 20 / 100 // 20M THRYLOS (20%)
 	DevelopmentPool     = TotalSupply * 10 / 100 // 10M THRYLOS (10%)
+
+	// Dynamic reward pool (70% of total supply for long-term rewards)
+	DynamicRewardPool = TotalSupply * 70 / 100 // 70M THRYLOS (70%) - distributed via inflation
 )
 
 type Config struct {
@@ -53,7 +60,7 @@ type Config struct {
 	// Staking configuration
 	Staking StakingConfig `json:"staking"`
 
-	// Economics configuration
+	// Economics configuration with dynamic inflation
 	Economics EconomicsConfig `json:"economics"`
 
 	// Sharding configuration

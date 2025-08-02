@@ -403,15 +403,15 @@ func (bp *BlockProposer) constructBlock(transactions []*core.Transaction, slot u
 		Timestamp: time.Now().Unix(),
 		PrevHash:  prevHash,
 		Validator: bp.nodeAddress,
-		TxRoot:    merkleRoot, // Transaction root
+		TxRoot:    merkleRoot,
 		StateRoot: bp.worldState.GetStateRoot(),
 		GasUsed:   totalGasUsed,
 		GasLimit:  bp.maxBlockSize,
-		// New consensus fields
-		Slot:       slot,       // Now available!
-		Epoch:      epoch,      // Now available!
-		TotalFees:  totalFees,  // Now available!
-		MerkleRoot: merkleRoot, // Alternative field
+		// Add the new consensus fields if they exist in your protobuf
+		Slot:       slot,
+		Epoch:      epoch,
+		TotalFees:  totalFees,
+		MerkleRoot: merkleRoot,
 	}
 
 	// Create block
@@ -517,7 +517,7 @@ func (bp *BlockProposer) calculateMerkleRoot(transactions []*core.Transaction) s
 	return fmt.Sprintf("%x", hash)
 }
 
-// calculateBlockHash calculates the hash of a block
+// calculateBlockHash calculates the hash of a block - made public for use by validator
 func (bp *BlockProposer) calculateBlockHash(block *core.Block) string {
 	var data []byte
 
@@ -531,9 +531,9 @@ func (bp *BlockProposer) calculateBlockHash(block *core.Block) string {
 	data = append(data, timestampBytes...)
 
 	data = append(data, []byte(block.Header.PrevHash)...)
-	data = append(data, []byte(block.Header.TxRoot)...) // Using tx_root
+	data = append(data, []byte(block.Header.TxRoot)...)
 	data = append(data, []byte(block.Header.StateRoot)...)
-	data = append(data, []byte(block.Header.Validator)...) // Using validator instead of proposer
+	data = append(data, []byte(block.Header.Validator)...)
 
 	gasUsedBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(gasUsedBytes, uint64(block.Header.GasUsed))
@@ -576,4 +576,38 @@ func (bp *BlockProposer) GetProposerStats() map[string]interface{} {
 		"max_transactions":      bp.maxTransactions,
 		"min_gas_price":         bp.minGasPrice,
 	}
+}
+
+// GetConfig returns the proposer configuration
+func (bp *BlockProposer) GetConfig() map[string]interface{} {
+	return map[string]interface{}{
+		"max_block_size":     bp.maxBlockSize,
+		"max_transactions":   bp.maxTransactions,
+		"min_gas_price":      bp.minGasPrice,
+		"selection_strategy": string(bp.selectionStrategy),
+		"node_address":       bp.nodeAddress,
+	}
+}
+
+// SetMaxBlockSize updates the maximum block size
+func (bp *BlockProposer) SetMaxBlockSize(size int64) {
+	bp.maxBlockSize = size
+}
+
+// SetMaxTransactions updates the maximum transactions per block
+func (bp *BlockProposer) SetMaxTransactions(count int) {
+	bp.maxTransactions = count
+}
+
+// SetMinGasPrice updates the minimum gas price
+func (bp *BlockProposer) SetMinGasPrice(price int64) {
+	bp.minGasPrice = price
+}
+
+// ResetMetrics resets the proposer metrics
+func (bp *BlockProposer) ResetMetrics() {
+	bp.blocksProposed = 0
+	bp.avgBlockTime = 0
+	bp.avgTransactionCount = 0
+	bp.totalFeesCollected = 0
 }

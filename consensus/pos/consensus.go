@@ -100,6 +100,15 @@ type ProposalSlot struct {
 	Timestamp        int64  `json:"timestamp"`
 }
 
+// BlockProposal represents a block proposal message
+type BlockProposal struct {
+	Block     *core.Block `json:"block"`
+	Proposer  string      `json:"proposer"`
+	Slot      uint64      `json:"slot"`
+	Epoch     uint64      `json:"epoch"`
+	Signature []byte      `json:"signature"`
+}
+
 // NewConsensusEngine creates a new PoS consensus engine
 func NewConsensusEngine(
 	cfg *config.Config,
@@ -251,7 +260,7 @@ func (ce *ConsensusEngine) proposeBlock() error {
 	// Log block construction metrics
 	fmt.Printf("Proposed block %s by validator %s with %d txs, gas: %d, fees: %d, construction time: %v, score: %.2f\n",
 		result.Block.Hash,
-		result.Block.Header.Validator, // Using correct field name
+		result.Block.Header.Validator,
 		result.TransactionCount,
 		result.TotalGasUsed,
 		result.TotalFees,
@@ -439,13 +448,13 @@ func (ce *ConsensusEngine) signAttestation(attestation *Attestation) ([]byte, er
 
 	hash := blake2b.Sum256([]byte(data))
 
-	// Sign with private key
-	signature, err := ce.nodePrivateKey.Sign(hash[:])
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign attestation: %v", err)
+	// Sign with private key - your Sign method returns only Signature, not (Signature, error)
+	signature := ce.nodePrivateKey.Sign(hash[:])
+	if signature == nil {
+		return nil, fmt.Errorf("failed to sign attestation: signature is nil")
 	}
 
-	return signature, nil
+	return signature.Bytes(), nil
 }
 
 // verifyAttestationSignature verifies an attestation signature
@@ -608,13 +617,28 @@ func (ce *ConsensusEngine) GetStats() map[string]interface{} {
 	return stats
 }
 
-// BlockProposal represents a block proposal message
-type BlockProposal struct {
-	Block     *core.Block `json:"block"`
-	Proposer  string      `json:"proposer"`
-	Slot      uint64      `json:"slot"`
-	Epoch     uint64      `json:"epoch"`
-	Signature []byte      `json:"signature"`
+// GetCurrentEpoch returns the current epoch
+func (ce *ConsensusEngine) GetCurrentEpoch() uint64 {
+	ce.mu.RLock()
+	defer ce.mu.RUnlock()
+	return ce.currentEpoch
+}
+
+// GetCurrentSlot returns the current slot
+func (ce *ConsensusEngine) GetCurrentSlot() uint64 {
+	ce.mu.RLock()
+	defer ce.mu.RUnlock()
+	return ce.currentSlot
+}
+
+// GetValidatorSet returns the current validator set
+func (ce *ConsensusEngine) GetValidatorSet() *validator.Set {
+	return ce.validatorSet
+}
+
+// GetForkChoice returns the fork choice instance
+func (ce *ConsensusEngine) GetForkChoice() *ForkChoice {
+	return ce.forkChoice
 }
 
 // BlockValidator handles block validation
@@ -709,9 +733,8 @@ func (bv *BlockValidator) validateBlockStructure(block *core.Block) error {
 
 // validateBlockHash validates the block hash
 func (bv *BlockValidator) validateBlockHash(block *core.Block) error {
-	// Recalculate hash and compare
-	bp := NewBlockProducer(bv.consensusEngine)
-	expectedHash := bp.calculateBlockHash(block)
+	// Recalculate hash and compare using the proposer's method
+	expectedHash := bv.consensusEngine.blockProposer.calculateBlockHash(block)
 
 	if block.Hash != expectedHash {
 		return fmt.Errorf("invalid block hash: expected %s, got %s", expectedHash, block.Hash)
@@ -758,7 +781,7 @@ func (bv *BlockValidator) validateGasUsage(block *core.Block) error {
 
 // validateProposer validates that the proposer is authorized
 func (bv *BlockValidator) validateProposer(block *core.Block) error {
-	// Check if proposer is an active validator (using 'validator' field)
+	// Check if proposer is an active validator
 	validator, err := bv.consensusEngine.worldState.GetValidator(block.Header.Validator)
 	if err != nil {
 		return fmt.Errorf("proposer %s is not a validator: %v", block.Header.Validator, err)
