@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sync"
 	"time"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -314,97 +313,6 @@ func (m *Manager) BroadcastVote(vote interface{}) error {
 
 	stdlog.Printf("Broadcasting vote via PubSub to topic %s", TopicVotes)
 	return m.rateLimitedBroadcast(TopicVotes, voteData)
-}
-
-// Blockchain Synchronization
-
-// SyncBlockchainWithPeer synchronizes blockchain with a specific peer
-func (m *Manager) SyncBlockchainWithPeer(peerID peer.ID) error {
-	stdlog.Printf("Initiating blockchain sync with peer: %s", peerID.String())
-	s, err := m.Host.NewStream(m.Ctx, peerID, ProtocolBlockSync)
-	if err != nil {
-		return fmt.Errorf("failed to open block sync stream with %s: %w", peerID.String(), err)
-	}
-	defer s.Close()
-
-	writer := NewJSONStreamWriter(s)
-	reader := NewJSONStreamReader(s)
-
-	// Get our current blockchain height
-	heightCh := make(chan Response)
-	m.MessageBus <- Message{
-		Type:       GetBlockchainInfo,
-		Data:       "height",
-		ResponseCh: heightCh,
-	}
-	heightResp := <-heightCh
-
-	var currentHeight int64
-	if heightResp.Error == nil {
-		if height, ok := heightResp.Data.(int64); ok {
-			currentHeight = height
-		}
-	} else {
-		stdlog.Printf("Warning: Could not get current blockchain height for sync: %v", heightResp.Error)
-		currentHeight = 0
-	}
-
-	// Send request to peer for blocks from startHeight
-	reqData := map[string]int64{"startHeight": currentHeight + 1}
-	if err := writer.WriteJSON(reqData); err != nil {
-		return fmt.Errorf("failed to write sync request to stream: %w", err)
-	}
-
-	// Read blocks from the peer's stream
-	var totalSyncedBlocks int
-	for {
-		var block core.Block
-		err := reader.ReadJSON(&block)
-		if err != nil {
-			if err == io.EOF {
-				stdlog.Printf("Sync stream from %s closed by peer", peerID.String())
-				break
-			}
-			// Check for EOF marker
-			if err.Error() == "received EOF marker" {
-				stdlog.Printf("Received end-of-sync marker from %s", peerID.String())
-				break
-			}
-			return fmt.Errorf("error reading block data from stream: %w", err)
-		}
-
-		// Send block to blockchain core for processing
-		m.BlockchainProcessCh <- Message{Type: ProcessBlock, Data: &block}
-		totalSyncedBlocks++
-	}
-	stdlog.Printf("Successfully synced %d blocks from peer %s", totalSyncedBlocks, peerID.String())
-	return nil
-}
-
-// SyncBlockchain synchronizes blockchain with all available peers
-func (m *Manager) SyncBlockchain() error {
-	stdlog.Println("Starting blockchain synchronization with libp2p peers...")
-
-	peers := m.Host.Network().Peers()
-	if len(peers) == 0 {
-		stdlog.Println("No libp2p peers available for blockchain synchronization")
-		return fmt.Errorf("no peers available for sync")
-	}
-
-	var wg sync.WaitGroup
-	for _, peerID := range peers {
-		wg.Add(1)
-		go func(pID peer.ID) {
-			defer wg.Done()
-			if err := m.SyncBlockchainWithPeer(pID); err != nil {
-				stdlog.Printf("Failed to sync with peer %s: %v", pID.String(), err)
-			}
-		}(peerID)
-	}
-
-	wg.Wait()
-	stdlog.Println("Blockchain synchronization with libp2p peers completed")
-	return nil
 }
 
 // JSON Stream Reader/Writer for protocol communication

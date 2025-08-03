@@ -1312,3 +1312,213 @@ func (ws *WorldState) Cleanup() {
 	// Update state root after cleanup
 	ws.updateStateRoot()
 }
+
+func (ws *WorldState) GetCurrentHeight() int64 {
+	return ws.GetHeight()
+}
+
+// ExportAccounts returns all accounts for state sync
+func (ws *WorldState) ExportAccounts() map[string]*core.Account {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	return ws.accountManager.GetAllAccounts()
+}
+
+// ExportValidators returns all validators for state sync
+func (ws *WorldState) ExportValidators() map[string]*core.Validator {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	// Create a copy to prevent external modification
+	validators := make(map[string]*core.Validator)
+	for addr, validator := range ws.validators {
+		// Deep copy validator
+		delegators := make(map[string]int64)
+		if validator.Delegators != nil {
+			for k, v := range validator.Delegators {
+				delegators[k] = v
+			}
+		}
+
+		validators[addr] = &core.Validator{
+			Address:        validator.Address,
+			Pubkey:         append([]byte(nil), validator.Pubkey...),
+			Stake:          validator.Stake,
+			SelfStake:      validator.SelfStake,
+			DelegatedStake: validator.DelegatedStake,
+			Delegators:     delegators,
+			Commission:     validator.Commission,
+			Active:         validator.Active,
+			BlocksProposed: validator.BlocksProposed,
+			BlocksMissed:   validator.BlocksMissed,
+			JailUntil:      validator.JailUntil,
+			CreatedAt:      validator.CreatedAt,
+			UpdatedAt:      validator.UpdatedAt,
+		}
+	}
+
+	return validators
+}
+
+// ExportStakes returns staking information for state sync
+func (ws *WorldState) ExportStakes() map[string]map[string]int64 {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	stakes := make(map[string]map[string]int64)
+
+	// Export delegations from all accounts
+	accounts := ws.accountManager.GetAllAccounts()
+	for addr, account := range accounts {
+		if account.DelegatedTo != nil && len(account.DelegatedTo) > 0 {
+			stakes[addr] = make(map[string]int64)
+			for validator, amount := range account.DelegatedTo {
+				stakes[addr][validator] = amount
+			}
+		}
+	}
+
+	return stakes
+}
+
+// Clear clears the world state (for restoring from snapshot)
+func (ws *WorldState) Clear() error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Reset account manager
+	ws.accountManager = account.NewAccountManager(ws.shardID, ws.totalShards)
+
+	// Clear validators
+	ws.validators = make(map[string]*core.Validator)
+
+	// Reset blocks
+	ws.blocks = make([]*core.Block, 0)
+
+	// Reset state
+	ws.currentHash = ""
+	ws.height = -1
+	ws.stateRoot = ""
+	ws.totalSupply = 0
+	ws.totalStaked = 0
+	ws.lastTimestamp = 0
+
+	// Recreate transaction pool
+	ws.txPool = transaction.NewPool(ws.shardID, ws.totalShards, ws.config.Consensus.MaxTxPerBlock, ws.config.Consensus.MinGasPrice)
+
+	return nil
+}
+
+// SetAccount sets an account in the world state
+func (ws *WorldState) SetAccount(address string, account *core.Account) error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	return ws.accountManager.UpdateAccount(account)
+}
+
+// SetValidator sets a validator in the world state
+func (ws *WorldState) SetValidator(address string, validator *core.Validator) error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Validate validator
+	if validator == nil {
+		return fmt.Errorf("validator cannot be nil")
+	}
+
+	if validator.Address != address {
+		return fmt.Errorf("validator address mismatch")
+	}
+
+	// Validate address format
+	if err := account.ValidateAddress(address); err != nil {
+		return fmt.Errorf("invalid validator address: %v", err)
+	}
+
+	ws.validators[address] = validator
+	return nil
+}
+
+// SetStake sets a delegation in the world state
+func (ws *WorldState) SetStake(delegatorAddr, validatorAddr string, amount int64) error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Get or create delegator account
+	delegator, err := ws.accountManager.GetAccount(delegatorAddr)
+	if err != nil {
+		// Create new account if it doesn't exist
+		delegator = &core.Account{
+			Address:      delegatorAddr,
+			Balance:      0,
+			Nonce:        0,
+			StakedAmount: 0,
+			DelegatedTo:  make(map[string]int64),
+			Rewards:      0,
+		}
+	}
+
+	// Initialize DelegatedTo map if nil
+	if delegator.DelegatedTo == nil {
+		delegator.DelegatedTo = make(map[string]int64)
+	}
+
+	// Set delegation
+	if amount > 0 {
+		delegator.DelegatedTo[validatorAddr] = amount
+		delegator.StakedAmount += amount // Update total staked amount
+	} else {
+		// Remove delegation if amount is 0
+		delete(delegator.DelegatedTo, validatorAddr)
+	}
+
+	// Update account
+	return ws.accountManager.UpdateAccount(delegator)
+}
+
+// SetStateRoot sets the state root
+func (ws *WorldState) SetStateRoot(stateRoot string) error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	ws.stateRoot = stateRoot
+	return nil
+}
+
+// SetCurrentHeight sets the current height
+func (ws *WorldState) SetCurrentHeight(height int64) error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	ws.height = height
+	return nil
+}
+
+// PruneStatesBefore removes state data before a given height
+func (ws *WorldState) PruneStatesBefore(height int64) (int, error) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	if height <= 0 || height >= ws.height {
+		return 0, nil // Nothing to prune
+	}
+
+	// Count blocks to be pruned
+	pruned := 0
+	newBlocks := make([]*core.Block, 0)
+
+	for _, block := range ws.blocks {
+		if block.Header.Index >= height {
+			newBlocks = append(newBlocks, block)
+		} else {
+			pruned++
+		}
+	}
+
+	// Update blocks array
+	ws.blocks = newBlocks
+
+	return pruned, nil
+}

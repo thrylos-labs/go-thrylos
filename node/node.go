@@ -19,6 +19,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/network"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	thrylosSync "github.com/thrylos-labs/go-thrylos/sync" // Use alias to avoid conflict with "sync" package
 )
 
 // Node represents a blockchain node with PoS consensus and comprehensive state management
@@ -67,7 +68,7 @@ type Node struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 
-	// syncManager *network.SyncManager
+	syncManager *thrylosSync.SyncManager // Use the alias
 }
 
 // NodeConfig represents comprehensive node configuration
@@ -156,15 +157,17 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		p2pNetwork = p2pNet
 	}
 
-	// Initialize sync manager to sync nww nodes quickly
-	// syncManager := network.NewSyncManager(nodeConfig.Config, bc, worldState, p2pNetwork)
+	var syncManager *thrylosSync.SyncManager
+	if p2pNetwork != nil {
+		syncManager = thrylosSync.NewSyncManager(nodeConfig.Config, bc, worldState, p2pNetwork) // Changed package
+	}
 
 	node := &Node{
-		config:     nodeConfig.Config,
-		worldState: worldState,
-		blockchain: bc,
-		p2pNetwork: p2pNetwork,
-		// syncManager:       syncManager,
+		config:            nodeConfig.Config,
+		worldState:        worldState,
+		blockchain:        bc,
+		p2pNetwork:        p2pNetwork,
+		syncManager:       syncManager,
 		consensusEngine:   consensusEngine,
 		validatorManager:  validatorManager,
 		rewardDistributor: rewardDistributor,
@@ -222,6 +225,10 @@ func (n *Node) Start() error {
 		go n.processP2PMessages()
 	}
 
+	if err := n.syncManager.Start(); err != nil {
+		return fmt.Errorf("failed to start sync manager: %v", err)
+	}
+
 	// Start background processes
 	go n.rewardDistributionLoop()
 	go n.blockProductionLoop()
@@ -272,6 +279,13 @@ func (n *Node) Stop() error {
 	// Cancel all goroutines first
 	if n.cancelFunc != nil {
 		n.cancelFunc()
+	}
+
+	// Stop sync manager
+	if n.syncManager != nil {
+		if err := n.syncManager.Stop(); err != nil {
+			fmt.Printf("Error stopping sync manager: %v\n", err)
+		}
 	}
 
 	// Stop P2P network
@@ -384,10 +398,10 @@ func (n *Node) BroadcastTransaction(tx *core.Transaction) error {
 }
 
 func (n *Node) SyncWithPeers() error {
-	if n.p2pNetwork != nil {
-		return n.p2pNetwork.SyncBlockchain()
+	if n.syncManager != nil {
+		return n.syncManager.SyncWithPeers() // Advanced, efficient
 	}
-	return fmt.Errorf("P2P network not enabled")
+	return fmt.Errorf("sync manager not available")
 }
 
 // Validator Operations

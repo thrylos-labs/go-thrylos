@@ -232,11 +232,6 @@ func (n *P2PNetwork) BroadcastVote(vote interface{}) error {
 	return n.manager.BroadcastVote(vote)
 }
 
-// SyncBlockchain initiates blockchain synchronization with peers
-func (n *P2PNetwork) SyncBlockchain() error {
-	return n.manager.SyncBlockchain()
-}
-
 // GetNetworkStats returns P2P network statistics
 func (n *P2PNetwork) GetNetworkStats() map[string]interface{} {
 	return n.manager.GetStats()
@@ -301,4 +296,36 @@ func ValidateConfig(cfg *NetworkConfig) error {
 	}
 
 	return nil
+}
+
+// RequestBlockRange requests a range of blocks from a specific peer
+func (n *P2PNetwork) RequestBlockRange(peerID string, startHeight, endHeight int64) ([]*core.Block, error) {
+	if n.manager == nil {
+		return nil, fmt.Errorf("P2P manager not available")
+	}
+	return n.manager.RequestBlockRange(peerID, startHeight, endHeight)
+}
+
+// RequestPeerHeight requests the blockchain height from a specific peer
+func (n *P2PNetwork) RequestPeerHeight(peerID string) (int64, error) {
+	if n.manager == nil {
+		return 0, fmt.Errorf("P2P manager not available")
+	}
+	return n.manager.RequestPeerHeight(peerID)
+}
+
+// RequestStateSnapshot requests a state snapshot from a peer
+func (n *P2PNetwork) RequestStateSnapshot(peerID string, height int64) (*p2p.StateSnapshot, error) {
+	if n.manager == nil {
+		return nil, fmt.Errorf("P2P manager not available")
+	}
+	return n.manager.RequestStateSnapshot(peerID, height)
+}
+
+// GetConnectedPeerIDs returns list of connected peer IDs as strings
+func (n *P2PNetwork) GetConnectedPeerIDs() []string {
+	if n.manager == nil {
+		return []string{}
+	}
+	return n.manager.GetConnectedPeerIDs()
 }

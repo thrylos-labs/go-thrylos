@@ -11,6 +11,7 @@ import (
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
@@ -27,10 +28,16 @@ const (
 	ProtocolTransaction protocol.ID = "/thrylos/transaction/1.0.0"
 	ProtocolAttestation protocol.ID = "/thrylos/attestation/1.0.0"
 	ProtocolVote        protocol.ID = "/thrylos/vote/1.0.0"
-	TopicBlocks                     = "thrylos-blocks"
-	TopicTransactions               = "thrylos-transactions"
-	TopicAttestations               = "thrylos-attestations"
-	TopicVotes                      = "thrylos-votes"
+
+	// ADD THESE MISSING ONES:
+	ProtocolBlockRange    protocol.ID = "/thrylos/blockrange/1.0.0"
+	ProtocolHeightRequest protocol.ID = "/thrylos/height/1.0.0"
+	ProtocolStateSync     protocol.ID = "/thrylos/statesync/1.0.0"
+
+	TopicBlocks       = "thrylos-blocks"
+	TopicTransactions = "thrylos-transactions"
+	TopicAttestations = "thrylos-attestations"
+	TopicVotes        = "thrylos-votes"
 )
 
 // Message types for communication with blockchain
@@ -43,6 +50,7 @@ const (
 	ProcessVote
 	GetBlockchainInfo
 	GetBlocksFromHeight
+	GetStateSnapshot
 )
 
 type Message struct {
@@ -66,6 +74,47 @@ type NetworkMetrics struct {
 	PeerCount          int64
 	LastSyncTime       time.Time
 	mu                 sync.RWMutex
+}
+
+// Add these structs to p2p/manager.go:
+type BlockRangeRequest struct {
+	StartHeight int64 `json:"start_height"`
+	EndHeight   int64 `json:"end_height"`
+}
+
+type BlockRangeResponse struct {
+	Blocks []*core.Block `json:"blocks"`
+	Error  string        `json:"error,omitempty"`
+}
+
+type HeightRequest struct{}
+
+type HeightResponse struct {
+	Height int64  `json:"height"`
+	Error  string `json:"error,omitempty"`
+}
+
+type StateSnapshotRequest struct {
+	Height int64 `json:"height"`
+}
+
+type StateSnapshot struct {
+	Height         int64                       `json:"height"`
+	StateRoot      string                      `json:"state_root"`
+	Timestamp      int64                       `json:"timestamp"`
+	Accounts       map[string]*core.Account    `json:"accounts"`
+	Validators     map[string]*core.Validator  `json:"validators"`
+	Stakes         map[string]map[string]int64 `json:"stakes"`
+	CrossShardData map[string]interface{}      `json:"cross_shard_data"`
+	Metadata       map[string]string           `json:"metadata"`
+	Checksum       string                      `json:"checksum"`
+	CompressedData []byte                      `json:"compressed_data,omitempty"`
+	Size           int64                       `json:"size"`
+}
+
+type StateSnapshotResponse struct {
+	Snapshot *StateSnapshot `json:"snapshot"`
+	Error    string         `json:"error,omitempty"`
 }
 
 func (nm *NetworkMetrics) IncrementMessagesReceived() {
@@ -254,6 +303,8 @@ func (m *Manager) Start() error {
 	m.Host.SetStreamHandler(ProtocolAttestation, m.handleAttestationRequest)
 	m.Host.SetStreamHandler(ProtocolVote, m.handleVoteRequest)
 
+	// Add these new handlers:
+	m.setupSyncProtocolHandlers()
 	// Subscribe to PubSub topics
 	m.subscribeToPubSubTopics()
 
@@ -262,6 +313,12 @@ func (m *Manager) Start() error {
 
 	stdlog.Println("Thrylos P2P services started successfully")
 	return nil
+}
+
+func (m *Manager) setupSyncProtocolHandlers() {
+	m.Host.SetStreamHandler(ProtocolBlockRange, m.handleBlockRangeRequest)
+	m.Host.SetStreamHandler(ProtocolHeightRequest, m.handleHeightRequest)
+	m.Host.SetStreamHandler(ProtocolStateSync, m.handleStateSnapshotRequest)
 }
 
 // Stop gracefully shuts down the P2P manager
@@ -543,6 +600,142 @@ func (m *Manager) isValidBlockStructure(block *core.Block) bool {
 	return true
 }
 
+// RequestBlockRange requests a range of blocks from a specific peer
+func (m *Manager) RequestBlockRange(peerID string, startHeight, endHeight int64) ([]*core.Block, error) {
+	// Convert string to peer.ID
+	pid, err := peer.Decode(peerID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid peer ID: %v", err)
+	}
+
+	// Check if peer is connected
+	if m.Host.Network().Connectedness(pid) != network.Connected {
+		return nil, fmt.Errorf("peer %s not connected", peerID)
+	}
+
+	// Open stream to peer
+	stream, err := m.Host.NewStream(m.Ctx, pid, ProtocolBlockRange)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stream: %v", err)
+	}
+	defer stream.Close()
+
+	// Create and send request
+	request := &BlockRangeRequest{
+		StartHeight: startHeight,
+		EndHeight:   endHeight,
+	}
+
+	writer := NewJSONStreamWriter(stream)
+	if err := writer.WriteJSON(request); err != nil {
+		return nil, fmt.Errorf("failed to send request: %v", err)
+	}
+
+	// Read response
+	reader := NewJSONStreamReader(stream)
+	response := &BlockRangeResponse{}
+	if err := reader.ReadJSON(response); err != nil {
+		return nil, fmt.Errorf("failed to read response: %v", err)
+	}
+
+	if response.Error != "" {
+		return nil, fmt.Errorf("peer error: %s", response.Error)
+	}
+
+	stdlog.Printf("Received %d blocks from peer %s", len(response.Blocks), peerID)
+	return response.Blocks, nil
+}
+
+// RequestPeerHeight requests blockchain height from a peer
+func (m *Manager) RequestPeerHeight(peerID string) (int64, error) {
+	pid, err := peer.Decode(peerID)
+	if err != nil {
+		return 0, fmt.Errorf("invalid peer ID: %v", err)
+	}
+
+	if m.Host.Network().Connectedness(pid) != network.Connected {
+		return 0, fmt.Errorf("peer %s not connected", peerID)
+	}
+
+	stream, err := m.Host.NewStream(m.Ctx, pid, ProtocolHeightRequest)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open stream: %v", err)
+	}
+	defer stream.Close()
+
+	// Send height request
+	writer := NewJSONStreamWriter(stream)
+	request := &HeightRequest{}
+	if err := writer.WriteJSON(request); err != nil {
+		return 0, fmt.Errorf("failed to send request: %v", err)
+	}
+
+	// Read response
+	reader := NewJSONStreamReader(stream)
+	response := &HeightResponse{}
+	if err := reader.ReadJSON(response); err != nil {
+		return 0, fmt.Errorf("failed to read response: %v", err)
+	}
+
+	if response.Error != "" {
+		return 0, fmt.Errorf("peer error: %s", response.Error)
+	}
+
+	return response.Height, nil
+}
+
+// RequestStateSnapshot requests a state snapshot from a peer
+func (m *Manager) RequestStateSnapshot(peerID string, height int64) (*StateSnapshot, error) {
+	pid, err := peer.Decode(peerID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid peer ID: %v", err)
+	}
+
+	if m.Host.Network().Connectedness(pid) != network.Connected {
+		return nil, fmt.Errorf("peer %s not connected", peerID)
+	}
+
+	stream, err := m.Host.NewStream(m.Ctx, pid, ProtocolStateSync)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stream: %v", err)
+	}
+	defer stream.Close()
+
+	// Send snapshot request
+	writer := NewJSONStreamWriter(stream)
+	request := &StateSnapshotRequest{
+		Height: height,
+	}
+	if err := writer.WriteJSON(request); err != nil {
+		return nil, fmt.Errorf("failed to send request: %v", err)
+	}
+
+	// Read response
+	reader := NewJSONStreamReader(stream)
+	response := &StateSnapshotResponse{}
+	if err := reader.ReadJSON(response); err != nil {
+		return nil, fmt.Errorf("failed to read response: %v", err)
+	}
+
+	if response.Error != "" {
+		return nil, fmt.Errorf("peer error: %s", response.Error)
+	}
+
+	stdlog.Printf("Received state snapshot at height %d from peer %s",
+		response.Snapshot.Height, peerID)
+	return response.Snapshot, nil
+}
+
+// GetConnectedPeerIDs - returns peer IDs as strings
+func (m *Manager) GetConnectedPeerIDs() []string {
+	peers := m.Host.Network().Peers()
+	peerIDs := make([]string, len(peers))
+	for i, peer := range peers {
+		peerIDs[i] = peer.String()
+	}
+	return peerIDs
+}
+
 // GetConnectedPeers returns list of connected peers
 func (m *Manager) GetConnectedPeers() []peer.ID {
 	m.mu.RLock()
@@ -604,4 +797,157 @@ func (m *Manager) SetEventHandlers(
 	m.OnTransactionReceived = onTx
 	m.OnAttestationReceived = onAttestation
 	m.OnVoteReceived = onVote
+}
+
+// handleBlockRangeRequest handles incoming block range requests
+func (m *Manager) handleBlockRangeRequest(s network.Stream) {
+	defer s.Close()
+	stdlog.Printf("Received block range request from %s", s.Conn().RemotePeer().String())
+
+	reader := NewJSONStreamReader(s)
+	writer := NewJSONStreamWriter(s)
+
+	// Read request
+	var request BlockRangeRequest
+	if err := reader.ReadJSON(&request); err != nil {
+		stdlog.Printf("Error reading block range request: %v", err)
+		writer.WriteJSON(&BlockRangeResponse{Error: "invalid request"})
+		return
+	}
+
+	// Validate request
+	if request.StartHeight > request.EndHeight {
+		writer.WriteJSON(&BlockRangeResponse{Error: "invalid height range"})
+		return
+	}
+
+	if request.EndHeight-request.StartHeight > 100 { // Limit to 100 blocks
+		writer.WriteJSON(&BlockRangeResponse{Error: "range too large"})
+		return
+	}
+
+	// Get blocks from blockchain
+	responseCh := make(chan Response)
+	m.MessageBus <- Message{
+		Type:       GetBlocksFromHeight,
+		Data:       map[string]int64{"start": request.StartHeight, "end": request.EndHeight},
+		ResponseCh: responseCh,
+	}
+
+	resp := <-responseCh
+	if resp.Error != nil {
+		stdlog.Printf("Error fetching blocks: %v", resp.Error)
+		writer.WriteJSON(&BlockRangeResponse{Error: resp.Error.Error()})
+		return
+	}
+
+	blocks, ok := resp.Data.([]*core.Block)
+	if !ok {
+		writer.WriteJSON(&BlockRangeResponse{Error: "internal error"})
+		return
+	}
+
+	// Send response
+	response := &BlockRangeResponse{Blocks: blocks}
+	if err := writer.WriteJSON(response); err != nil {
+		stdlog.Printf("Error writing block range response: %v", err)
+		return
+	}
+
+	stdlog.Printf("Sent %d blocks to peer %s", len(blocks), s.Conn().RemotePeer().String())
+}
+
+// handleHeightRequest handles incoming height requests
+func (m *Manager) handleHeightRequest(s network.Stream) {
+	defer s.Close()
+	stdlog.Printf("Received height request from %s", s.Conn().RemotePeer().String())
+
+	reader := NewJSONStreamReader(s)
+	writer := NewJSONStreamWriter(s)
+
+	// Read request (empty request)
+	var request HeightRequest
+	if err := reader.ReadJSON(&request); err != nil {
+		stdlog.Printf("Error reading height request: %v", err)
+		writer.WriteJSON(&HeightResponse{Error: "invalid request"})
+		return
+	}
+
+	// Get current height from blockchain
+	responseCh := make(chan Response)
+	m.MessageBus <- Message{
+		Type:       GetBlockchainInfo,
+		Data:       "height",
+		ResponseCh: responseCh,
+	}
+
+	resp := <-responseCh
+	if resp.Error != nil {
+		stdlog.Printf("Error getting blockchain height: %v", resp.Error)
+		writer.WriteJSON(&HeightResponse{Error: resp.Error.Error()})
+		return
+	}
+
+	height, ok := resp.Data.(int64)
+	if !ok {
+		writer.WriteJSON(&HeightResponse{Error: "internal error"})
+		return
+	}
+
+	// Send response
+	response := &HeightResponse{Height: height}
+	if err := writer.WriteJSON(response); err != nil {
+		stdlog.Printf("Error writing height response: %v", err)
+		return
+	}
+
+	stdlog.Printf("Sent height %d to peer %s", height, s.Conn().RemotePeer().String())
+}
+
+// handleStateSnapshotRequest handles incoming state snapshot requests
+func (m *Manager) handleStateSnapshotRequest(s network.Stream) {
+	defer s.Close()
+	stdlog.Printf("Received state snapshot request from %s", s.Conn().RemotePeer().String())
+
+	reader := NewJSONStreamReader(s)
+	writer := NewJSONStreamWriter(s)
+
+	// Read request
+	var request StateSnapshotRequest
+	if err := reader.ReadJSON(&request); err != nil {
+		stdlog.Printf("Error reading state snapshot request: %v", err)
+		writer.WriteJSON(&StateSnapshotResponse{Error: "invalid request"})
+		return
+	}
+
+	// Get state snapshot from blockchain
+	responseCh := make(chan Response)
+	m.MessageBus <- Message{
+		Type:       GetStateSnapshot,
+		Data:       request.Height,
+		ResponseCh: responseCh,
+	}
+
+	resp := <-responseCh
+	if resp.Error != nil {
+		stdlog.Printf("Error creating state snapshot: %v", resp.Error)
+		writer.WriteJSON(&StateSnapshotResponse{Error: resp.Error.Error()})
+		return
+	}
+
+	snapshot, ok := resp.Data.(*StateSnapshot)
+	if !ok {
+		writer.WriteJSON(&StateSnapshotResponse{Error: "internal error"})
+		return
+	}
+
+	// Send response
+	response := &StateSnapshotResponse{Snapshot: snapshot}
+	if err := writer.WriteJSON(response); err != nil {
+		stdlog.Printf("Error writing state snapshot response: %v", err)
+		return
+	}
+
+	stdlog.Printf("Sent state snapshot at height %d to peer %s",
+		snapshot.Height, s.Conn().RemotePeer().String())
 }
