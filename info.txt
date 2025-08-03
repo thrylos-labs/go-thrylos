@@ -2,10 +2,8 @@ run thrylos: go build -o bin/thrylos ./cmd/thrylos && ./bin/thrylos
 TO DO 
 
 🎯 Next Steps for Production:
-Sync - To finish
 Consensus.proto - Use for the consensus
-Storage - What should be stored in BadgerDB - db and state, is storage necessary?
-Should I be using BasgerDB or not?
+Does the 'data' folder need to be ignored from the commit?
 
 Multi-node Testing - Start multiple nodes with different ports
 Genesis Balance - Configure initial token distribution
