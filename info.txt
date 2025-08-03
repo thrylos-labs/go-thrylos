@@ -55,7 +55,6 @@ Simple balance tracking - no UTXO complexity
 Efficient queries - O(1) account lookups
 Easy debugging - clear state representation
 
-2. Liquid Staking First
 
 No unbonding periods - immediate liquidity
 Better UX - no lock-up anxiety

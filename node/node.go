@@ -66,6 +66,8 @@ type Node struct {
 	// Context management for graceful shutdown
 	ctx        context.Context
 	cancelFunc context.CancelFunc
+
+	syncManager *network.SyncManager
 }
 
 // NodeConfig represents comprehensive node configuration
@@ -154,11 +156,15 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		p2pNetwork = p2pNet
 	}
 
+	// Initialize sync manager to sync nww nodes quickly
+	syncManager := network.NewSyncManager(nodeConfig.Config, bc, worldState, p2pNetwork)
+
 	node := &Node{
 		config:            nodeConfig.Config,
 		worldState:        worldState,
 		blockchain:        bc,
 		p2pNetwork:        p2pNetwork,
+		syncManager:       syncManager,
 		consensusEngine:   consensusEngine,
 		validatorManager:  validatorManager,
 		rewardDistributor: rewardDistributor,
