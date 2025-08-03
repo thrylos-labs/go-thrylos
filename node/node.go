@@ -67,7 +67,7 @@ type Node struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 
-	syncManager *network.SyncManager
+	// syncManager *network.SyncManager
 }
 
 // NodeConfig represents comprehensive node configuration
@@ -157,14 +157,14 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	}
 
 	// Initialize sync manager to sync nww nodes quickly
-	syncManager := network.NewSyncManager(nodeConfig.Config, bc, worldState, p2pNetwork)
+	// syncManager := network.NewSyncManager(nodeConfig.Config, bc, worldState, p2pNetwork)
 
 	node := &Node{
-		config:            nodeConfig.Config,
-		worldState:        worldState,
-		blockchain:        bc,
-		p2pNetwork:        p2pNetwork,
-		syncManager:       syncManager,
+		config:     nodeConfig.Config,
+		worldState: worldState,
+		blockchain: bc,
+		p2pNetwork: p2pNetwork,
+		// syncManager:       syncManager,
 		consensusEngine:   consensusEngine,
 		validatorManager:  validatorManager,
 		rewardDistributor: rewardDistributor,
