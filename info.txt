@@ -29,8 +29,6 @@ go// core/block/creator.go
 // consensus/pos/proposer.go
 
 Week 3: Staking System
-Day 1-4: Liquid Staking
-go// staking/liquid/service.go
 // staking/delegation/manager.go
 // consensus/rewards/distributor.go
 

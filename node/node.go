@@ -1,6 +1,7 @@
 package node
 
 // node/node.go - Main blockchain node with PoS integration and WorldState
+// Transaction creation removed - handled by wallets in production
 
 import (
 	"context"
@@ -18,7 +19,6 @@ import (
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/network"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
-	"golang.org/x/crypto/blake2b"
 )
 
 // Node represents a blockchain node with PoS consensus and comprehensive state management
@@ -41,7 +41,7 @@ type Node struct {
 	totalShards     int
 	isValidatorNode bool
 
-	// Networking (simplified for now)
+	// Networking for consensus
 	broadcastChan chan interface{}
 	receiveChan   chan interface{}
 
@@ -63,7 +63,7 @@ type Node struct {
 	// Event handlers
 	eventHandlers map[string][]func(interface{})
 
-	// ADD THESE NEW FIELDS for graceful shutdown:
+	// Context management for graceful shutdown
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 }
@@ -90,6 +90,9 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	if nodeConfig == nil {
 		return nil, fmt.Errorf("node config cannot be nil")
 	}
+
+	// Initialize context and cancel function
+	ctx, cancelFunc := context.WithCancel(context.Background())
 
 	// Generate node address from private key
 	nodeAddress, err := account.GenerateAddress(nodeConfig.PrivateKey.PublicKey())
@@ -120,7 +123,7 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	rewardDistributor := rewards.NewDistributor(nodeConfig.Config, worldState)
 	inflationManager := rewards.NewInflationManager(nodeConfig.Config, worldState)
 
-	// Initialize networking channels
+	// Initialize networking channels for consensus
 	broadcastChan := make(chan interface{}, 1000)
 	receiveChan := make(chan interface{}, 1000)
 
@@ -139,8 +142,12 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	// Initialize P2P network if enabled
 	var p2pNetwork *network.P2PNetwork
 	if nodeConfig.EnableP2P {
-		// Since your config now has P2P field, you can use the simple method
-		p2pNet, err := network.NewP2PNetwork(nodeConfig.Config)
+		p2pNet, err := network.NewP2PNetworkWithConfig(
+			nodeConfig.Config,
+			nodeConfig.P2PListenPort,
+			nodeConfig.BootstrapPeers,
+			nodeConfig.EnableP2P,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create P2P network: %v", err)
 		}
@@ -166,6 +173,8 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		receiveChan:       receiveChan,
 		lastRewardTime:    time.Now(),
 		eventHandlers:     make(map[string][]func(interface{})),
+		ctx:               ctx,
+		cancelFunc:        cancelFunc,
 	}
 
 	// Store genesis configuration for initialization
@@ -213,8 +222,6 @@ func (n *Node) Start() error {
 	go n.networkingLoop()
 	go n.crossShardLoop()
 	go n.maintenanceLoop()
-
-	// Start event processing
 	go n.eventProcessingLoop()
 
 	n.isRunning = true
@@ -232,7 +239,12 @@ func (n *Node) Start() error {
 	fmt.Printf("  Validator: %t\n", n.isValidatorNode)
 	fmt.Printf("  Cross-shard: %t\n", n.crossShardEnabled)
 	if n.p2pNetwork != nil {
-		fmt.Printf("  P2P: enabled on port %d\n", n.config.P2P.ListenPort)
+		stats := n.p2pNetwork.GetNetworkStats()
+		if port, ok := stats["listen_port"]; ok {
+			fmt.Printf("  P2P: enabled on port %v\n", port)
+		} else {
+			fmt.Printf("  P2P: enabled\n")
+		}
 	} else {
 		fmt.Printf("  P2P: disabled\n")
 	}
@@ -240,7 +252,7 @@ func (n *Node) Start() error {
 	return nil
 }
 
-// / Update your Stop method to stop P2P services:
+// Stop gracefully shuts down the P2P manager
 func (n *Node) Stop() error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -251,7 +263,7 @@ func (n *Node) Stop() error {
 
 	fmt.Println("🛑 Stopping node gracefully...")
 
-	// Cancel all goroutines
+	// Cancel all goroutines first
 	if n.cancelFunc != nil {
 		n.cancelFunc()
 	}
@@ -268,7 +280,7 @@ func (n *Node) Stop() error {
 		return fmt.Errorf("failed to stop consensus engine: %v", err)
 	}
 
-	// Give goroutines time to stop
+	// Give goroutines time to stop gracefully
 	time.Sleep(2 * time.Second)
 
 	// Perform final cleanup
@@ -281,13 +293,14 @@ func (n *Node) Stop() error {
 	return nil
 }
 
-// SubmitTransaction submits a transaction to the network
+// SubmitTransaction accepts a transaction from external sources (e.g., wallets via RPC)
+// This is the main entry point for transaction submission in production
 func (n *Node) SubmitTransaction(tx *core.Transaction) error {
 	if tx == nil {
 		return fmt.Errorf("transaction cannot be nil")
 	}
 
-	// Add transaction through blockchain
+	// Add transaction through blockchain (includes validation)
 	if err := n.blockchain.AddTransaction(tx); err != nil {
 		return fmt.Errorf("failed to submit transaction: %v", err)
 	}
@@ -295,11 +308,14 @@ func (n *Node) SubmitTransaction(tx *core.Transaction) error {
 	// Broadcast transaction to P2P network
 	if err := n.BroadcastTransaction(tx); err != nil {
 		fmt.Printf("Failed to broadcast transaction to P2P network: %v\n", err)
+		// Don't return error here - transaction is still added locally
 	}
 
 	n.triggerEvent("transaction_submitted", tx)
 	return nil
 }
+
+// P2P Message Processing
 
 func (n *Node) processP2PMessages() {
 	if n.p2pNetwork == nil {
@@ -324,19 +340,19 @@ func (n *Node) processP2PMessages() {
 				fmt.Printf("Processed transaction %s from P2P network\n", tx.Id)
 			}
 
-		// case attestation := <-n.p2pNetwork.AttestationChan:
-		// 	// Forward attestation to consensus engine
-		// 	if n.consensusEngine != nil {
-		// 		fmt.Printf("Received attestation from P2P network\n")
-		// 		// You can add specific attestation processing here
-		// 	}
+		case attestation := <-n.p2pNetwork.AttestationChan:
+			// Forward attestation to consensus engine
+			if n.consensusEngine != nil {
+				fmt.Printf("Received attestation from P2P network\n")
+				n.receiveChan <- attestation
+			}
 
-		// case vote := <-n.p2pNetwork.VoteChan:
-		// 	// Forward vote to consensus engine
-		// 	if n.consensusEngine != nil {
-		// 		fmt.Printf("Received vote from P2P network\n")
-		// 		// You can add specific vote processing here
-		// 	}
+		case vote := <-n.p2pNetwork.VoteChan:
+			// Forward vote to consensus engine
+			if n.consensusEngine != nil {
+				fmt.Printf("Received vote from P2P network\n")
+				n.receiveChan <- vote
+			}
 
 		case <-n.ctx.Done():
 			fmt.Println("P2P message processing stopped")
@@ -345,10 +361,18 @@ func (n *Node) processP2PMessages() {
 	}
 }
 
-// BroadcastBlock broadcasts a block to the P2P network
+// P2P Broadcasting Methods
+
 func (n *Node) BroadcastBlock(block *core.Block) error {
 	if n.p2pNetwork != nil {
 		return n.p2pNetwork.BroadcastBlock(block)
+	}
+	return nil
+}
+
+func (n *Node) BroadcastTransaction(tx *core.Transaction) error {
+	if n.p2pNetwork != nil {
+		return n.p2pNetwork.BroadcastTransaction(tx)
 	}
 	return nil
 }
@@ -360,226 +384,8 @@ func (n *Node) SyncWithPeers() error {
 	return fmt.Errorf("P2P network not enabled")
 }
 
-// BroadcastTransaction broadcasts a transaction to the P2P network
-func (n *Node) BroadcastTransaction(tx *core.Transaction) error {
-	if n.p2pNetwork != nil {
-		return n.p2pNetwork.BroadcastTransaction(tx)
-	}
-	return nil
-}
+// Validator Operations
 
-// Simple approach: Create transaction without hash, let blockchain handle it
-func (n *Node) CreateTransaction(from, to string, amount int64, gasPrice int64) (*core.Transaction, error) {
-	nonce, err := n.blockchain.GetNonce(from)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get nonce: %v", err)
-	}
-
-	// Generate simple transaction ID
-	timestamp := time.Now().UnixNano()
-	txID := fmt.Sprintf("tx_%d_%d", timestamp, nonce)
-
-	tx := &core.Transaction{
-		Id:        txID,
-		From:      from,
-		To:        to,
-		Amount:    amount,
-		Gas:       21000,
-		GasPrice:  gasPrice,
-		Nonce:     nonce,
-		Timestamp: time.Now().Unix(),
-		// Don't set Hash - let blockchain calculate it
-	}
-
-	// Create simple signature based on transaction content (not hash)
-	signature, err := n.signTransactionContent(tx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign transaction: %v", err)
-	}
-	tx.Signature = signature
-
-	return tx, nil
-}
-
-// Sign based on transaction content, not the hash field
-func (n *Node) signTransactionContent(tx *core.Transaction) ([]byte, error) {
-	// Sign the transaction content (similar to what blockchain might expect)
-	signData := fmt.Sprintf("%s%s%s%d%d%d%d%d",
-		tx.Id,
-		tx.From,
-		tx.To,
-		tx.Amount,
-		tx.Gas,
-		tx.GasPrice,
-		tx.Nonce,
-		tx.Timestamp,
-	)
-
-	hash := blake2b.Sum256([]byte(signData))
-
-	// Sign with node private key
-	signature := n.nodePrivateKey.Sign(hash[:])
-	if signature == nil {
-		return nil, fmt.Errorf("failed to sign transaction: signature is nil")
-	}
-
-	return signature.Bytes(), nil
-}
-
-// Alternative: Try to match blockchain's exact hash format
-func (n *Node) CreateTransactionMatchingFormat(from, to string, amount int64, gasPrice int64) (*core.Transaction, error) {
-	nonce, err := n.blockchain.GetNonce(from)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get nonce: %v", err)
-	}
-
-	timestamp := time.Now().UnixNano()
-	txID := fmt.Sprintf("tx_%d_%d", timestamp, nonce)
-
-	tx := &core.Transaction{
-		Id:        txID,
-		From:      from,
-		To:        to,
-		Amount:    amount,
-		Gas:       21000,
-		GasPrice:  gasPrice,
-		Nonce:     nonce,
-		Timestamp: time.Now().Unix(),
-	}
-
-	// Try different hash formats to match what blockchain expects
-	// Format 1: Simple concatenation (most common)
-	hashData1 := fmt.Sprintf("%s%s%s%d%d%d%d%d",
-		tx.Id, tx.From, tx.To, tx.Amount, tx.Gas, tx.GasPrice, tx.Nonce, tx.Timestamp)
-
-	// Format 2: JSON-like format
-	// hashData2 := fmt.Sprintf(`{"id":"%s","from":"%s","to":"%s","amount":%d,"gas":%d,"gasPrice":%d,"nonce":%d,"timestamp":%d}`,
-	// 	tx.Id, tx.From, tx.To, tx.Amount, tx.Gas, tx.GasPrice, tx.Nonce, tx.Timestamp)
-
-	// Try format 1 first
-	hash := blake2b.Sum256([]byte(hashData1))
-	tx.Hash = fmt.Sprintf("%x", hash)
-
-	// Sign the transaction
-	signature, err := n.signTransactionContent(tx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign transaction: %v", err)
-	}
-	tx.Signature = signature
-
-	return tx, nil
-}
-
-// Option 2: Simplified hash calculation that might match blockchain validation
-func (n *Node) calculateSimpleTransactionHash(tx *core.Transaction) string {
-	// Try a simpler hash format that matches what blockchain expects
-	hashData := fmt.Sprintf("%s%s%d%d%d%d",
-		tx.From,
-		tx.To,
-		tx.Amount,
-		tx.Gas,
-		tx.GasPrice,
-		tx.Nonce,
-		// Note: Don't include timestamp if blockchain doesn't expect it
-	)
-
-	hash := blake2b.Sum256([]byte(hashData))
-	return fmt.Sprintf("%x", hash)
-}
-
-// Option 3: Set hash to empty and let blockchain calculate it
-func (n *Node) CreateTransactionSimple(from, to string, amount int64, gasPrice int64) (*core.Transaction, error) {
-	nonce, err := n.blockchain.GetNonce(from)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get nonce: %v", err)
-	}
-
-	// Create transaction and let blockchain handle the hash
-	tx := &core.Transaction{
-		From:      from,
-		To:        to,
-		Amount:    amount,
-		Gas:       21000,
-		GasPrice:  gasPrice,
-		Nonce:     nonce,
-		Timestamp: time.Now().Unix(),
-		// Let blockchain calculate hash during validation
-	}
-
-	return tx, nil
-}
-
-// Keep your existing helper methods:
-func (n *Node) calculateTransactionHash(tx *core.Transaction) (string, error) {
-	// Create hash data from transaction fields
-	hashData := fmt.Sprintf("%s%s%d%d%d%d%d",
-		tx.From,
-		tx.To,
-		tx.Amount,
-		tx.Gas,
-		tx.GasPrice,
-		tx.Nonce,
-		tx.Timestamp,
-	)
-
-	// Use Blake2b for hashing (same as your consensus engine)
-	hash := blake2b.Sum256([]byte(hashData))
-	return fmt.Sprintf("%x", hash), nil
-}
-
-func (n *Node) signTransaction(tx *core.Transaction) ([]byte, error) {
-	// Create signature data from transaction fields
-	signData := fmt.Sprintf("%s%s%s%d%d%d%d%d",
-		tx.Id,
-		tx.From,
-		tx.To,
-		tx.Amount,
-		tx.Gas,
-		tx.GasPrice,
-		tx.Nonce,
-		tx.Timestamp,
-	)
-
-	hash := blake2b.Sum256([]byte(signData))
-
-	// Sign with node private key
-	signature := n.nodePrivateKey.Sign(hash[:])
-	if signature == nil {
-		return nil, fmt.Errorf("failed to sign transaction: signature is nil")
-	}
-
-	return signature.Bytes(), nil
-}
-
-// Alternative simple approach - just create a dummy signature
-func (n *Node) CreateTransactionWithDummySignature(from, to string, amount int64, gasPrice int64) (*core.Transaction, error) {
-	nonce, err := n.blockchain.GetNonce(from)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get nonce: %v", err)
-	}
-
-	timestamp := time.Now().UnixNano()
-	hashData := fmt.Sprintf("%s_%s_%d_%d_%d", from, to, amount, nonce, timestamp)
-	hash := blake2b.Sum256([]byte(hashData))
-	hashString := fmt.Sprintf("%x", hash)
-
-	tx := &core.Transaction{
-		Id:        fmt.Sprintf("tx_%d_%d", timestamp, nonce),
-		Hash:      hashString,
-		From:      from,
-		To:        to,
-		Amount:    amount,
-		Gas:       21000,
-		GasPrice:  gasPrice,
-		Nonce:     nonce,
-		Timestamp: time.Now().Unix(),
-		Signature: []byte("dummy_signature"), // Simple placeholder signature
-	}
-
-	return tx, nil
-}
-
-// RegisterValidator registers this node as a validator
 func (n *Node) RegisterValidator(stake int64, commission float64) error {
 	pubkey := n.nodePrivateKey.PublicKey().Bytes()
 
@@ -604,7 +410,6 @@ func (n *Node) RegisterValidator(stake int64, commission float64) error {
 	return nil
 }
 
-// Stake delegates tokens to a validator
 func (n *Node) Stake(validatorAddr string, amount int64) error {
 	stakingManager := n.blockchain.GetStakingManager()
 	if stakingManager == nil {
@@ -624,7 +429,6 @@ func (n *Node) Stake(validatorAddr string, amount int64) error {
 	return nil
 }
 
-// Unstake removes delegation from a validator
 func (n *Node) Unstake(validatorAddr string, amount int64) error {
 	stakingManager := n.blockchain.GetStakingManager()
 	if stakingManager == nil {
@@ -644,7 +448,8 @@ func (n *Node) Unstake(validatorAddr string, amount int64) error {
 	return nil
 }
 
-// InitiateCrossShardTransfer initiates a cross-shard transfer
+// Cross-shard Operations
+
 func (n *Node) InitiateCrossShardTransfer(to string, amount int64) (*state.CrossShardTransfer, error) {
 	if !n.crossShardEnabled {
 		return nil, fmt.Errorf("cross-shard transfers not enabled")
@@ -664,50 +469,182 @@ func (n *Node) InitiateCrossShardTransfer(to string, amount int64) (*state.Cross
 	return transfer, nil
 }
 
-// rewardDistributionLoop handles periodic reward distribution
+// Background Process Loops
+
 func (n *Node) rewardDistributionLoop() {
-	// Use a default epoch duration if not configured
-	epochDuration := 24 * time.Hour // Default to 24 hours
+	epochDuration := 24 * time.Hour
 	if n.config.Consensus.BlockTime > 0 {
-		// Calculate epoch as multiple of block time (e.g., 100 blocks per epoch)
 		epochDuration = time.Duration(n.config.Consensus.BlockTime*100) * time.Second
 	}
 
 	ticker := time.NewTicker(epochDuration)
 	defer ticker.Stop()
 
-	for n.isRunning {
+	for {
 		select {
 		case <-ticker.C:
+			if !n.isRunning {
+				return
+			}
 			n.lastEpoch++
 			if err := n.distributeEpochRewards(n.lastEpoch); err != nil {
 				fmt.Printf("Failed to distribute epoch %d rewards: %v\n", n.lastEpoch, err)
 			}
+		case <-n.ctx.Done():
+			fmt.Println("Reward distribution loop stopped")
+			return
 		}
 	}
 }
 
-// distributeEpochRewards distributes rewards for an epoch
+func (n *Node) blockProductionLoop() {
+	ticker := time.NewTicker(time.Duration(n.config.Consensus.BlockTime) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if !n.isRunning {
+				return
+			}
+			if n.isValidator() && n.isMyTurn() {
+				if err := n.produceBlock(); err != nil {
+					fmt.Printf("Failed to produce block: %v\n", err)
+				}
+			}
+		case <-n.ctx.Done():
+			fmt.Println("Block production loop stopped")
+			return
+		}
+	}
+}
+
+func (n *Node) networkingLoop() {
+	for {
+		select {
+		case msg := <-n.broadcastChan:
+			n.handleOutgoingMessage(msg)
+		case msg := <-n.receiveChan:
+			n.handleIncomingMessage(msg)
+		case <-n.ctx.Done():
+			fmt.Println("Networking loop stopped")
+			return
+		}
+	}
+}
+
+func (n *Node) crossShardLoop() {
+	if !n.crossShardEnabled {
+		return
+	}
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if !n.isRunning {
+				return
+			}
+			n.processCrossShardTransfers()
+		case <-n.ctx.Done():
+			fmt.Println("Cross-shard loop stopped")
+			return
+		}
+	}
+}
+
+func (n *Node) maintenanceLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if !n.isRunning {
+				return
+			}
+			n.performMaintenance()
+		case <-n.ctx.Done():
+			fmt.Println("Maintenance loop stopped")
+			return
+		}
+	}
+}
+
+func (n *Node) eventProcessingLoop() {
+	blockChan := n.blockchain.GetBlockAddedChannel()
+	txChan := n.blockchain.GetTransactionAddedChannel()
+
+	for {
+		select {
+		case block := <-blockChan:
+			if !n.isRunning {
+				return
+			}
+			n.triggerEvent("block_added", block)
+		case tx := <-txChan:
+			if !n.isRunning {
+				return
+			}
+			n.triggerEvent("transaction_added", tx)
+		case <-n.ctx.Done():
+			fmt.Println("Event processing loop stopped")
+			return
+		}
+	}
+}
+
+// Block Production
+
+func (n *Node) produceBlock() error {
+	// Create block through blockchain
+	block, err := n.blockchain.CreateBlock(n.nodeAddress, n.nodePrivateKey)
+	if err != nil {
+		return fmt.Errorf("failed to create block: %v", err)
+	}
+
+	// Add block to blockchain
+	if err := n.blockchain.AddBlock(block); err != nil {
+		return fmt.Errorf("failed to add block: %v", err)
+	}
+
+	// Broadcast block via P2P network
+	if err := n.BroadcastBlock(block); err != nil {
+		fmt.Printf("Failed to broadcast block via P2P: %v\n", err)
+	}
+
+	// Also broadcast via consensus layer
+	n.broadcastChan <- &pos.BlockProposal{
+		Block: block,
+	}
+
+	n.triggerEvent("block_produced", block)
+	n.updateBlockProcessingRate()
+
+	fmt.Printf("Produced and broadcast block %d with %d transactions\n",
+		block.Header.Index, len(block.Transactions))
+
+	return nil
+}
+
+// Reward Distribution
+
 func (n *Node) distributeEpochRewards(epoch uint64) error {
-	// Calculate inflation rewards - use a simple calculation if method doesn't exist
 	var inflationRewards int64
 	if n.inflationManager != nil {
-		// Try to get inflation rate from config or use default
 		inflationRate := float64(0.05) // 5% annual inflation
 		if n.config.Economics.InflationRate > 0 {
 			inflationRate = n.config.Economics.InflationRate
 		}
 
-		// Calculate rewards based on total supply and inflation rate
 		totalSupply := n.worldState.GetTotalSupply()
-		// Daily rewards (assuming daily epochs)
 		inflationRewards = int64(float64(totalSupply) * inflationRate / 365.0)
 	} else {
-		// Fallback calculation
 		inflationRewards = 1000 // Default reward amount
 	}
 
-	// Distribute through staking manager
 	stakingManager := n.blockchain.GetStakingManager()
 	if stakingManager == nil {
 		return fmt.Errorf("staking manager not available")
@@ -726,81 +663,40 @@ func (n *Node) distributeEpochRewards(epoch uint64) error {
 	return nil
 }
 
-// blockProductionLoop handles block production for validators
-func (n *Node) blockProductionLoop() {
-	ticker := time.NewTicker(time.Duration(n.config.Consensus.BlockTime) * time.Second)
-	defer ticker.Stop()
+// Message Handling
 
-	for n.isRunning {
-		select {
-		case <-ticker.C:
-			if n.isValidator() && n.isMyTurn() {
-				if err := n.produceBlock(); err != nil {
-					fmt.Printf("Failed to produce block: %v\n", err)
-				}
+func (n *Node) handleOutgoingMessage(msg interface{}) {
+	switch m := msg.(type) {
+	case *pos.BlockProposal:
+		fmt.Printf("Broadcasting block proposal: %s\n", m.Block.Hash)
+		// Also broadcast via P2P if available
+		if err := n.BroadcastBlock(m.Block); err != nil {
+			fmt.Printf("Failed to broadcast block via P2P: %v\n", err)
+		}
+	case *pos.Attestation:
+		fmt.Printf("Broadcasting attestation\n")
+		if n.p2pNetwork != nil {
+			if err := n.p2pNetwork.BroadcastAttestation(m); err != nil {
+				fmt.Printf("Failed to broadcast attestation: %v\n", err)
+			}
+		}
+	case *pos.Vote:
+		fmt.Printf("Broadcasting vote\n")
+		if n.p2pNetwork != nil {
+			if err := n.p2pNetwork.BroadcastVote(m); err != nil {
+				fmt.Printf("Failed to broadcast vote: %v\n", err)
 			}
 		}
 	}
 }
 
-// produceBlock produces a new block
-func (n *Node) produceBlock() error {
-	// Create block through blockchain
-	block, err := n.blockchain.CreateBlock(n.nodeAddress, n.nodePrivateKey)
-	if err != nil {
-		return fmt.Errorf("failed to create block: %v", err)
-	}
-
-	// Add block to blockchain
-	if err := n.blockchain.AddBlock(block); err != nil {
-		return fmt.Errorf("failed to add block: %v", err)
-	}
-
-	// Broadcast block
-	n.broadcastChan <- &pos.BlockProposal{
-		Block: block,
-		// Remove fields that don't exist in the actual pos.BlockProposal struct
-	}
-
-	n.triggerEvent("block_produced", block)
-	n.updateBlockProcessingRate()
-
-	fmt.Printf("Produced block %d with %d transactions\n",
-		block.Header.Index, len(block.Transactions))
-
-	return nil
+func (n *Node) handleIncomingMessage(msg interface{}) {
+	fmt.Printf("Received message: %T\n", msg)
+	// Process incoming messages from consensus
 }
 
-// networkingLoop handles network communication
-func (n *Node) networkingLoop() {
-	for n.isRunning {
-		select {
-		case msg := <-n.broadcastChan:
-			n.handleOutgoingMessage(msg)
-		case msg := <-n.receiveChan:
-			n.handleIncomingMessage(msg)
-		}
-	}
-}
+// Cross-shard Processing
 
-// crossShardLoop handles cross-shard operations
-func (n *Node) crossShardLoop() {
-	if !n.crossShardEnabled {
-		return
-	}
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for n.isRunning {
-		select {
-		case <-ticker.C:
-			n.processCrossShardTransfers()
-		}
-	}
-}
-
-// processCrossShardTransfers processes pending cross-shard transfers
 func (n *Node) processCrossShardTransfers() {
 	csm := n.blockchain.GetCrossShardManager()
 	if csm == nil {
@@ -809,7 +705,6 @@ func (n *Node) processCrossShardTransfers() {
 
 	pendingTransfers := csm.GetPendingTransfers()
 	for _, transfer := range pendingTransfers {
-		// Complete transfers destined for this shard
 		if transfer.ToShard == n.shardID && transfer.Status == "pending" {
 			if err := n.blockchain.CompleteCrossShardTransfer(transfer.Hash); err != nil {
 				fmt.Printf("Failed to complete cross-shard transfer %s: %v\n", transfer.Hash, err)
@@ -820,75 +715,40 @@ func (n *Node) processCrossShardTransfers() {
 	}
 }
 
-// maintenanceLoop performs periodic maintenance
-func (n *Node) maintenanceLoop() {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
+// Maintenance
 
-	for n.isRunning {
-		select {
-		case <-ticker.C:
-			n.performMaintenance()
-		}
-	}
-}
-
-// performMaintenance performs routine maintenance tasks
 func (n *Node) performMaintenance() {
-	// Cleanup old data
 	n.blockchain.Cleanup()
 
-	// Validate state consistency
 	if err := n.blockchain.ValidateStateConsistency(); err != nil {
 		fmt.Printf("State consistency check failed: %v\n", err)
 		n.triggerEvent("state_inconsistency_detected", err)
 	}
 
-	// Update validator performance metrics
 	n.updateValidatorMetrics()
-
 	n.triggerEvent("maintenance_completed", time.Now())
 }
 
-// eventProcessingLoop processes events
-func (n *Node) eventProcessingLoop() {
-	blockChan := n.blockchain.GetBlockAddedChannel()
-	txChan := n.blockchain.GetTransactionAddedChannel()
-
-	for n.isRunning {
-		select {
-		case block := <-blockChan:
-			n.triggerEvent("block_added", block)
-		case tx := <-txChan:
-			n.triggerEvent("transaction_added", tx)
-		}
-	}
-}
-
-// Helper methods
+// Helper Methods
 
 func (n *Node) storeGenesisConfig(config *NodeConfig) {
 	// Store genesis configuration for later use
-	// This would typically be stored in the node's configuration
 }
 
 func (n *Node) initializeGenesis() error {
-	// Check if genesis already exists
 	if n.blockchain.GetHeight() >= 0 {
 		return nil // Genesis already initialized
 	}
 
-	// Initialize through blockchain
 	genesisValidators := []*core.Validator{}
 	if n.isValidatorNode {
-		// Add self as genesis validator
 		genesisValidators = append(genesisValidators, &core.Validator{
 			Address:        n.nodeAddress,
 			Pubkey:         n.nodePrivateKey.PublicKey().Bytes(),
 			Stake:          n.config.Staking.MinValidatorStake,
 			SelfStake:      n.config.Staking.MinValidatorStake,
 			DelegatedStake: 0,
-			Commission:     0.1, // 10% commission
+			Commission:     0.1,
 			Active:         true,
 			Delegators:     make(map[string]int64),
 			CreatedAt:      time.Now().Unix(),
@@ -897,8 +757,8 @@ func (n *Node) initializeGenesis() error {
 	}
 
 	return n.blockchain.InitializeGenesis(
-		n.nodeAddress, // Genesis account
-		n.nodeAddress, // Genesis validator
+		n.nodeAddress,
+		n.nodeAddress,
 		n.config.Economics.GenesisSupply,
 		genesisValidators,
 		n.nodePrivateKey,
@@ -907,22 +767,6 @@ func (n *Node) initializeGenesis() error {
 
 func (n *Node) registerAsValidator() error {
 	return n.RegisterValidator(n.config.Staking.MinValidatorStake, 0.1)
-}
-
-func (n *Node) handleOutgoingMessage(msg interface{}) {
-	switch m := msg.(type) {
-	case *pos.BlockProposal:
-		fmt.Printf("Broadcasting block proposal: %s\n", m.Block.Hash)
-	case *pos.Attestation:
-		fmt.Printf("Broadcasting attestation\n")
-	case *pos.Vote:
-		fmt.Printf("Broadcasting vote\n")
-	}
-}
-
-func (n *Node) handleIncomingMessage(msg interface{}) {
-	// Forward to consensus engine
-	fmt.Printf("Received message: %T\n", msg)
 }
 
 func (n *Node) isValidator() bool {
@@ -934,15 +778,11 @@ func (n *Node) isValidator() bool {
 }
 
 func (n *Node) isMyTurn() bool {
-	// Simple round-robin logic based on current time and validator list
-	// In a real implementation, this would use proper consensus slot calculation
-
 	validators := n.blockchain.GetActiveValidators()
 	if len(validators) == 0 {
 		return false
 	}
 
-	// Find our validator index
 	myIndex := -1
 	for i, validator := range validators {
 		if validator.Address == n.nodeAddress {
@@ -952,10 +792,9 @@ func (n *Node) isMyTurn() bool {
 	}
 
 	if myIndex == -1 {
-		return false // We're not a validator
+		return false
 	}
 
-	// Simple time-based slot assignment (in real implementation, use proper consensus rules)
 	currentSlot := time.Now().Unix() / int64(n.config.Consensus.BlockTime)
 	assignedValidator := currentSlot % int64(len(validators))
 
@@ -963,7 +802,6 @@ func (n *Node) isMyTurn() bool {
 }
 
 func (n *Node) updateBlockProcessingRate() {
-	// Calculate processing rate
 	currentTime := time.Now()
 	if !n.lastRewardTime.IsZero() {
 		duration := currentTime.Sub(n.lastRewardTime)
@@ -974,10 +812,9 @@ func (n *Node) updateBlockProcessingRate() {
 
 func (n *Node) updateValidatorMetrics() {
 	// Update validator performance metrics
-	// This would include uptime, block production rate, etc.
 }
 
-// Event system
+// Event System
 
 func (n *Node) AddEventHandler(eventType string, handler func(interface{})) {
 	n.mu.Lock()
@@ -992,18 +829,16 @@ func (n *Node) AddEventHandler(eventType string, handler func(interface{})) {
 func (n *Node) triggerEvent(eventType string, data interface{}) {
 	n.mu.RLock()
 	handlers := n.eventHandlers[eventType]
-	// Make a copy of the handlers slice to avoid holding the lock
 	handlersCopy := make([]func(interface{}), len(handlers))
 	copy(handlersCopy, handlers)
 	n.mu.RUnlock()
 
-	// Execute handlers without holding any locks
 	for _, handler := range handlersCopy {
 		go handler(data)
 	}
 }
 
-// Public API methods
+// Public API Methods
 
 func (n *Node) GetNodeStatus() map[string]interface{} {
 	n.mu.RLock()
@@ -1025,9 +860,12 @@ func (n *Node) GetNodeStatus() map[string]interface{} {
 		"world_state":           worldStateStatus,
 	}
 
-	// Add consensus stats
 	if n.consensusEngine != nil {
 		status["consensus"] = n.consensusEngine.GetStats()
+	}
+
+	if n.p2pNetwork != nil {
+		status["p2p"] = n.p2pNetwork.GetNetworkStats()
 	}
 
 	return status
@@ -1086,5 +924,48 @@ func (n *Node) GetShardInfo() map[string]interface{} {
 }
 
 func (n *Node) IsHealthy() bool {
-	return n.isRunning && n.blockchain.IsHealthy()
+	isHealthy := n.isRunning && n.blockchain.IsHealthy()
+
+	if n.p2pNetwork != nil {
+		isHealthy = isHealthy && n.p2pNetwork.IsHealthy()
+	}
+
+	return isHealthy
+}
+
+// P2P-specific Methods
+
+func (n *Node) GetP2PStats() map[string]interface{} {
+	if n.p2pNetwork != nil {
+		return n.p2pNetwork.GetNetworkStats()
+	}
+	return map[string]interface{}{
+		"enabled": false,
+		"error":   "P2P network not enabled",
+	}
+}
+
+func (n *Node) GetConnectedPeers() int {
+	if n.p2pNetwork != nil {
+		return n.p2pNetwork.GetConnectedPeers()
+	}
+	return 0
+}
+
+func (n *Node) IsP2PConnected() bool {
+	if n.p2pNetwork != nil {
+		return n.p2pNetwork.IsConnected()
+	}
+	return false
+}
+
+func (n *Node) GetPeerID() string {
+	if n.p2pNetwork != nil {
+		return n.p2pNetwork.GetPeerID()
+	}
+	return ""
+}
+
+func (n *Node) ForceP2PSync() error {
+	return n.SyncWithPeers()
 }
