@@ -6,6 +6,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/network"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/storage"
 	thrylosSync "github.com/thrylos-labs/go-thrylos/sync" // Use alias to avoid conflict with "sync" package
 )
 
@@ -26,6 +28,7 @@ import (
 type Node struct {
 	// Core components
 	config     *config.Config
+	storage    *storage.BadgerStorage // ADD THIS FIELD
 	worldState *state.WorldState
 	blockchain *chain.Blockchain
 
@@ -103,8 +106,20 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to generate node address: %v", err)
 	}
 
-	// Initialize WorldState with shard configuration
-	worldState := state.NewWorldState(nodeConfig.ShardID, nodeConfig.TotalShards, nodeConfig.Config)
+	// Initialize storage first
+	dataDir := filepath.Join(nodeConfig.DataDir, fmt.Sprintf("shard-%d", nodeConfig.ShardID))
+	storage, err := storage.NewBadgerStorage(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize storage: %v", err)
+	}
+
+	// Initialize WorldState with existing storage - PASS THE STORAGE
+	worldState, err := state.NewWorldState(dataDir, nodeConfig.ShardID, nodeConfig.TotalShards, nodeConfig.Config, storage)
+	if err != nil {
+		storage.Close() // Clean up storage if WorldState creation fails
+		cancelFunc()    // Prevent context leak
+		return nil, fmt.Errorf("failed to initialize world state: %v", err)
+	}
 
 	// Initialize Blockchain with WorldState
 	blockchainConfig := &chain.BlockchainConfig{
@@ -118,6 +133,8 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 
 	bc, err := chain.NewBlockchain(blockchainConfig)
 	if err != nil {
+		storage.Close() // Clean up storage
+		cancelFunc()    // Prevent context leak
 		return nil, fmt.Errorf("failed to create blockchain: %v", err)
 	}
 
@@ -152,6 +169,8 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 			nodeConfig.EnableP2P,
 		)
 		if err != nil {
+			storage.Close() // Clean up storage
+			cancelFunc()    // Prevent context leak
 			return nil, fmt.Errorf("failed to create P2P network: %v", err)
 		}
 		p2pNetwork = p2pNet
@@ -159,11 +178,12 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 
 	var syncManager *thrylosSync.SyncManager
 	if p2pNetwork != nil {
-		syncManager = thrylosSync.NewSyncManager(nodeConfig.Config, bc, worldState, p2pNetwork) // Changed package
+		syncManager = thrylosSync.NewSyncManager(nodeConfig.Config, bc, worldState, p2pNetwork)
 	}
 
 	node := &Node{
 		config:            nodeConfig.Config,
+		storage:           storage,
 		worldState:        worldState,
 		blockchain:        bc,
 		p2pNetwork:        p2pNetwork,
@@ -306,6 +326,13 @@ func (n *Node) Stop() error {
 	// Perform final cleanup
 	n.blockchain.Cleanup()
 	n.worldState.Cleanup()
+
+	// Close storage LAST (after everything else)
+	if n.storage != nil {
+		if err := n.storage.Close(); err != nil {
+			fmt.Printf("Error closing storage: %v\n", err)
+		}
+	}
 
 	n.isRunning = false
 

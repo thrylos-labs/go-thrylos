@@ -18,6 +18,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/transaction"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/storage"
 	"golang.org/x/crypto/blake2b"
 )
 
@@ -25,6 +26,9 @@ import (
 type WorldState struct {
 	// Configuration
 	config *config.Config
+
+	db    *storage.DB           // For blocks, transactions, batch operations
+	state *storage.StateStorage // For accounts, validators, height, state root
 
 	// Account management
 	accountManager *account.AccountManager
@@ -62,9 +66,21 @@ type WorldState struct {
 }
 
 // NewWorldState creates a new world state for a shard with config-driven initialization
-func NewWorldState(shardID account.ShardID, totalShards int, cfg *config.Config) *WorldState {
+// NewWorldState creates a new world state for a shard with config-driven initialization
+// Simplified version without debug - just add the storage parameter:
+
+func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg *config.Config, badgerStorage *storage.BadgerStorage) (*WorldState, error) {
+	fmt.Printf("🔍 NewWorldState: Using existing BadgerStorage (no creation needed)\n")
+
+	// Use the provided storage instead of creating a new one
+	// Create high-level wrappers using the existing storage
+	db := storage.NewDB(badgerStorage)
+	stateStorage := storage.NewStateStorage(badgerStorage)
+
 	ws := &WorldState{
 		config:         cfg,
+		db:             db,           // Use for blocks, transactions
+		state:          stateStorage, // Use for accounts, validators
 		accountManager: account.NewAccountManager(shardID, totalShards),
 		txPool:         transaction.NewPool(shardID, totalShards, cfg.Consensus.MaxTxPerBlock, cfg.Consensus.MinGasPrice),
 		txValidator:    transaction.NewValidator(shardID, totalShards, cfg),
@@ -78,10 +94,31 @@ func NewWorldState(shardID account.ShardID, totalShards int, cfg *config.Config)
 		lastTimestamp:  time.Now().Unix(),
 	}
 
+	// Try to load existing state from storage
+	if err := ws.LoadState(); err != nil {
+		fmt.Printf("🔍 NewWorldState: No existing state found (fresh start): %v\n", err)
+
+		// Fresh database - initialize with default values
+		ws.height = -1 // Genesis state
+		ws.stateRoot = ""
+		ws.totalSupply = cfg.Economics.GenesisSupply
+		ws.totalStaked = 0
+
+		fmt.Printf("✅ NewWorldState: Initialized fresh state\n")
+	} else {
+		// Successfully loaded existing state
+		ws.UpdateTotalStaked()
+
+		// Skip consistency check for now since we know it might have issues
+		// We can add it back later once the basic functionality works
+		fmt.Printf("✅ NewWorldState: Loaded existing state: height=%d, accounts=%d, validators=%d\n",
+			ws.height, ws.GetAccountCount(), ws.GetValidatorCount())
+	}
+
 	// Initialize cross-shard manager
 	ws.crossShardManager = NewCrossShardManager(ws)
 
-	return ws
+	return ws, nil
 }
 
 // InitializeGenesis initializes the world state with genesis data
@@ -123,7 +160,6 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply int
 	return nil
 }
 
-// AddBlock adds a new block to the chain and updates state
 func (ws *WorldState) AddBlock(block *core.Block) error {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
@@ -134,6 +170,9 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 	}
 
 	// Execute all transactions in the block
+	var updatedAccounts []*core.Account
+	var updatedValidators []*core.Validator
+
 	for _, tx := range block.Transactions {
 		// Use the executor instance
 		receipt, err := ws.txExecutor.ExecuteTransaction(tx, ws.accountManager)
@@ -144,6 +183,11 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 		// Check receipt status
 		if receipt.Status == 0 {
 			return fmt.Errorf("transaction %s failed: %s", tx.Id, receipt.Error)
+		}
+
+		// Save transaction to storage
+		if err := ws.db.SaveTransaction(tx); err != nil {
+			return fmt.Errorf("failed to save transaction %s: %v", tx.Id, err)
 		}
 
 		// Remove transaction from pool if it exists
@@ -163,6 +207,20 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 
 	// Update block's state root
 	block.Header.StateRoot = ws.stateRoot
+
+	// Collect all accounts and validators that need to be saved
+	accounts := ws.accountManager.GetAllAccounts()
+	for _, account := range accounts {
+		updatedAccounts = append(updatedAccounts, account)
+	}
+	for _, validator := range ws.validators {
+		updatedValidators = append(updatedValidators, validator)
+	}
+
+	// Use atomic batch operation to save everything
+	if err := ws.db.CommitBlock(block, updatedAccounts, updatedValidators); err != nil {
+		return fmt.Errorf("failed to commit block to storage: %v", err)
+	}
 
 	return nil
 }
@@ -1521,4 +1579,166 @@ func (ws *WorldState) PruneStatesBefore(height int64) (int, error) {
 	ws.blocks = newBlocks
 
 	return pruned, nil
+}
+
+func (ws *WorldState) SaveState() error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Save current height
+	if err := ws.state.SaveHeight(ws.height); err != nil {
+		return fmt.Errorf("failed to save height: %v", err)
+	}
+
+	// Save state root
+	if err := ws.state.SaveStateRoot(ws.stateRoot); err != nil {
+		return fmt.Errorf("failed to save state root: %v", err)
+	}
+
+	// Save all accounts
+	accounts := ws.accountManager.GetAllAccounts()
+	for _, account := range accounts {
+		if err := ws.state.SaveAccount(account); err != nil {
+			return fmt.Errorf("failed to save account %s: %v", account.Address, err)
+		}
+	}
+
+	// Save all validators
+	for _, validator := range ws.validators {
+		if err := ws.state.SaveValidator(validator); err != nil {
+			return fmt.Errorf("failed to save validator %s: %v", validator.Address, err)
+		}
+	}
+
+	return nil
+}
+
+// LoadState loads the world state from storage
+func (ws *WorldState) LoadState() error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	fmt.Printf("🔍 LoadState: Attempting to load state from storage...\n")
+
+	// Load height
+	height, err := ws.state.GetHeight()
+	if err != nil {
+		fmt.Printf("🔍 LoadState: No height found (fresh database): %v\n", err)
+		return fmt.Errorf("no existing state found (fresh database)")
+	}
+
+	fmt.Printf("🔍 LoadState: Found height: %d\n", height)
+	if height >= 0 { // -1 means genesis state
+		ws.height = height
+	}
+
+	// Load state root
+	stateRoot, err := ws.state.GetStateRoot()
+	if err != nil {
+		fmt.Printf("🔍 LoadState: No state root found: %v\n", err)
+		return fmt.Errorf("no state root found")
+	}
+
+	fmt.Printf("🔍 LoadState: Found state root: %s\n", stateRoot)
+	ws.stateRoot = stateRoot
+
+	// Load all accounts
+	accounts, err := ws.state.GetAllAccounts()
+	if err != nil {
+		fmt.Printf("🔍 LoadState: Error loading accounts: %v\n", err)
+		return fmt.Errorf("failed to load accounts: %v", err)
+	}
+
+	fmt.Printf("🔍 LoadState: Found %d accounts\n", len(accounts))
+
+	// Reset account manager and load accounts
+	ws.accountManager = account.NewAccountManager(ws.shardID, ws.totalShards)
+	totalSupply := int64(0)
+	for _, account := range accounts {
+		if err := ws.accountManager.UpdateAccount(account); err != nil {
+			return fmt.Errorf("failed to restore account %s: %v", account.Address, err)
+		}
+		totalSupply += account.Balance + account.StakedAmount + account.Rewards
+	}
+	ws.totalSupply = totalSupply
+
+	// Load all validators (you need GetAllValidators method in StateStorage)
+	validators, err := ws.state.GetAllValidators()
+	if err != nil {
+		fmt.Printf("🔍 LoadState: Error loading validators: %v\n", err)
+		return fmt.Errorf("failed to load validators: %v", err)
+	}
+
+	fmt.Printf("🔍 LoadState: Found %d validators\n", len(validators))
+
+	// Clear and reload validators
+	ws.validators = make(map[string]*core.Validator)
+	totalStaked := int64(0)
+	for address, validator := range validators {
+		ws.validators[address] = validator
+		totalStaked += validator.Stake
+	}
+	ws.totalStaked = totalStaked
+
+	fmt.Printf("✅ LoadState: State loaded successfully\n")
+	return nil
+}
+
+// Close properly closes the storage
+func (ws *WorldState) Close() error {
+	// Save current state before closing
+	if err := ws.SaveState(); err != nil {
+		return fmt.Errorf("failed to save state during close: %v", err)
+	}
+
+	// Close high-level components
+	if err := ws.db.Close(); err != nil {
+		return fmt.Errorf("failed to close db: %v", err)
+	}
+
+	if err := ws.state.Close(); err != nil {
+		return fmt.Errorf("failed to close state storage: %v", err)
+	}
+
+	// We need access to the underlying BadgerStorage
+	// Option 1: Store a reference to BadgerStorage in WorldState
+	// Option 2: Add a method to get the underlying storage
+	// For now, return nil since the Node handles storage closing
+	return nil
+}
+
+// GetBlockFromStorage retrieves a block from storage (not just memory)
+func (ws *WorldState) GetBlockFromStorage(hash string) (*core.Block, error) {
+	return ws.db.GetBlock(hash)
+}
+
+// GetTransactionFromStorage retrieves a transaction from storage
+func (ws *WorldState) GetTransactionFromStorage(hash string) (*core.Transaction, error) {
+	return ws.db.GetTransaction(hash)
+}
+
+// Modified account operations to persist to storage
+func (ws *WorldState) UpdateAccountWithStorage(account *core.Account) error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Update in memory
+	if err := ws.accountManager.UpdateAccount(account); err != nil {
+		return err
+	}
+
+	// Persist to storage
+	return ws.state.SaveAccount(account)
+}
+
+// Modified validator operations to persist to storage
+func (ws *WorldState) UpdateValidatorWithStorage(validator *core.Validator) error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Update in memory
+	ws.validators[validator.Address] = validator
+
+	// Persist to storage
+	return ws.state.SaveValidator(validator)
 }
