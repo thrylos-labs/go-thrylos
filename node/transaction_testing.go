@@ -1,19 +1,19 @@
 package node
 
-// transaction_testing.go - Transaction utilities for testing purposes only
-// In production, transactions are created and submitted by wallets
+// transaction_testing.go - CORRECTED to match validator.go exactly
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/crypto"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
-	"golang.org/x/crypto/blake2b"
 )
 
 // TransactionTester provides utilities for creating test transactions
-// This should only be used for development, testing, and debugging
 type TransactionTester struct {
 	node       *Node
 	privateKey crypto.PrivateKey
@@ -29,14 +29,14 @@ func NewTransactionTester(node *Node, privateKey crypto.PrivateKey, address stri
 	}
 }
 
-// CreateTestTransaction creates a test transaction (for development/testing only)
+// CreateTestTransaction creates a test transaction matching validator's exact hash calculation
 func (tt *TransactionTester) CreateTestTransaction(from, to string, amount int64, gasPrice int64) (*core.Transaction, error) {
 	nonce, err := tt.node.blockchain.GetNonce(from)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce: %v", err)
 	}
 
-	// Generate transaction ID
+	// Generate transaction ID (simple version for testing)
 	timestamp := time.Now().UnixNano()
 	txID := fmt.Sprintf("test_tx_%d_%d", timestamp, nonce)
 
@@ -48,15 +48,13 @@ func (tt *TransactionTester) CreateTestTransaction(from, to string, amount int64
 		Gas:       21000,
 		GasPrice:  gasPrice,
 		Nonce:     nonce,
+		Type:      core.TransactionType_TRANSFER, // This was missing!
+		Data:      nil,                           // This was missing!
 		Timestamp: time.Now().Unix(),
 	}
 
-	// Calculate hash
-	hash, err := tt.calculateTransactionHash(tx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate transaction hash: %v", err)
-	}
-	tx.Hash = hash
+	// Calculate hash using EXACT same method as validator
+	tx.Hash = tt.calculateTransactionHashExact(tx)
 
 	// Sign the transaction
 	signature, err := tt.signTransaction(tx)
@@ -66,6 +64,55 @@ func (tt *TransactionTester) CreateTestTransaction(from, to string, amount int64
 	tx.Signature = signature
 
 	return tx, nil
+}
+
+// calculateTransactionHashExact - EXACT copy of validator's CalculateTransactionHash method
+func (tt *TransactionTester) calculateTransactionHashExact(tx *core.Transaction) string {
+	var buf bytes.Buffer
+
+	// Serialize transaction fields for hashing (excluding signature and hash)
+	// THIS MATCHES validator.go EXACTLY:
+
+	buf.WriteString(tx.Id)
+	buf.WriteString(tx.From)
+	buf.WriteString(tx.To)
+
+	// Write amount as bytes
+	amountBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(amountBytes, uint64(tx.Amount))
+	buf.Write(amountBytes)
+
+	// Write gas as bytes
+	gasBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
+	buf.Write(gasBytes)
+
+	// Write gas price as bytes
+	gasPriceBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(gasPriceBytes, uint64(tx.GasPrice))
+	buf.Write(gasPriceBytes)
+
+	// Write nonce as bytes
+	nonceBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(nonceBytes, tx.Nonce)
+	buf.Write(nonceBytes)
+
+	// Write transaction type
+	typeBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(typeBytes, uint32(tx.Type))
+	buf.Write(typeBytes)
+
+	// Write timestamp
+	timestampBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(timestampBytes, uint64(tx.Timestamp))
+	buf.Write(timestampBytes)
+
+	// Write data
+	buf.Write(tx.Data)
+
+	// Calculate Blake2b hash using crypto/hash
+	hashBytes := hash.HashData(buf.Bytes())
+	return fmt.Sprintf("%x", hashBytes)
 }
 
 // SubmitTestTransaction creates and submits a test transaction
@@ -82,55 +129,6 @@ func (tt *TransactionTester) SubmitTestTransaction(from, to string, amount int64
 	return tx, nil
 }
 
-// CreateTransactionSimple creates a minimal transaction for testing
-func (tt *TransactionTester) CreateTransactionSimple(from, to string, amount int64, gasPrice int64) (*core.Transaction, error) {
-	nonce, err := tt.node.blockchain.GetNonce(from)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get nonce: %v", err)
-	}
-
-	// Create transaction and let blockchain handle the hash
-	tx := &core.Transaction{
-		From:      from,
-		To:        to,
-		Amount:    amount,
-		Gas:       21000,
-		GasPrice:  gasPrice,
-		Nonce:     nonce,
-		Timestamp: time.Now().Unix(),
-	}
-
-	return tx, nil
-}
-
-// CreateTransactionWithDummySignature creates a transaction with placeholder signature
-func (tt *TransactionTester) CreateTransactionWithDummySignature(from, to string, amount int64, gasPrice int64) (*core.Transaction, error) {
-	nonce, err := tt.node.blockchain.GetNonce(from)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get nonce: %v", err)
-	}
-
-	timestamp := time.Now().UnixNano()
-	hashData := fmt.Sprintf("%s_%s_%d_%d_%d", from, to, amount, nonce, timestamp)
-	hash := blake2b.Sum256([]byte(hashData))
-	hashString := fmt.Sprintf("%x", hash)
-
-	tx := &core.Transaction{
-		Id:        fmt.Sprintf("dummy_tx_%d_%d", timestamp, nonce),
-		Hash:      hashString,
-		From:      from,
-		To:        to,
-		Amount:    amount,
-		Gas:       21000,
-		GasPrice:  gasPrice,
-		Nonce:     nonce,
-		Timestamp: time.Now().Unix(),
-		Signature: []byte("dummy_signature"), // Simple placeholder signature
-	}
-
-	return tx, nil
-}
-
 // BatchCreateTestTransactions creates multiple test transactions
 func (tt *TransactionTester) BatchCreateTestTransactions(from, to string, count int, amount int64, gasPrice int64) ([]*core.Transaction, error) {
 	var transactions []*core.Transaction
@@ -142,8 +140,8 @@ func (tt *TransactionTester) BatchCreateTestTransactions(from, to string, count 
 		}
 		transactions = append(transactions, tx)
 
-		// Small delay to ensure unique timestamps
-		time.Sleep(time.Millisecond)
+		// Small delay to ensure unique timestamps and nonces
+		time.Sleep(time.Millisecond * 10)
 	}
 
 	return transactions, nil
@@ -167,34 +165,13 @@ func (tt *TransactionTester) BatchSubmitTestTransactions(from, to string, count 
 	return transactions, nil
 }
 
-// Helper methods for transaction creation
-
-func (tt *TransactionTester) calculateTransactionHash(tx *core.Transaction) (string, error) {
-	// Create hash data from transaction fields (excluding hash and signature)
-	hashData := fmt.Sprintf("%s%s%s%d%d%d%d%d",
-		tx.Id,
-		tx.From,
-		tx.To,
-		tx.Amount,
-		tx.Gas,
-		tx.GasPrice,
-		tx.Nonce,
-		tx.Timestamp,
-	)
-
-	hash := blake2b.Sum256([]byte(hashData))
-	return fmt.Sprintf("%x", hash), nil
-}
-
+// signTransaction signs the transaction using the private key (matches validator approach)
 func (tt *TransactionTester) signTransaction(tx *core.Transaction) ([]byte, error) {
-	// Sign the transaction hash
-	hashBytes, err := tt.calculateTransactionHash(tx)
-	if err != nil {
-		return nil, err
-	}
+	// Create hash to sign (same approach as validator)
+	hashToSign := hash.HashData([]byte(tx.Hash))
 
-	hash := blake2b.Sum256([]byte(hashBytes))
-	signature := tt.privateKey.Sign(hash[:])
+	// Sign with private key
+	signature := tt.privateKey.Sign(hashToSign)
 	if signature == nil {
 		return nil, fmt.Errorf("failed to sign transaction: signature is nil")
 	}
@@ -202,7 +179,94 @@ func (tt *TransactionTester) signTransaction(tx *core.Transaction) ([]byte, erro
 	return signature.Bytes(), nil
 }
 
-// Test scenarios
+// CreateTransferTransaction creates a proper transfer transaction (like validator)
+func (tt *TransactionTester) CreateTransferTransaction(from, to string, amount, gas, gasPrice int64, nonce uint64) (*core.Transaction, error) {
+	timestamp := time.Now().UnixNano()
+	txID := fmt.Sprintf("test_tx_%d_%d", timestamp, nonce)
+
+	tx := &core.Transaction{
+		Id:        txID,
+		From:      from,
+		To:        to,
+		Amount:    amount,
+		Gas:       gas,
+		GasPrice:  gasPrice,
+		Nonce:     nonce,
+		Type:      core.TransactionType_TRANSFER,
+		Data:      nil,
+		Timestamp: time.Now().Unix(),
+	}
+
+	// Calculate hash using exact method
+	tx.Hash = tt.calculateTransactionHashExact(tx)
+
+	// Sign the transaction
+	signature, err := tt.signTransaction(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %v", err)
+	}
+	tx.Signature = signature
+
+	return tx, nil
+}
+
+// DebugHashMismatch helps debug hash calculation differences
+func (tt *TransactionTester) DebugHashMismatch(from, to string, amount int64, gasPrice int64) {
+	fmt.Println("🔧 === UPDATED TRANSACTION HASH DEBUG ===")
+
+	nonce, err := tt.node.blockchain.GetNonce(from)
+	if err != nil {
+		fmt.Printf("Failed to get nonce: %v\n", err)
+		return
+	}
+
+	timestamp := time.Now().UnixNano()
+	txID := fmt.Sprintf("debug_tx_%d_%d", timestamp, nonce)
+
+	tx := &core.Transaction{
+		Id:        txID,
+		From:      from,
+		To:        to,
+		Amount:    amount,
+		Gas:       21000,
+		GasPrice:  gasPrice,
+		Nonce:     nonce,
+		Type:      core.TransactionType_TRANSFER, // NOW INCLUDED
+		Data:      nil,                           // NOW INCLUDED
+		Timestamp: time.Now().Unix(),
+	}
+
+	fmt.Printf("Transaction fields:\n")
+	fmt.Printf("  ID: %s\n", tx.Id)
+	fmt.Printf("  From: %s\n", tx.From)
+	fmt.Printf("  To: %s\n", tx.To)
+	fmt.Printf("  Amount: %d\n", tx.Amount)
+	fmt.Printf("  Gas: %d\n", tx.Gas)
+	fmt.Printf("  GasPrice: %d\n", tx.GasPrice)
+	fmt.Printf("  Nonce: %d\n", tx.Nonce)
+	fmt.Printf("  Type: %v\n", tx.Type)
+	fmt.Printf("  Data: %v\n", tx.Data)
+	fmt.Printf("  Timestamp: %d\n", tx.Timestamp)
+	fmt.Println()
+
+	// Calculate hash with corrected method
+	hash := tt.calculateTransactionHashExact(tx)
+	fmt.Printf("Calculated hash (corrected): %s\n", hash)
+
+	tx.Hash = hash
+	tx.Signature = []byte("debug_signature")
+
+	fmt.Printf("Testing corrected transaction...\n")
+	if err := tt.node.SubmitTransaction(tx); err != nil {
+		fmt.Printf("❌ Still failed: %v\n", err)
+	} else {
+		fmt.Printf("✅ SUCCESS! Transaction accepted!\n")
+	}
+
+	fmt.Println("========================================")
+}
+
+// Helper methods for testing scenarios
 
 // SimulateTransactionLoad creates a realistic transaction load for testing
 func (tt *TransactionTester) SimulateTransactionLoad(addresses []string, duration time.Duration, tps int) error {
@@ -223,7 +287,7 @@ func (tt *TransactionTester) SimulateTransactionLoad(addresses []string, duratio
 			to := addresses[(time.Now().UnixNano()+1)%int64(len(addresses))]
 
 			if from != to {
-				_, err := tt.SubmitTestTransaction(from, to, 100, 1000)
+				_, err := tt.SubmitTestTransaction(from, to, 15000000, 1000) // Use valid amount
 				if err != nil {
 					fmt.Printf("Failed to submit test transaction: %v\n", err)
 				}
@@ -245,9 +309,6 @@ func (tt *TransactionTester) TestP2PTransactionPropagation(from, to string, amou
 	}
 
 	fmt.Printf("Submitted test transaction %s for P2P propagation test\n", tx.Id)
-
-	// In a real test, you would check if other nodes receive this transaction
-	// For now, just log the submission
 	return nil
 }
 
@@ -286,4 +347,14 @@ func (tt *TransactionTester) ValidateTransactionFormat(tx *core.Transaction) err
 	}
 
 	return nil
+}
+
+// GetBalance returns the balance of an address (helper method)
+func (tt *TransactionTester) GetBalance(address string) (int64, error) {
+	return tt.node.GetBalance(address)
+}
+
+// GetNode returns the node instance (helper method)
+func (tt *TransactionTester) GetNode() *Node {
+	return tt.node
 }

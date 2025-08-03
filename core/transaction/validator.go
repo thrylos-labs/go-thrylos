@@ -23,6 +23,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 	"golang.org/x/crypto/blake2b"
 )
@@ -160,9 +161,9 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) string {
 	// Write data
 	buf.Write(tx.Data)
 
-	// Calculate Blake2b hash
-	hash := blake2b.Sum256(buf.Bytes())
-	return fmt.Sprintf("%x", hash)
+	// Calculate Blake2b hash using crypto/hash
+	hashBytes := hash.HashData(buf.Bytes())
+	return fmt.Sprintf("%x", hashBytes)
 }
 
 // SignTransaction signs a transaction with MLDSA44
@@ -175,14 +176,8 @@ func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.Priv
 		return fmt.Errorf("private key cannot be nil")
 	}
 
-	// Calculate the hash to sign
-	hashBytes, err := blake2b.New256(nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Blake2b hasher: %v", err)
-	}
-
-	hashBytes.Write([]byte(tx.Hash))
-	hashToSign := hashBytes.Sum(nil)
+	// Calculate the hash to sign using crypto/hash
+	hashToSign := hash.HashData([]byte(tx.Hash))
 
 	// Sign with MLDSA44
 	signature := privateKey.Sign(hashToSign)
@@ -208,14 +203,8 @@ func (v *Validator) VerifyTransactionSignature(tx *core.Transaction, publicKey c
 		return fmt.Errorf("transaction signature is empty")
 	}
 
-	// Recreate the hash that was signed
-	hashBytes, err := blake2b.New256(nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Blake2b hasher: %v", err)
-	}
-
-	hashBytes.Write([]byte(tx.Hash))
-	hashToVerify := hashBytes.Sum(nil)
+	// Recreate the hash that was signed using crypto/hash
+	hashToVerify := hash.HashData([]byte(tx.Hash))
 
 	// Create signature object from bytes
 	signature, err := crypto.SignatureFromBytes(tx.Signature)

@@ -10,8 +10,8 @@ import (
 
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
-	"golang.org/x/crypto/blake2b"
 )
 
 // Creator handles block creation for a specific shard
@@ -307,9 +307,9 @@ func (bc *Creator) calculateBlockHash(block *core.Block) (string, error) {
 	binary.BigEndian.PutUint64(gasLimitBytes, uint64(header.GasLimit))
 	buf.Write(gasLimitBytes)
 
-	// Calculate Blake2b hash
-	hash := blake2b.Sum256(buf.Bytes())
-	return fmt.Sprintf("%x", hash), nil
+	// Calculate Blake2b hash using crypto/hash
+	hashBytes := hash.HashData(buf.Bytes())
+	return fmt.Sprintf("%x", hashBytes), nil
 }
 
 // SignBlock signs a block with the validator's private key
@@ -321,14 +321,8 @@ func (bc *Creator) SignBlock(block *core.Block, privateKey crypto.PrivateKey) er
 		return fmt.Errorf("private key cannot be nil")
 	}
 
-	// Create hash to sign
-	hashBytes, err := blake2b.New256(nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Blake2b hasher: %v", err)
-	}
-
-	hashBytes.Write([]byte(block.Hash))
-	hashToSign := hashBytes.Sum(nil)
+	// Create hash to sign using crypto/hash
+	hashToSign := hash.HashData([]byte(block.Hash))
 
 	// Sign with MLDSA44
 	signature := privateKey.Sign(hashToSign)

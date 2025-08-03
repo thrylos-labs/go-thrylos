@@ -196,14 +196,19 @@ func (m *Manager) handleVoteRequest(s network.Stream) {
 func (m *Manager) subscribeToPubSubTopics() {
 	topics := []string{TopicBlocks, TopicTransactions, TopicAttestations, TopicVotes}
 	for _, topicName := range topics {
-		topic, err := m.PubSub.Join(topicName)
+		// Use the caching system instead of direct PubSub.Join()
+		topic, err := m.getOrJoinTopic(topicName)
 		if err != nil {
 			stdlog.Fatalf("Failed to join PubSub topic %s: %v", topicName, err)
 		}
+
+		// Subscribe to the topic
 		sub, err := topic.Subscribe()
 		if err != nil {
 			stdlog.Fatalf("Failed to subscribe to PubSub topic %s: %v", topicName, err)
 		}
+
+		// Start reading messages from this topic
 		go m.readPubSubMessages(topicName, sub)
 		stdlog.Printf("Subscribed to PubSub topic: %s", topicName)
 	}
@@ -267,17 +272,16 @@ func (m *Manager) readPubSubMessages(topicName string, sub *pubsub.Subscription)
 // Broadcasting Functions
 
 // BroadcastBlock broadcasts a block to all peers via PubSub
+// In manager.go - Fix the broadcast methods
 func (m *Manager) BroadcastBlock(block *core.Block) error {
 	blockData, err := json.Marshal(block)
 	if err != nil {
 		return fmt.Errorf("failed to serialize block for PubSub: %w", err)
 	}
-	topic, err := m.PubSub.Join(TopicBlocks)
-	if err != nil {
-		return fmt.Errorf("failed to get PubSub topic %s: %w", TopicBlocks, err)
-	}
+
+	// Use rate-limited broadcast instead of direct topic join
 	stdlog.Printf("Broadcasting block %s via PubSub to topic %s", block.Hash, TopicBlocks)
-	return topic.Publish(m.Ctx, blockData)
+	return m.rateLimitedBroadcast(TopicBlocks, blockData)
 }
 
 // BroadcastTransaction broadcasts a transaction to all peers via PubSub
@@ -286,26 +290,19 @@ func (m *Manager) BroadcastTransaction(tx *core.Transaction) error {
 	if err != nil {
 		return fmt.Errorf("failed to serialize transaction for PubSub: %w", err)
 	}
-	topic, err := m.PubSub.Join(TopicTransactions)
-	if err != nil {
-		return fmt.Errorf("failed to get PubSub topic %s: %w", TopicTransactions, err)
-	}
+
 	stdlog.Printf("Broadcasting transaction %s via PubSub to topic %s", tx.Id, TopicTransactions)
-	return topic.Publish(m.Ctx, txData)
+	return m.rateLimitedBroadcast(TopicTransactions, txData)
 }
 
-// BroadcastAttestation broadcasts an attestation to all peers via PubSub
 func (m *Manager) BroadcastAttestation(attestation interface{}) error {
 	attestationData, err := json.Marshal(attestation)
 	if err != nil {
 		return fmt.Errorf("failed to serialize attestation for PubSub: %w", err)
 	}
-	topic, err := m.PubSub.Join(TopicAttestations)
-	if err != nil {
-		return fmt.Errorf("failed to get PubSub topic %s: %w", TopicAttestations, err)
-	}
+
 	stdlog.Printf("Broadcasting attestation via PubSub to topic %s", TopicAttestations)
-	return topic.Publish(m.Ctx, attestationData)
+	return m.rateLimitedBroadcast(TopicAttestations, attestationData)
 }
 
 // BroadcastVote broadcasts a vote to all peers via PubSub
@@ -314,12 +311,9 @@ func (m *Manager) BroadcastVote(vote interface{}) error {
 	if err != nil {
 		return fmt.Errorf("failed to serialize vote for PubSub: %w", err)
 	}
-	topic, err := m.PubSub.Join(TopicVotes)
-	if err != nil {
-		return fmt.Errorf("failed to get PubSub topic %s: %w", TopicVotes, err)
-	}
+
 	stdlog.Printf("Broadcasting vote via PubSub to topic %s", TopicVotes)
-	return topic.Publish(m.Ctx, voteData)
+	return m.rateLimitedBroadcast(TopicVotes, voteData)
 }
 
 // Blockchain Synchronization

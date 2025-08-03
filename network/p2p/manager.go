@@ -414,31 +414,37 @@ func (m *Manager) getOrJoinTopic(topicName string) (*pubsub.Topic, error) {
 		return topic, nil
 	}
 
+	// Join the topic
 	topic, err := m.PubSub.Join(topicName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to join topic %s: %w", topicName, err)
 	}
 
+	// Cache the topic
 	m.joinedTopics[topicName] = topic
-	stdlog.Printf("Joined PubSub topic: %s", topicName)
+	stdlog.Printf("Successfully joined and cached PubSub topic: %s", topicName)
 	return topic, nil
 }
 
 // rateLimitedBroadcast broadcasts a message with rate limiting
 func (m *Manager) rateLimitedBroadcast(topicName string, data []byte) error {
+	// Check rate limit
 	if !m.rateLimiter.Allow() {
 		return fmt.Errorf("rate limit exceeded for topic %s", topicName)
 	}
 
+	// Get cached topic or join if needed
 	topic, err := m.getOrJoinTopic(topicName)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get topic %s: %w", topicName, err)
 	}
 
+	// Publish to topic
 	if err := topic.Publish(m.Ctx, data); err != nil {
 		return fmt.Errorf("failed to publish to topic %s: %w", topicName, err)
 	}
 
+	// Update metrics
 	m.metrics.IncrementMessagesSent()
 	return nil
 }

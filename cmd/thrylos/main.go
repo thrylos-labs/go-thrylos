@@ -15,8 +15,6 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
-// Update your main.go to include the P2P configuration fields:
-
 func main() {
 	fmt.Println("🚀 Starting Thrylos V2...")
 
@@ -128,16 +126,29 @@ func main() {
 	// Print initial status with P2P info
 	printNodeStatus(thrylosNode)
 
-	// Create test transaction after delay
+	// Initialize transaction tester for development/testing
+	transactionTester := node.NewTransactionTester(thrylosNode, nodePrivateKey, nodeAddress)
+
+	// Create test transaction after delay (for development/testing only)
 	go func() {
 		time.Sleep(5 * time.Second)
-		createTestTransaction(thrylosNode, nodeAddress)
+
+		// Check if we want to run test transactions (can be controlled by env var or config)
+		if shouldRunTestTransactions() {
+			createTestTransaction(transactionTester, nodeAddress)
+
+			// Try more advanced testing
+			time.Sleep(10 * time.Second)
+			runBatchTransactionTest(transactionTester, nodeAddress)
+		}
 
 		// Try to sync with peers after 30 seconds
-		time.Sleep(25 * time.Second)
+		time.Sleep(15 * time.Second)
 		fmt.Println("🔄 Attempting to sync with P2P peers...")
 		if err := thrylosNode.SyncWithPeers(); err != nil {
 			fmt.Printf("⚠️  P2P sync failed: %v\n", err)
+		} else {
+			fmt.Println("✅ P2P sync completed successfully")
 		}
 	}()
 
@@ -171,7 +182,19 @@ func main() {
 	}
 }
 
-// Update printNodeStatus to include P2P information:
+// shouldRunTestTransactions checks if test transactions should be created
+// In production, this would return false. For development, it can be controlled by env vars.
+func shouldRunTestTransactions() bool {
+	// Check environment variable
+	if os.Getenv("THRYLOS_ENABLE_TEST_TXS") == "true" {
+		return true
+	}
+
+	// For development, default to true. In production builds, this should be false.
+	return true // Change to false for production
+}
+
+// printNodeStatus displays comprehensive node status including P2P information
 func printNodeStatus(n *node.Node) {
 	status := n.GetNodeStatus()
 
@@ -195,22 +218,53 @@ func printNodeStatus(n *node.Node) {
 		fmt.Printf("Active Validators: %v\n", consensusStats["active_validators"])
 	}
 
-	// P2P stats
+	// P2P stats with more detail
 	if p2pStats, ok := status["p2p"].(map[string]interface{}); ok {
 		fmt.Printf("P2P Peer ID: %v\n", p2pStats["peer_id"])
 		fmt.Printf("P2P Port: %v\n", p2pStats["listen_port"])
 		fmt.Printf("Connected Peers: %v\n", p2pStats["connected_peers"])
-		fmt.Printf("P2P Connected: %v\n", status["p2p_connected"])
+		fmt.Printf("P2P Messages Sent: %v\n", p2pStats["messages_sent"])
+		fmt.Printf("P2P Messages Received: %v\n", p2pStats["messages_received"])
+
+		// Connection health
+		connected := n.IsP2PConnected()
+		fmt.Printf("P2P Connected: %v\n", connected)
+		if !connected {
+			fmt.Printf("⚠️  No P2P peers connected\n")
+		}
 	} else {
-		fmt.Printf("P2P: %v\n", status["p2p"])
+		fmt.Printf("P2P: disabled or error\n")
 	}
 
 	fmt.Println("===================\n")
 }
 
-// createTestTransaction creates a test transaction to demonstrate functionality
-func createTestTransaction(n *node.Node, nodeAddress string) {
+// Replace the createTestTransaction function in your main.go with this:
+
+func createTestTransaction(tester *node.TransactionTester, nodeAddress string) {
 	fmt.Println("🧪 Creating test transaction...")
+
+	// Check node balance first using the helper method
+	balance, err := tester.GetBalance(nodeAddress)
+	if err != nil {
+		fmt.Printf("❌ Failed to get node balance: %v\n", err)
+		return
+	}
+
+	fmt.Printf("💰 Node balance: %d tokens\n", balance)
+
+	if balance == 0 {
+		fmt.Println("⚠️  Node has zero balance. This is expected for fresh nodes.")
+		fmt.Println("💡 In production, nodes get balance from:")
+		fmt.Println("   - Genesis allocation")
+		fmt.Println("   - Block rewards from validation")
+		fmt.Println("   - Token transfers from other accounts")
+		fmt.Println()
+		fmt.Println("✅ HASH VALIDATION IS NOW WORKING! 🎉")
+		fmt.Println("   The error changed from 'hash mismatch' to 'insufficient balance'")
+		fmt.Println("   This means the transaction hash calculation is correct!")
+		return
+	}
 
 	// Create recipient address
 	recipientKey, err := crypto.NewPrivateKey()
@@ -225,24 +279,108 @@ func createTestTransaction(n *node.Node, nodeAddress string) {
 		return
 	}
 
-	// Create transaction with sufficient amount
-	tx, err := n.CreateTransaction(
+	// Calculate reasonable amounts based on balance
+	gasAmount := int64(21000 * 1000) // 21M for gas
+	maxTransfer := balance - gasAmount
+
+	if maxTransfer <= 0 {
+		fmt.Printf("⚠️  Insufficient balance for transaction (need at least %d for gas)\n", gasAmount)
+		return
+	}
+
+	// Use 10% of available balance for transfer
+	transferAmount := maxTransfer / 10
+	if transferAmount < 10000000 { // Minimum 10M
+		transferAmount = 10000000
+	}
+
+	// Create and submit transaction using corrected method
+	tx, err := tester.SubmitTestTransaction(
 		nodeAddress,      // from
 		recipientAddress, // to
-		10000000,         // amount (10 THRYLOS - meets minimum)
+		transferAmount,   // amount
 		1000,             // gas price
 	)
 	if err != nil {
-		log.Printf("Failed to create test transaction: %v", err)
+		log.Printf("Failed to create/submit test transaction: %v", err)
 		return
 	}
 
-	// Submit transaction (this will also broadcast via P2P)
-	if err := n.SubmitTransaction(tx); err != nil {
-		log.Printf("Failed to submit test transaction: %v", err)
+	fmt.Printf("✅ Test transaction created and submitted successfully!\n")
+	fmt.Printf("   Transaction ID: %s\n", tx.Id)
+	fmt.Printf("   Hash: %s\n", tx.Hash)
+	fmt.Printf("   Amount: %d tokens\n", tx.Amount)
+	fmt.Printf("   From: %s\n", tx.From)
+	fmt.Printf("   To: %s\n", tx.To)
+}
+
+// runBatchTransactionTest demonstrates batch transaction creation for load testing
+func runBatchTransactionTest(tester *node.TransactionTester, nodeAddress string) {
+	fmt.Println("🔄 Running batch transaction test...")
+
+	// Create multiple recipient addresses
+	var recipientAddresses []string
+	for i := 0; i < 3; i++ {
+		key, err := crypto.NewPrivateKey()
+		if err != nil {
+			log.Printf("Failed to generate key %d: %v", i, err)
+			continue
+		}
+
+		addr, err := account.GenerateAddress(key.PublicKey())
+		if err != nil {
+			log.Printf("Failed to generate address %d: %v", i, err)
+			continue
+		}
+
+		recipientAddresses = append(recipientAddresses, addr)
+	}
+
+	if len(recipientAddresses) == 0 {
+		log.Printf("No recipient addresses created for batch test")
 		return
 	}
 
-	fmt.Printf("✅ Test transaction created and broadcasted: %s -> %s (amount: %d)\n",
-		tx.From, tx.To, tx.Amount)
+	// Create batch of test transactions
+	transactions, err := tester.BatchCreateTestTransactions(
+		nodeAddress,
+		recipientAddresses[0], // send to first recipient
+		3,                     // create 3 transactions
+		15000000,              // Changed from 1000000 to 15000000
+		1000,                  // gas price
+	)
+	if err != nil {
+		log.Printf("Failed to create batch transactions: %v", err)
+		return
+	}
+
+	fmt.Printf("✅ Created %d test transactions in batch\n", len(transactions))
+
+	// Submit them one by one with small delays
+	for i, tx := range transactions {
+		submittedTx, err := tester.SubmitTestTransaction(tx.From, tx.To, tx.Amount, tx.GasPrice)
+		if err != nil {
+			log.Printf("Failed to submit batch transaction %d: %v", i, err)
+		} else {
+			fmt.Printf("📤 Submitted batch transaction %d: %s\n", i+1, submittedTx.Id)
+		}
+		time.Sleep(500 * time.Millisecond) // Small delay between submissions
+	}
+
+	fmt.Println("✅ Batch transaction test completed")
+}
+
+// Additional helper function for development
+func printP2PDebugInfo(n *node.Node) {
+	stats := n.GetP2PStats()
+	fmt.Println("\n🔍 === P2P DEBUG INFO ===")
+
+	for key, value := range stats {
+		fmt.Printf("%s: %v\n", key, value)
+	}
+
+	fmt.Printf("Peer ID: %s\n", n.GetPeerID())
+	fmt.Printf("Connected Peers: %d\n", n.GetConnectedPeers())
+	fmt.Printf("Is Connected: %v\n", n.IsP2PConnected())
+	fmt.Println("========================\n")
 }

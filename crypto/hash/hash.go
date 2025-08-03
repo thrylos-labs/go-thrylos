@@ -63,17 +63,6 @@ var (
 	cacheMutex   sync.RWMutex
 )
 
-// func CreateThrylosTransaction(id int) *thrylos.Transaction {
-// 	return &thrylos.Transaction{
-// 		Id:        fmt.Sprintf("tx%d", id),
-// 		Inputs:    []*thrylos.UTXO{{TransactionId: "prev-tx-id", Index: 0, OwnerAddress: "Alice", Amount: 100}},
-// 		Outputs:   []*thrylos.UTXO{{TransactionId: fmt.Sprintf("tx%d", id), Index: 0, OwnerAddress: "Bob", Amount: 100}},
-// 		Timestamp: time.Now().Unix(),
-// 		Signature: []byte("signature"), // This should be properly generated or mocked
-// 		Sender:    "Alice",
-// 	}
-// }
-
 // Use a global hash pool for BLAKE2b hashers to reduce allocation overhead
 var blake2bHasherPool = sync.Pool{
 	New: func() interface{} {
