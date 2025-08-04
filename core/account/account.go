@@ -4,7 +4,6 @@
 // Account validation and balance management with PoS-specific operations
 // Cross-shard awareness - knows which accounts belong to which shards
 // Genesis account creation for initial supply distribution
-// Thrylos address generation from MLDSA44 public keys (0x format)
 // Enhanced with staking, delegation, and reward management
 
 package account
@@ -12,10 +11,11 @@ package account
 import (
 	"encoding/binary"
 	"fmt"
-	"strings"
 	"sync"
 
+	// Add this line
 	"github.com/thrylos-labs/go-thrylos/crypto"
+	"github.com/thrylos-labs/go-thrylos/crypto/address"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"golang.org/x/crypto/blake2b"
 )
@@ -53,13 +53,13 @@ func NewAccountManager(shardID ShardID, totalShards int) *AccountManager {
 }
 
 // CalculateShardID determines which shard an address belongs to
-func CalculateShardID(address string, totalShards int) ShardID {
+func CalculateShardID(addr string, totalShards int) ShardID {
 	if totalShards <= 1 {
 		return 0
 	}
 
 	// Use Blake2b to hash the address for consistent shard assignment
-	hash := blake2b.Sum256([]byte(address))
+	hash := blake2b.Sum256([]byte(addr))
 
 	// Use the first 8 bytes as uint64 for modulo operation
 	shardIndex := binary.BigEndian.Uint64(hash[:8]) % uint64(totalShards)
@@ -68,29 +68,29 @@ func CalculateShardID(address string, totalShards int) ShardID {
 }
 
 // BelongsToShard checks if an address belongs to this shard
-func (am *AccountManager) BelongsToShard(address string) bool {
+func (am *AccountManager) BelongsToShard(addr string) bool {
 	if am.shardID == BeaconShardID {
 		return true // Beacon shard can access all accounts
 	}
 
-	addressShard := CalculateShardID(address, am.totalShards)
+	addressShard := CalculateShardID(addr, am.totalShards)
 	return addressShard == am.shardID
 }
 
 // GetAccount retrieves an account, creating a new one if it doesn't exist
-func (am *AccountManager) GetAccount(address string) (*core.Account, error) {
-	// Validate address format first
-	if err := ValidateAddress(address); err != nil {
+func (am *AccountManager) GetAccount(addr string) (*core.Account, error) {
+	// Validate address format using the dedicated address package
+	if err := address.Validate(addr); err != nil {
 		return nil, fmt.Errorf("invalid address format: %v", err)
 	}
 
-	if !am.BelongsToShard(address) {
+	if !am.BelongsToShard(addr) {
 		return nil, fmt.Errorf("address %s belongs to shard %d, not %d",
-			address, CalculateShardID(address, am.totalShards), am.shardID)
+			addr, CalculateShardID(addr, am.totalShards), am.shardID)
 	}
 
 	am.mu.RLock()
-	if account, exists := am.accounts[address]; exists {
+	if account, exists := am.accounts[addr]; exists {
 		am.mu.RUnlock()
 		return account, nil
 	}
@@ -101,12 +101,12 @@ func (am *AccountManager) GetAccount(address string) (*core.Account, error) {
 	defer am.mu.Unlock()
 
 	// Double-check after acquiring write lock
-	if account, exists := am.accounts[address]; exists {
+	if account, exists := am.accounts[addr]; exists {
 		return account, nil
 	}
 
 	newAccount := &core.Account{
-		Address:      address,
+		Address:      addr,
 		Balance:      0,
 		Nonce:        0,
 		StakedAmount: 0,
@@ -116,26 +116,26 @@ func (am *AccountManager) GetAccount(address string) (*core.Account, error) {
 		StorageRoot:  nil, // For future contract storage
 	}
 
-	am.accounts[address] = newAccount
+	am.accounts[addr] = newAccount
 	return newAccount, nil
 }
 
 // GetAccountReadOnly retrieves an account without creating a new one
-func (am *AccountManager) GetAccountReadOnly(address string) (*core.Account, bool) {
-	if !am.BelongsToShard(address) {
+func (am *AccountManager) GetAccountReadOnly(addr string) (*core.Account, bool) {
+	if !am.BelongsToShard(addr) {
 		return nil, false
 	}
 
 	am.mu.RLock()
 	defer am.mu.RUnlock()
 
-	account, exists := am.accounts[address]
+	account, exists := am.accounts[addr]
 	return account, exists
 }
 
 // AccountExists checks if an account exists without creating it
-func (am *AccountManager) AccountExists(address string) bool {
-	_, exists := am.GetAccountReadOnly(address)
+func (am *AccountManager) AccountExists(addr string) bool {
+	_, exists := am.GetAccountReadOnly(addr)
 	return exists
 }
 
@@ -167,7 +167,8 @@ func (am *AccountManager) ValidateAccount(account *core.Account) error {
 		return fmt.Errorf("account cannot be nil")
 	}
 
-	if err := ValidateAddress(account.Address); err != nil {
+	// Use the dedicated address validation
+	if err := address.Validate(account.Address); err != nil {
 		return fmt.Errorf("invalid account address: %v", err)
 	}
 
@@ -186,7 +187,7 @@ func (am *AccountManager) ValidateAccount(account *core.Account) error {
 	// Validate delegations
 	totalDelegated := int64(0)
 	for validator, amount := range account.DelegatedTo {
-		if err := ValidateAddress(validator); err != nil {
+		if err := address.Validate(validator); err != nil {
 			return fmt.Errorf("invalid validator address %s: %v", validator, err)
 		}
 		if amount <= 0 {
@@ -205,12 +206,12 @@ func (am *AccountManager) ValidateAccount(account *core.Account) error {
 }
 
 // Stake adds stake to an account
-func (am *AccountManager) Stake(address string, amount int64) error {
+func (am *AccountManager) Stake(addr string, amount int64) error {
 	if amount < MinimumStakeAmount {
 		return fmt.Errorf("stake amount %d below minimum %d", amount, MinimumStakeAmount)
 	}
 
-	account, err := am.GetAccount(address)
+	account, err := am.GetAccount(addr)
 	if err != nil {
 		return fmt.Errorf("failed to get account: %v", err)
 	}
@@ -226,12 +227,12 @@ func (am *AccountManager) Stake(address string, amount int64) error {
 }
 
 // Unstake removes stake from an account
-func (am *AccountManager) Unstake(address string, amount int64) error {
+func (am *AccountManager) Unstake(addr string, amount int64) error {
 	if amount <= 0 {
 		return fmt.Errorf("unstake amount must be positive")
 	}
 
-	account, err := am.GetAccount(address)
+	account, err := am.GetAccount(addr)
 	if err != nil {
 		return fmt.Errorf("failed to get account: %v", err)
 	}
@@ -266,7 +267,7 @@ func (am *AccountManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		return fmt.Errorf("cannot delegate to self")
 	}
 
-	if err := ValidateAddress(validatorAddr); err != nil {
+	if err := address.Validate(validatorAddr); err != nil {
 		return fmt.Errorf("invalid validator address: %v", err)
 	}
 
@@ -297,7 +298,7 @@ func (am *AccountManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return fmt.Errorf("undelegation amount must be positive")
 	}
 
-	if err := ValidateAddress(validatorAddr); err != nil {
+	if err := address.Validate(validatorAddr); err != nil {
 		return fmt.Errorf("invalid validator address: %v", err)
 	}
 
@@ -325,12 +326,12 @@ func (am *AccountManager) Undelegate(delegatorAddr, validatorAddr string, amount
 }
 
 // AddRewards adds rewards to an account
-func (am *AccountManager) AddRewards(address string, rewards int64) error {
+func (am *AccountManager) AddRewards(addr string, rewards int64) error {
 	if rewards <= 0 {
 		return fmt.Errorf("rewards must be positive: %d", rewards)
 	}
 
-	account, err := am.GetAccount(address)
+	account, err := am.GetAccount(addr)
 	if err != nil {
 		return fmt.Errorf("failed to get account: %v", err)
 	}
@@ -340,8 +341,8 @@ func (am *AccountManager) AddRewards(address string, rewards int64) error {
 }
 
 // ClaimRewards moves rewards to balance
-func (am *AccountManager) ClaimRewards(address string) (int64, error) {
-	account, err := am.GetAccount(address)
+func (am *AccountManager) ClaimRewards(addr string) (int64, error) {
+	account, err := am.GetAccount(addr)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get account: %v", err)
 	}
@@ -367,11 +368,11 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 		return fmt.Errorf("cannot transfer to self")
 	}
 
-	// Validate addresses
-	if err := ValidateAddress(fromAddr); err != nil {
+	// Validate addresses using the dedicated address package
+	if err := address.Validate(fromAddr); err != nil {
 		return fmt.Errorf("invalid sender address: %v", err)
 	}
-	if err := ValidateAddress(toAddr); err != nil {
+	if err := address.Validate(toAddr); err != nil {
 		return fmt.Errorf("invalid recipient address: %v", err)
 	}
 
@@ -416,8 +417,8 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 }
 
 // GetBalance returns the balance of an account
-func (am *AccountManager) GetBalance(address string) (int64, error) {
-	account, err := am.GetAccount(address)
+func (am *AccountManager) GetBalance(addr string) (int64, error) {
+	account, err := am.GetAccount(addr)
 	if err != nil {
 		return 0, err
 	}
@@ -425,8 +426,8 @@ func (am *AccountManager) GetBalance(address string) (int64, error) {
 }
 
 // GetNonce returns the nonce of an account
-func (am *AccountManager) GetNonce(address string) (uint64, error) {
-	account, err := am.GetAccount(address)
+func (am *AccountManager) GetNonce(addr string) (uint64, error) {
+	account, err := am.GetAccount(addr)
 	if err != nil {
 		return 0, err
 	}
@@ -434,8 +435,8 @@ func (am *AccountManager) GetNonce(address string) (uint64, error) {
 }
 
 // GetStakedAmount returns the total staked amount for an account
-func (am *AccountManager) GetStakedAmount(address string) (int64, error) {
-	account, err := am.GetAccount(address)
+func (am *AccountManager) GetStakedAmount(addr string) (int64, error) {
+	account, err := am.GetAccount(addr)
 	if err != nil {
 		return 0, err
 	}
@@ -443,8 +444,8 @@ func (am *AccountManager) GetStakedAmount(address string) (int64, error) {
 }
 
 // GetRewards returns the rewards for an account
-func (am *AccountManager) GetRewards(address string) (int64, error) {
-	account, err := am.GetAccount(address)
+func (am *AccountManager) GetRewards(addr string) (int64, error) {
+	account, err := am.GetAccount(addr)
 	if err != nil {
 		return 0, err
 	}
@@ -452,8 +453,8 @@ func (am *AccountManager) GetRewards(address string) (int64, error) {
 }
 
 // GetDelegations returns all delegations for an account
-func (am *AccountManager) GetDelegations(address string) (map[string]int64, error) {
-	account, err := am.GetAccount(address)
+func (am *AccountManager) GetDelegations(addr string) (map[string]int64, error) {
+	account, err := am.GetAccount(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -583,111 +584,9 @@ func (am *AccountManager) GetAccountCount() int {
 	return len(am.accounts)
 }
 
-// Address format constants
-const (
-	AddressPrefix     = "0x"
-	AddressLength     = 42 // "0x" + 40 hex characters
-	AddressByteLength = 20 // 20 bytes = 40 hex characters
-)
-
-// GenerateAddress generates a new Ethereum-compatible address from a public key
-func GenerateAddress(pubKey crypto.PublicKey) (string, error) {
-	if pubKey == nil {
-		return "", fmt.Errorf("public key cannot be nil")
-	}
-
-	// Get the raw bytes of the public key
-	pubKeyBytes := pubKey.Bytes()
-	if len(pubKeyBytes) == 0 {
-		return "", fmt.Errorf("public key bytes cannot be empty")
-	}
-
-	// Hash the public key with Blake2b
-	hash := blake2b.Sum256(pubKeyBytes)
-
-	// Take the last 20 bytes of the hash (Ethereum standard)
-	addressBytes := hash[len(hash)-20:]
-
-	// Format as 0x + hex (lowercase for consistency)
-	address := fmt.Sprintf("%s%x", AddressPrefix, addressBytes)
-
-	return address, nil
-}
-
-// ValidateAddress checks if an address has the correct 0x format
-func ValidateAddress(address string) error {
-	if len(address) != AddressLength {
-		return fmt.Errorf("address must be exactly %d characters long, got %d", AddressLength, len(address))
-	}
-
-	if address[:2] != AddressPrefix {
-		return fmt.Errorf("address must start with '%s', got '%s'", AddressPrefix, address[:2])
-	}
-
-	// Validate hex characters
-	hexPart := address[2:]
-	for i, char := range hexPart {
-		if !isHexChar(char) {
-			return fmt.Errorf("address contains invalid hex character '%c' at position %d", char, i+2)
-		}
-	}
-
-	return nil
-}
-
-// isHexChar checks if a character is a valid hex digit
-func isHexChar(char rune) bool {
-	return (char >= '0' && char <= '9') ||
-		(char >= 'a' && char <= 'f') ||
-		(char >= 'A' && char <= 'F')
-}
-
-// NormalizeAddress converts address to lowercase (for internal storage consistency)
-func NormalizeAddress(address string) (string, error) {
-	if err := ValidateAddress(address); err != nil {
-		return "", err
-	}
-	return strings.ToLower(address), nil
-}
-
-// IsValidAddress is a convenience function for address validation
-func IsValidAddress(address string) bool {
-	return ValidateAddress(address) == nil
-}
-
-// FormatAddress formats raw bytes as an address
-func FormatAddress(addressBytes []byte) (string, error) {
-	if len(addressBytes) != AddressByteLength {
-		return "", fmt.Errorf("address bytes must be exactly %d bytes, got %d", AddressByteLength, len(addressBytes))
-	}
-
-	return fmt.Sprintf("%s%x", AddressPrefix, addressBytes), nil
-}
-
-// AddressToBytes converts a string address to bytes
-func AddressToBytes(address string) ([]byte, error) {
-	if err := ValidateAddress(address); err != nil {
-		return nil, err
-	}
-
-	hexPart := address[2:] // Remove "0x" prefix
-	addressBytes := make([]byte, AddressByteLength)
-
-	for i := 0; i < len(hexPart); i += 2 {
-		var b byte
-		n, err := fmt.Sscanf(hexPart[i:i+2], "%02x", &b)
-		if err != nil || n != 1 {
-			return nil, fmt.Errorf("invalid hex at position %d-%d", i, i+1)
-		}
-		addressBytes[i/2] = b
-	}
-
-	return addressBytes, nil
-}
-
 // CreateGenesisAccount creates the genesis account for a shard
 func (am *AccountManager) CreateGenesisAccount(genesisAddr string, initialSupply int64) error {
-	if err := ValidateAddress(genesisAddr); err != nil {
+	if err := address.Validate(genesisAddr); err != nil {
 		return fmt.Errorf("invalid genesis address: %v", err)
 	}
 
@@ -728,4 +627,64 @@ func max(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// Wrapper functions to expose address package functionality
+// These provide a convenient API for other packages without importing crypto/address directly
+
+// GenerateAddress generates a new Thrylos address from a public key
+func GenerateAddress(pubKey crypto.PublicKey) (string, error) {
+	// Use the Address() method from the crypto.PublicKey interface
+	addr, err := pubKey.Address()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate address: %v", err)
+	}
+
+	// Convert the address.Address to string
+	return addr.String(), nil
+}
+
+// ValidateAddress checks if an address has the correct format
+func ValidateAddress(addr string) error {
+	return address.Validate(addr)
+}
+
+// IsValidAddress is a convenience function for address validation
+func IsValidAddress(addr string) bool {
+	return address.IsValid(addr)
+}
+
+// NormalizeAddress converts address to lowercase
+func NormalizeAddress(addr string) (string, error) {
+	return address.NormalizeAddress(addr)
+}
+
+// FormatAddress formats raw bytes as a Thrylos address
+func FormatAddress(addressBytes []byte) (string, error) {
+	return address.FormatAddress(addressBytes)
+}
+
+// AddressToBytes converts a string address to bytes
+func AddressToBytes(addr string) ([]byte, error) {
+	return address.AddressToBytes(addr)
+}
+
+// GetAddressPrefix returns the address prefix for Thrylos
+func GetAddressPrefix() string {
+	return address.GetAddressPrefix()
+}
+
+// GetAddressByteLength returns the byte length of Thrylos addresses
+func GetAddressByteLength() int {
+	return address.GetAddressByteLength()
+}
+
+// EstimateAddressLength estimates the string length of a Thrylos address
+func EstimateAddressLength() int {
+	return address.EstimateAddressLength()
+}
+
+// AddressMetrics provides information about the address format
+func AddressMetrics() map[string]interface{} {
+	return address.AddressMetrics()
 }

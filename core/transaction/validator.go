@@ -5,7 +5,7 @@
 // ✅ Blake2b hash calculation for transaction integrity
 // ✅ MLDSA44 signature integration for signing and verification
 // ✅ Comprehensive validation - structure, hash, shard, and business logic
-// ✅ Address format validation using 0x Ethereum-compatible format
+// ✅ Address format validation using tl1 bech 32 format
 // ✅ Business logic validation - balance checks, minimum amounts, nonce validation
 // ✅ Batch validation - validates multiple transactions with temporary state tracking
 // ✅ Cross-shard awareness - handles transactions between different shards
@@ -265,7 +265,7 @@ func (v *Validator) validateStructure(tx *core.Transaction) error {
 		return fmt.Errorf("sender address cannot be empty")
 	}
 
-	// Validate sender address format (0x format)
+	// Validate sender address format (tl format)
 	if err := account.ValidateAddress(tx.From); err != nil {
 		return fmt.Errorf("invalid sender address format: %v", err)
 	}

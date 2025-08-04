@@ -10,12 +10,12 @@ Genesis Balance - Configure initial token distribution
 Block Rewards - Validators will earn tokens over time
 Wallet Integration - External wallets can submit transactions
 Remove internal testing - Use an external wallet instead to test transactions
-Websockets - should websockets be used?
+Websockets - should websockets and jsonrpc be used?
 TPS & block time to finality - to test
 .env.dev & .env.prod - need to be created or not? 
 Update account.go to import from config instead
 Ask Claude to act as an Audit person to audit the blockchain for vulnabilities 
-Make sure not to use messageBus if you can help it 
+
 
 Key Design Decisions Explained
 1. Account-Based State 

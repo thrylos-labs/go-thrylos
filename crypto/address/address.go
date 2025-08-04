@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/btcsuite/btcutil/bech32"
 	mldsa "github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
@@ -12,12 +13,11 @@ import (
 
 const (
 	// Address format constants
-	AddressPrefix     = "0x"
-	AddressLength     = 42 // "0x" + 40 hex characters
-	AddressByteLength = 20 // 20 bytes = 40 hex characters
+	AddressPrefix     = "tl" // Thrylos prefix
+	AddressByteLength = 8    // 8 bytes for shorter addresses (~18 characters)
 )
 
-// Address represents a 20-byte Ethereum-compatible address
+// Address represents an 8-byte Thrylos address
 type Address [AddressByteLength]byte
 
 // New creates an Address from a public key using Blake2b hash
@@ -34,9 +34,9 @@ func New(pubKey *mldsa.PublicKey) (*Address, error) {
 	// Hash the public key with Blake2b-256
 	hashBytes := hash.NewHash(pubKeyBytes)
 
-	// Take the last 20 bytes of the hash (Ethereum standard)
+	// Take the first 8 bytes of the hash (more secure than taking last bytes)
 	var address Address
-	copy(address[:], hashBytes[len(hashBytes)-20:])
+	copy(address[:], hashBytes[:AddressByteLength])
 
 	return &address, nil
 }
@@ -46,25 +46,30 @@ func NullAddress() *Address {
 	return &Address{}
 }
 
-// FromString converts a 0x address string to an Address
+// FromString converts a tl1 address string to an Address
 func FromString(addr string) (*Address, error) {
 	if err := Validate(addr); err != nil {
 		return nil, fmt.Errorf("invalid address format: %v", err)
 	}
 
-	// Remove "0x" prefix
-	hexPart := addr[2:]
-
-	var address Address
-	for i := 0; i < len(hexPart); i += 2 {
-		var b byte
-		n, err := fmt.Sscanf(hexPart[i:i+2], "%02x", &b)
-		if err != nil || n != 1 {
-			return nil, fmt.Errorf("invalid hex at position %d-%d: %v", i, i+1, err)
-		}
-		address[i/2] = b
+	// Decode Bech32 address
+	_, data, err := bech32.Decode(addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode bech32 address: %v", err)
 	}
 
+	// Convert from 5-bit groups back to 8-bit bytes
+	converted, err := bech32.ConvertBits(data, 5, 8, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert address bits: %v", err)
+	}
+
+	if len(converted) != AddressByteLength {
+		return nil, fmt.Errorf("converted address has wrong length: expected %d, got %d", AddressByteLength, len(converted))
+	}
+
+	var address Address
+	copy(address[:], converted)
 	return &address, nil
 }
 
@@ -79,22 +84,32 @@ func FromBytes(addressBytes []byte) (*Address, error) {
 	return &address, nil
 }
 
-// Validate checks if a string is a valid 0x address
+// Validate checks if a string is a valid tl1 address
 func Validate(addr string) error {
-	if len(addr) != AddressLength {
-		return fmt.Errorf("address must be exactly %d characters long, got %d", AddressLength, len(addr))
+	if len(addr) == 0 {
+		return fmt.Errorf("address cannot be empty")
 	}
 
-	if !strings.HasPrefix(addr, AddressPrefix) {
-		return fmt.Errorf("address must start with '%s', got '%s'", AddressPrefix, addr[:2])
+	// Decode and validate with Bech32
+	prefix, data, err := bech32.Decode(addr)
+	if err != nil {
+		return fmt.Errorf("invalid bech32 format: %v", err)
 	}
 
-	// Validate hex characters
-	hexPart := addr[2:]
-	for i, char := range hexPart {
-		if !isHexChar(char) {
-			return fmt.Errorf("address contains invalid hex character '%c' at position %d", char, i+2)
-		}
+	// Check prefix
+	if prefix != AddressPrefix {
+		return fmt.Errorf("address must start with '%s', got '%s'", AddressPrefix, prefix)
+	}
+
+	// Convert from 5-bit groups back to 8-bit bytes to validate length
+	converted, err := bech32.ConvertBits(data, 5, 8, false)
+	if err != nil {
+		return fmt.Errorf("invalid address data: %v", err)
+	}
+
+	// Check converted data length
+	if len(converted) != AddressByteLength {
+		return fmt.Errorf("address must contain exactly %d bytes, got %d", AddressByteLength, len(converted))
 	}
 
 	return nil
@@ -105,14 +120,7 @@ func IsValid(addr string) bool {
 	return Validate(addr) == nil
 }
 
-// isHexChar checks if a character is a valid hex digit
-func isHexChar(char rune) bool {
-	return (char >= '0' && char <= '9') ||
-		(char >= 'a' && char <= 'f') ||
-		(char >= 'A' && char <= 'F')
-}
-
-// ConvertToBech32Address is now ConvertToAddress for 0x format
+// ConvertToAddress creates a tl1 address string from public key
 func ConvertToAddress(pubKey *mldsa.PublicKey) (string, error) {
 	addr, err := New(pubKey)
 	if err != nil {
@@ -121,7 +129,7 @@ func ConvertToAddress(pubKey *mldsa.PublicKey) (string, error) {
 	return addr.String(), nil
 }
 
-// Bytes returns the raw 20-byte address
+// Bytes returns the raw 8-byte address
 func (a *Address) Bytes() []byte {
 	if a == nil {
 		return nil
@@ -129,18 +137,41 @@ func (a *Address) Bytes() []byte {
 	return a[:]
 }
 
-// String returns the 0x-prefixed hex string representation
+// String returns the tl1 bech32 string representation
 func (a *Address) String() string {
 	if a == nil {
-		return "0x0000000000000000000000000000000000000000"
+		// Return a proper null address in bech32 format
+		nullBytes := make([]byte, AddressByteLength)
+		// Convert to 5-bit groups for bech32
+		conv, err := bech32.ConvertBits(nullBytes, 8, 5, true)
+		if err != nil {
+			panic(fmt.Sprintf("failed to convert null address bits: %v", err))
+		}
+		encoded, err := bech32.Encode(AddressPrefix, conv)
+		if err != nil {
+			panic(fmt.Sprintf("failed to encode null address: %v", err))
+		}
+		return encoded
 	}
-	return fmt.Sprintf("%s%x", AddressPrefix, a[:])
+
+	// Convert 8-bit bytes to 5-bit groups for bech32
+	conv, err := bech32.ConvertBits(a[:], 8, 5, true)
+	if err != nil {
+		panic(fmt.Sprintf("failed to convert address bits %x: %v", a[:], err))
+	}
+
+	encoded, err := bech32.Encode(AddressPrefix, conv)
+	if err != nil {
+		panic(fmt.Sprintf("failed to encode address %x: %v", a[:], err))
+	}
+
+	return encoded
 }
 
-// Hex returns the hex string without 0x prefix
+// Hex returns the hex string representation (for debugging)
 func (a *Address) Hex() string {
 	if a == nil {
-		return "0000000000000000000000000000000000000000"
+		return "0000000000000000"
 	}
 	return fmt.Sprintf("%x", a[:])
 }
@@ -233,7 +264,7 @@ func (a *Address) Set(addressBytes []byte) error {
 	return nil
 }
 
-// SetFromString sets the address from a 0x string
+// SetFromString sets the address from a tl1 string
 func (a *Address) SetFromString(addr string) error {
 	parsed, err := FromString(addr)
 	if err != nil {
@@ -262,9 +293,19 @@ func (a *Address) Hash() []byte {
 	return h.Bytes()
 }
 
-// ToLower returns the address in lowercase (for consistent storage)
+// ToLower returns the address in lowercase (bech32 is case-insensitive by design)
 func (a *Address) ToLower() string {
 	return strings.ToLower(a.String())
+}
+
+// ToUpper returns the address in uppercase (bech32 is case-insensitive by design)
+func (a *Address) ToUpper() string {
+	return strings.ToUpper(a.String())
+}
+
+// Normalize returns the address in lowercase for consistent storage
+func (a *Address) Normalize() string {
+	return a.ToLower()
 }
 
 // Utility functions for compatibility
@@ -283,11 +324,72 @@ func ParseAddress(addrStr string) (*Address, error) {
 	return FromString(addrStr)
 }
 
-// FormatAddress formats raw bytes as a 0x address string
+// FormatAddress formats raw bytes as a tl1 address string
 func FormatAddress(addressBytes []byte) (string, error) {
 	addr, err := FromBytes(addressBytes)
 	if err != nil {
 		return "", err
 	}
 	return addr.String(), nil
+}
+
+// GetAddressPrefix returns the address prefix for Thrylos
+func GetAddressPrefix() string {
+	return AddressPrefix
+}
+
+// GetAddressByteLength returns the byte length of Thrylos addresses
+func GetAddressByteLength() int {
+	return AddressByteLength
+}
+
+// EstimateAddressLength estimates the string length of a Thrylos address
+func EstimateAddressLength() int {
+	// With proper bit conversion, 8 bytes produces 22 characters
+	return 22
+}
+
+// AddressMetrics provides information about the address format
+func AddressMetrics() map[string]interface{} {
+	return map[string]interface{}{
+		"format":               "Bech32",
+		"prefix":               AddressPrefix,
+		"byte_length":          AddressByteLength,
+		"estimated_str_length": EstimateAddressLength(),
+		"checksum":             "Built-in Bech32 checksum",
+		"case_sensitive":       false,  // Bech32 is case-insensitive
+		"collision_resistance": "2^64", // 8 bytes = 64 bits
+		"example":              "tl1rn5evt8jyynf7ldr5fk",
+	}
+}
+
+// IsNullAddress checks if the address is the null/zero address
+func IsNullAddress(addr string) bool {
+	parsed, err := FromString(addr)
+	if err != nil {
+		return false
+	}
+	return parsed.IsZero()
+}
+
+// CreateNullAddressString returns the null address as a string
+func CreateNullAddressString() string {
+	return NullAddress().String()
+}
+
+// NormalizeAddress converts address to lowercase for consistent storage
+func NormalizeAddress(addr string) (string, error) {
+	if err := Validate(addr); err != nil {
+		return "", err
+	}
+	return strings.ToLower(addr), nil
+}
+
+// AddressToBytes converts a string address to its byte representation
+func AddressToBytes(addr string) ([]byte, error) {
+	parsed, err := FromString(addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse address: %v", err)
+	}
+	return parsed.Bytes(), nil
 }
