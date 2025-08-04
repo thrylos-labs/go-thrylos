@@ -22,6 +22,8 @@ import (
 	"golang.org/x/crypto/blake2b"
 )
 
+const BaseUnit = int64(1000000000) // 1 THRYLOS
+
 // WorldState manages the global state for a shard
 type WorldState struct {
 	// Configuration
@@ -65,9 +67,126 @@ type WorldState struct {
 	mu sync.RWMutex
 }
 
+// InitializeFromConfig initializes the world state with config-driven genesis data
+func (ws *WorldState) InitializeFromConfig() error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	fmt.Printf("🔍 InitializeFromConfig: Setting up genesis state from config...\n")
+
+	// Check if we already have accounts (existing state)
+	accounts := ws.accountManager.GetAllAccounts()
+	if len(accounts) > 0 {
+		fmt.Printf("✅ InitializeFromConfig: Existing state found (%d accounts), skipping genesis\n", len(accounts))
+		return nil
+	}
+
+	// Initialize genesis accounts from config
+	totalGenesisBalance := int64(0)
+	for _, genesisAccount := range ws.config.Genesis.Accounts {
+		fmt.Printf("🏦 Creating genesis account: %s with %d tokens (%s)\n",
+			genesisAccount.Address, genesisAccount.Balance/BaseUnit, genesisAccount.Purpose)
+
+		account := &core.Account{
+			Address:      genesisAccount.Address,
+			Balance:      genesisAccount.Balance,
+			Nonce:        0,
+			StakedAmount: 0,
+			DelegatedTo:  make(map[string]int64),
+			Rewards:      0,
+		}
+
+		// Create account using account manager
+		if err := ws.accountManager.UpdateAccount(account); err != nil {
+			return fmt.Errorf("failed to create genesis account %s: %v", genesisAccount.Address, err)
+		}
+
+		// Save to persistent storage
+		if err := ws.state.SaveAccount(account); err != nil {
+			return fmt.Errorf("failed to save genesis account %s: %v", genesisAccount.Address, err)
+		}
+
+		totalGenesisBalance += genesisAccount.Balance
+	}
+
+	// Set total supply
+	ws.totalSupply = totalGenesisBalance
+
+	// Initialize genesis block (block 0)
+	genesisBlock := &core.Block{
+		Header: &core.BlockHeader{
+			Index:     0,
+			PrevHash:  "",
+			Timestamp: time.Now().Unix(),
+			Validator: "", // No validator for genesis
+			GasLimit:  ws.config.Consensus.MaxBlockSize,
+			GasUsed:   0,
+			StateRoot: "",
+		},
+		Transactions: []*core.Transaction{}, // No transactions in genesis
+		Hash:         "",
+	}
+
+	// Calculate genesis block hash
+	genesisBlock.Hash = ws.calculateBlockHash(genesisBlock)
+
+	// Update state root
+	if err := ws.updateStateRoot(); err != nil {
+		return fmt.Errorf("failed to calculate initial state root: %v", err)
+	}
+
+	// Set the state root in genesis block
+	genesisBlock.Header.StateRoot = ws.stateRoot
+
+	// Add genesis block
+	ws.blocks = []*core.Block{genesisBlock}
+	ws.currentHash = genesisBlock.Hash
+	ws.height = 0
+	ws.lastTimestamp = genesisBlock.Header.Timestamp
+
+	// Save genesis state
+	if err := ws.SaveState(); err != nil {
+		return fmt.Errorf("failed to save genesis state: %v", err)
+	}
+
+	// Save genesis block
+	if err := ws.db.SaveBlock(genesisBlock); err != nil {
+		return fmt.Errorf("failed to save genesis block: %v", err)
+	}
+
+	fmt.Printf("✅ InitializeFromConfig: Genesis state created successfully\n")
+	fmt.Printf("   - Total accounts: %d\n", len(ws.config.Genesis.Accounts))
+	fmt.Printf("   - Total supply: %d THRYLOS\n", totalGenesisBalance/BaseUnit)
+	fmt.Printf("   - Genesis block: %s\n", genesisBlock.Hash)
+	fmt.Printf("   - State root: %s\n", ws.stateRoot)
+
+	return nil
+}
+
+// calculateBlockHash calculates the hash of a block
+func (ws *WorldState) calculateBlockHash(block *core.Block) string {
+	// Simple hash calculation for genesis block
+	var buf []byte
+	buf = append(buf, []byte(fmt.Sprintf("%d", block.Header.Index))...)
+	buf = append(buf, []byte(block.Header.PrevHash)...)
+	buf = append(buf, []byte(fmt.Sprintf("%d", block.Header.Timestamp))...)
+	buf = append(buf, []byte(block.Header.Validator)...)
+	buf = append(buf, []byte(fmt.Sprintf("%d", block.Header.GasUsed))...)
+
+	// Add transaction hashes
+	for _, tx := range block.Transactions {
+		buf = append(buf, []byte(tx.Hash)...)
+	}
+
+	hash := blake2b.Sum256(buf)
+	return fmt.Sprintf("%x", hash)
+}
+
 // NewWorldState creates a new world state for a shard with config-driven initialization
 // NewWorldState creates a new world state for a shard with config-driven initialization
 // Simplified version without debug - just add the storage parameter:
+
+// Replace your NewWorldState function with this updated version:
 
 func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg *config.Config, badgerStorage *storage.BadgerStorage) (*WorldState, error) {
 	fmt.Printf("🔍 NewWorldState: Using existing BadgerStorage (no creation needed)\n")
@@ -95,24 +214,40 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 	}
 
 	// Try to load existing state from storage
+	existingState := false
 	if err := ws.LoadState(); err != nil {
 		fmt.Printf("🔍 NewWorldState: No existing state found (fresh start): %v\n", err)
+	} else {
+		// Check if we actually have meaningful state (accounts/validators)
+		accountCount := ws.GetAccountCount()
+		validatorCount := ws.GetValidatorCount()
 
-		// Fresh database - initialize with default values
+		if accountCount > 0 || validatorCount > 0 {
+			existingState = true
+			fmt.Printf("✅ NewWorldState: Loaded existing state: height=%d, accounts=%d, validators=%d\n",
+				ws.height, accountCount, validatorCount)
+		} else {
+			fmt.Printf("🔍 NewWorldState: Found empty state (height=%d, accounts=%d, validators=%d)\n",
+				ws.height, accountCount, validatorCount)
+		}
+	}
+
+	if !existingState {
+		// Fresh database or empty state - initialize with config genesis data
 		ws.height = -1 // Genesis state
 		ws.stateRoot = ""
 		ws.totalSupply = cfg.Economics.GenesisSupply
 		ws.totalStaked = 0
 
-		fmt.Printf("✅ NewWorldState: Initialized fresh state\n")
-	} else {
-		// Successfully loaded existing state
-		ws.UpdateTotalStaked()
+		// *** CRITICAL FIX: Initialize from config ***
+		if err := ws.InitializeFromConfig(); err != nil {
+			return nil, fmt.Errorf("failed to initialize genesis from config: %v", err)
+		}
 
-		// Skip consistency check for now since we know it might have issues
-		// We can add it back later once the basic functionality works
-		fmt.Printf("✅ NewWorldState: Loaded existing state: height=%d, accounts=%d, validators=%d\n",
-			ws.height, ws.GetAccountCount(), ws.GetValidatorCount())
+		fmt.Printf("✅ NewWorldState: Initialized fresh state from config\n")
+	} else {
+		// Successfully loaded existing state with data
+		ws.UpdateTotalStaked()
 	}
 
 	// Initialize cross-shard manager

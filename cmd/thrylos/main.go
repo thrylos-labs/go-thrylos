@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"os"
@@ -8,12 +10,57 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/node"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
+
+// getConsistentNodePrivateKey generates a deterministic private key for development
+func getConsistentNodePrivateKey() (crypto.PrivateKey, error) {
+	// Use a fixed seed for development (ensures same address every time)
+	seed := "thrylos-development-node-key-for-testing-2024"
+
+	// Hash the seed to get proper random bytes
+	hash := sha256.Sum256([]byte(seed))
+
+	// Create a deterministic reader from the hash
+	reader := bytes.NewReader(hash[:])
+
+	// Generate MLDSA key with deterministic seed
+	_, mldsaKey, err := mldsa44.GenerateKey(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate deterministic key: %v", err)
+	}
+
+	// Return the private key using your existing constructor
+	return crypto.NewPrivateKeyFromMLDSA(mldsaKey), nil
+}
+
+// Alternative approach using raw bytes if the above doesn't work:
+func getConsistentNodePrivateKeyFromBytes() (crypto.PrivateKey, error) {
+	// Create a fixed 32-byte seed
+	seed := make([]byte, 32)
+	copy(seed, []byte("thrylos-dev-node-consistent-key"))
+
+	// Hash it to ensure proper distribution
+	hash := sha256.Sum256(seed)
+
+	// Extend to MLDSA private key size (4864 bytes)
+	keyBytes := make([]byte, mldsa44.PrivateKeySize)
+
+	// Fill the key bytes using repeated hashing
+	for i := 0; i < len(keyBytes); {
+		hash = sha256.Sum256(hash[:])
+		copied := copy(keyBytes[i:], hash[:])
+		i += copied
+	}
+
+	// Create private key from bytes
+	return crypto.NewPrivateKeyFromBytes(keyBytes)
+}
 
 func main() {
 	fmt.Println("🚀 Starting Thrylos ...")
@@ -36,10 +83,14 @@ func main() {
 
 	fmt.Printf("✅ Protobuf working! Test account: %+v\n", testAccount)
 
-	// Generate node private key
-	nodePrivateKey, err := crypto.NewPrivateKey()
+	// Generate consistent node private key for development
+	nodePrivateKey, err := getConsistentNodePrivateKey()
 	if err != nil {
-		log.Fatalf("Failed to generate node private key: %v", err)
+		// Fallback to bytes approach if the first method fails
+		nodePrivateKey, err = getConsistentNodePrivateKeyFromBytes()
+		if err != nil {
+			log.Fatalf("Failed to generate consistent node private key: %v", err)
+		}
 	}
 
 	// Generate node address
