@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	fmt.Println("🚀 Starting Thrylos V2...")
+	fmt.Println("🚀 Starting Thrylos ...")
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -166,7 +166,7 @@ func main() {
 	for {
 		select {
 		case <-c:
-			fmt.Println("\n🛑 Shutting down Thrylos V2...")
+			fmt.Println("\n🛑 Shutting down Thrylos ...")
 
 			// Stop the node gracefully
 			if err := thrylosNode.Stop(); err != nil {

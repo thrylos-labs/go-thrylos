@@ -205,7 +205,7 @@ func Load() (*Config, error) {
 		},
 
 		Staking: StakingConfig{
-			MinValidatorStake:          MinimumValidatorStake,      // 32 THRYLOS
+			MinValidatorStake:          MinimumValidatorStake,      // 34 THRYLOS
 			MinDelegation:              MinimumDelegation,          // 0.1 THRYLOS
 			MinSelfStake:               MinimumValidatorStake / 10, // 3.2 THRYLOS (10% of validator stake)
 			MaxCommission:              0.20,                       // 20% max commission
@@ -411,7 +411,7 @@ Distribution:
 - Development: %d THRYLOS (10%%)
 
 Staking Requirements:
-- Validator Stake: %d THRYLOS (32 THRYLOS)
+- Validator Stake: %d THRYLOS (34 THRYLOS)
 - Minimum Delegation: %.1f THRYLOS
 - Minimum Stake: %d THRYLOS
 

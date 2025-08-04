@@ -1,4 +1,4 @@
-# Thrylos V2 Makefile
+# Thrylos Makefile
 
 .PHONY: proto build run test clean deps setup
 
@@ -17,7 +17,7 @@ build: proto
 
 # Run the node
 run: build
-	@echo "Starting Thrylos V2 node..."
+	@echo "Starting Thrylos node..."
 	./bin/thrylos
 
 # Run tests

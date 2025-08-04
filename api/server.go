@@ -5,7 +5,7 @@
 // Provides clean REST endpoints for wallets and applications to query blockchain state
 // Handles account balances, transactions, blocks, validators, and system status
 // Uses Gorilla Mux for routing, includes CORS support and logging middleware
-// Designed for HTTP polling approach - simple, reliable, cacheable endpoints
+// Designed for HTTPS polling approach - simple, reliable, cacheable endpoints
 // Serves as the primary interface between external applications and your blockchain node
 
 // api/server.go
