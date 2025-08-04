@@ -1,12 +1,14 @@
 // api/server.go
 
-// Main HTTP REST API server for blockchain data access
+// Main HTTPS REST API server for blockchain data access
 
 // Provides clean REST endpoints for wallets and applications to query blockchain state
 // Handles account balances, transactions, blocks, validators, and system status
 // Uses Gorilla Mux for routing, includes CORS support and logging middleware
 // Designed for HTTP polling approach - simple, reliable, cacheable endpoints
 // Serves as the primary interface between external applications and your blockchain node
+
+// api/server.go
 
 package api
 
@@ -30,6 +32,19 @@ type Server struct {
 	router     *mux.Router
 	server     *http.Server
 	port       int
+
+	// HTTPS configuration
+	enableTLS bool
+	certFile  string
+	keyFile   string
+}
+
+// ServerConfig represents server configuration
+type ServerConfig struct {
+	Port      int
+	EnableTLS bool
+	CertFile  string
+	KeyFile   string
 }
 
 // NewServer creates a new API server
@@ -37,6 +52,20 @@ func NewServer(worldState *state.WorldState, port int) *Server {
 	server := &Server{
 		worldState: worldState,
 		port:       port,
+	}
+
+	server.setupRoutes()
+	return server
+}
+
+// NewServerWithConfig creates a new API server with full configuration
+func NewServerWithConfig(worldState *state.WorldState, config *ServerConfig) *Server {
+	server := &Server{
+		worldState: worldState,
+		port:       config.Port,
+		enableTLS:  config.EnableTLS,
+		certFile:   config.CertFile,
+		keyFile:    config.KeyFile,
 	}
 
 	server.setupRoutes()
@@ -96,11 +125,18 @@ func (s *Server) Start() error {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	log.Printf("🌐 API Server starting on port %d", s.port)
-	log.Printf("📊 Health check: http://localhost:%d/api/v1/health", s.port)
-	log.Printf("💰 Balance endpoint: http://localhost:%d/api/v1/account/{address}/balance", s.port)
-
-	return s.server.ListenAndServe()
+	if s.enableTLS {
+		log.Printf("🔒 HTTPS API Server starting on port %d", s.port)
+		log.Printf("📊 Health check: https://localhost:%d/api/v1/health", s.port)
+		log.Printf("💰 Balance endpoint: https://localhost:%d/api/v1/account/{address}/balance", s.port)
+		return s.server.ListenAndServeTLS(s.certFile, s.keyFile)
+	} else {
+		log.Printf("🌐 HTTP API Server starting on port %d", s.port)
+		log.Printf("📊 Health check: http://localhost:%d/api/v1/health", s.port)
+		log.Printf("💰 Balance endpoint: http://localhost:%d/api/v1/account/{address}/balance", s.port)
+		log.Printf("⚠️  Warning: Using HTTP in development mode. Use HTTPS for production!")
+		return s.server.ListenAndServe()
+	}
 }
 
 // Stop stops the HTTP server

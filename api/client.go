@@ -1,6 +1,5 @@
 // api/client.go
 
-// 📁 api/client.go
 // Smart polling client library for wallet applications
 
 // Implements intelligent balance polling with adaptive intervals (15s normal, 2s after transactions)

@@ -2,7 +2,7 @@
 
 // Integration helpers and production deployment utilities
 
-// APIManager for easy lifecycle management of the HTTP server
+// APIManager for easy lifecycle management of the HTTPS server
 // Integration examples showing how to wire the API into your blockchain node
 // Production deployment tips (rate limiting, caching, authentication, monitoring)
 // Configuration helpers and testing utilities
@@ -28,12 +28,39 @@ type APIManager struct {
 	cancel     context.CancelFunc
 }
 
-// NewAPIManager creates a new API manager
+// APIManagerConfig represents API manager configuration
+type APIManagerConfig struct {
+	Port      int
+	EnableTLS bool
+	CertFile  string
+	KeyFile   string
+}
+
+// NewAPIManager creates a new API manager (HTTP only - for development)
 func NewAPIManager(worldState *state.WorldState, port int) *APIManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &APIManager{
 		server:     NewServer(worldState, port),
+		worldState: worldState,
+		ctx:        ctx,
+		cancel:     cancel,
+	}
+}
+
+// NewAPIManagerWithConfig creates a new API manager with full configuration (HTTP/HTTPS)
+func NewAPIManagerWithConfig(worldState *state.WorldState, config *APIManagerConfig) *APIManager {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	serverConfig := &ServerConfig{
+		Port:      config.Port,
+		EnableTLS: config.EnableTLS,
+		CertFile:  config.CertFile,
+		KeyFile:   config.KeyFile,
+	}
+
+	return &APIManager{
+		server:     NewServerWithConfig(worldState, serverConfig),
 		worldState: worldState,
 		ctx:        ctx,
 		cancel:     cancel,
@@ -65,24 +92,32 @@ func (am *APIManager) Stop() error {
 func IntegrateWithNode() {
 	// This would be called from your main blockchain node initialization
 
-	// Assuming you have a WorldState instance from your node setup
-	// worldState := state.NewWorldState(...)
-
-	// Start API server on port 8080
-	// apiManager := NewAPIManager(worldState, 8080)
-	// apiManager.Start()
-
-	fmt.Println("📝 Integration example - add this to your node startup:")
-	fmt.Println(`
-	// In your main node initialization
-	apiManager := api.NewAPIManager(worldState, 8080)
-	if err := apiManager.Start(); err != nil {
-		log.Fatalf("Failed to start API server: %v", err)
-	}
-	
-	// Graceful shutdown
-	defer apiManager.Stop()
-	`)
+	fmt.Println("📝 Integration examples:")
+	fmt.Println("")
+	fmt.Println("// Development setup (HTTP)")
+	fmt.Println("apiManager := api.NewAPIManager(worldState, 8080)")
+	fmt.Println("if err := apiManager.Start(); err != nil {")
+	fmt.Println("    log.Fatalf(\"Failed to start API server: %v\", err)")
+	fmt.Println("}")
+	fmt.Println("defer apiManager.Stop()")
+	fmt.Println("")
+	fmt.Println("// Production setup (HTTPS)")
+	fmt.Println("config := &api.APIManagerConfig{")
+	fmt.Println("    Port:      8080,")
+	fmt.Println("    EnableTLS: true,")
+	fmt.Println("    CertFile:  \"/etc/ssl/certs/your-domain.crt\",")
+	fmt.Println("    KeyFile:   \"/etc/ssl/private/your-domain.key\",")
+	fmt.Println("}")
+	fmt.Println("apiManager := api.NewAPIManagerWithConfig(worldState, config)")
+	fmt.Println("if err := apiManager.Start(); err != nil {")
+	fmt.Println("    log.Fatalf(\"Failed to start HTTPS API server: %v\", err)")
+	fmt.Println("}")
+	fmt.Println("defer apiManager.Stop()")
+	fmt.Println("")
+	fmt.Println("// Auto-generate development certificates")
+	fmt.Println("if err := api.GenerateSelfSignedCert(\"./certs/server.crt\", \"./certs/server.key\"); err != nil {")
+	fmt.Println("    log.Printf(\"Certificate generation failed: %v\", err)")
+	fmt.Println("}")
 }
 
 // WalletExample demonstrates how a wallet would use the polling API
@@ -185,6 +220,10 @@ type APIConfig struct {
 	EnableAuthentication bool          `json:"enable_authentication"`
 	CacheTTL             time.Duration `json:"cache_ttl"`
 	MaxRequestSize       int64         `json:"max_request_size"`
+	EnableTLS            bool          `json:"enable_tls"`
+	CertFile             string        `json:"cert_file"`
+	KeyFile              string        `json:"key_file"`
+	AutoGenerateCert     bool          `json:"auto_generate_cert"`
 }
 
 // DefaultAPIConfig returns sensible defaults
@@ -197,5 +236,41 @@ func DefaultAPIConfig() *APIConfig {
 		EnableAuthentication: false, // Enable in production
 		CacheTTL:             30 * time.Second,
 		MaxRequestSize:       1024 * 1024, // 1MB
+		EnableTLS:            false,       // Enable for production
+		CertFile:             "./certs/server.crt",
+		KeyFile:              "./certs/server.key",
+		AutoGenerateCert:     true, // Generate self-signed cert if files don't exist
 	}
+}
+
+// ProductionAPIConfig returns production-ready defaults
+func ProductionAPIConfig() *APIConfig {
+	config := DefaultAPIConfig()
+	config.EnableTLS = true
+	config.AllowedOrigins = []string{} // Must be configured for production
+	config.EnableAuthentication = true
+	config.AutoGenerateCert = false // Use real certificates in production
+	return config
+}
+
+// GenerateSelfSignedCert generates a self-signed certificate for development
+func GenerateSelfSignedCert(certFile, keyFile string) error {
+	// This would contain certificate generation logic
+	// For now, return instructions
+	return fmt.Errorf(`
+🔒 Certificate files not found. For development, you can:
+
+1. Generate self-signed certificates:
+   openssl req -x509 -newkey rsa:4096 -keyout %s -out %s -days 365 -nodes -subj "/CN=localhost"
+
+2. Or use Let's Encrypt for production:
+   certbot certonly --standalone -d your-domain.com
+
+3. Or disable TLS for development:
+   Set EnableTLS: false in your API configuration
+
+Certificate files expected:
+- Certificate: %s  
+- Private Key: %s
+`, keyFile, certFile, certFile, keyFile)
 }
