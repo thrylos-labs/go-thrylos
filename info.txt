@@ -3,7 +3,7 @@ TO DO
 
 🎯 Next Steps for Production:
 Consensus.proto - Use for the consensus
-Does the 'data' folder need to be ignored from the commit?
+Make sure the database is used correctly 
 
 Multi-node Testing - Start multiple nodes with different ports
 Genesis Balance - Configure initial token distribution

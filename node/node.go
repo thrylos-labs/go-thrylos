@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thrylos-labs/go-thrylos/api"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/consensus/pos"
 	"github.com/thrylos-labs/go-thrylos/consensus/rewards"
@@ -37,6 +38,9 @@ type Node struct {
 	validatorManager  *validator.Manager
 	rewardDistributor *rewards.Distributor
 	inflationManager  *rewards.InflationManager
+
+	// API server
+	apiManager *api.APIManager
 
 	// Node identity and configuration
 	nodePrivateKey  crypto.PrivateKey
@@ -89,6 +93,8 @@ type NodeConfig struct {
 	EnableP2P         bool
 	P2PListenPort     int
 	BootstrapPeers    []string
+	EnableAPI         bool `json:"enable_api"` // ADD THIS
+	APIPort           int  `json:"api_port"`   // ADD THIS
 }
 
 // NewNode creates a new blockchain node with full WorldState integration
@@ -206,6 +212,14 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		cancelFunc:        cancelFunc,
 	}
 
+	if nodeConfig.EnableAPI {
+		apiPort := nodeConfig.APIPort
+		if apiPort == 0 {
+			apiPort = 8080 // Default port
+		}
+		node.apiManager = api.NewAPIManager(worldState, apiPort)
+	}
+
 	// Store genesis configuration for initialization
 	node.storeGenesisConfig(nodeConfig)
 
@@ -233,6 +247,13 @@ func (n *Node) Start() error {
 	// Start consensus engine
 	if err := n.consensusEngine.Start(); err != nil {
 		return fmt.Errorf("failed to start consensus engine: %v", err)
+	}
+
+	// Start API server if enabled
+	if n.apiManager != nil {
+		if err := n.apiManager.Start(); err != nil {
+			return fmt.Errorf("failed to start API server: %v", err)
+		}
 	}
 
 	// Start P2P network if enabled
@@ -312,6 +333,13 @@ func (n *Node) Stop() error {
 	if n.p2pNetwork != nil {
 		if err := n.p2pNetwork.Stop(); err != nil {
 			fmt.Printf("Error stopping P2P network: %v\n", err)
+		}
+	}
+
+	// Stop API server
+	if n.apiManager != nil {
+		if err := n.apiManager.Stop(); err != nil {
+			fmt.Printf("Error stopping API server: %v\n", err)
 		}
 	}
 
