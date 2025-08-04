@@ -213,10 +213,18 @@ func Load() (*Config, error) {
 		Genesis: GenesisAllocation{
 			TotalGenesis: GenesisSupply,
 			Accounts: []GenesisAccount{
-				// Public distribution - 10M THRYLOS (immediate circulation)
+				// Node developer/validator account - 1M THRYLOS (for testing and validation)
+				{
+					Address:      "tl1xzg5z5n47f0w6pajny8", // Your current node address
+					Balance:      1000000 * BaseUnit,       // 1M THRYLOS for testing
+					Purpose:      "Development node and initial validator",
+					Locked:       false,
+					UnlockBlocks: 0,
+				},
+				// Public distribution - 9M THRYLOS (immediate circulation)
 				{
 					Address:      "genesis_public_pool",
-					Balance:      10000000 * BaseUnit, // 10M THRYLOS
+					Balance:      9000000 * BaseUnit, // 9M THRYLOS (reduced by 1M)
 					Purpose:      "Public launch and early adopters",
 					Locked:       false,
 					UnlockBlocks: 0,
