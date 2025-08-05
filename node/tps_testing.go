@@ -1040,28 +1040,6 @@ func DefaultTPSTestConfig() TPSTestConfig {
 	}
 }
 
-// Also fix the generateRecipients method in your TPS tester:
-func (tps *TPSTransactionTester) generateRecipients(count int) ([]string, error) {
-	recipients := make([]string, count)
-
-	for i := 0; i < count; i++ {
-		// Generate proper private key and address
-		key, err := crypto.NewPrivateKey()
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate key %d: %v", i, err)
-		}
-
-		addr, err := account.GenerateAddress(key.PublicKey())
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate address %d: %v", i, err)
-		}
-
-		recipients[i] = addr
-	}
-
-	return recipients, nil
-}
-
 // Enhanced TPS test with better error handling and debugging:
 func (tps *TPSTransactionTester) RunTPSTestWithDebugging(config TPSTestConfig) (*TPSTestResult, error) {
 	fmt.Printf("🚀 Starting Enhanced TPS Test: %s\n", config.TestName)
