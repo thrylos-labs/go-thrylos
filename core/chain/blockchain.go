@@ -137,6 +137,61 @@ func NewBlockchain(cfg *BlockchainConfig) (*Blockchain, error) {
 	return bc, nil
 }
 
+func (bc *Blockchain) CreateBlockWithBatching(validator string, privateKey crypto.PrivateKey, minTxs int) (*core.Block, error) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	fmt.Printf("🔍 Blockchain: CreateBlockWithBatching - waiting for %d transactions\n", minTxs)
+
+	// Get current block from WorldState
+	currentBlock := bc.worldState.GetCurrentBlock()
+
+	// Try to get enough transactions for batching
+	maxAttempts := 5
+	var candidateTxs []*core.Transaction
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		candidateTxs = bc.worldState.GetExecutableTransactions(bc.config.Consensus.MaxTxPerBlock)
+
+		fmt.Printf("🔍 Blockchain: Attempt %d: Found %d executable transactions\n", attempt, len(candidateTxs))
+
+		if len(candidateTxs) >= minTxs || attempt == maxAttempts {
+			break
+		}
+
+		// Wait a bit for more transactions to arrive
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Create block template
+	template := bc.blockCreator.CreateBlockTemplate(
+		currentBlock,
+		candidateTxs,
+		bc.config.Consensus.MaxBlockSize,
+		bc.config.Consensus.MaxTxPerBlock,
+	)
+
+	fmt.Printf("🔍 Blockchain: Template created with %d transactions\n", len(template.Transactions))
+
+	// Create block
+	block, err := bc.blockCreator.CreateBlockFromTemplate(template, validator)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create block: %v", err)
+	}
+
+	// Set state root from WorldState
+	stateRoot := bc.worldState.GetStateRoot()
+	bc.blockCreator.SetStateRoot(block, stateRoot)
+
+	// Sign block
+	if err := bc.blockCreator.SignBlock(block, privateKey); err != nil {
+		return nil, fmt.Errorf("failed to sign block: %v", err)
+	}
+
+	fmt.Printf("🔍 Blockchain: Created block with %d transactions\n", len(block.Transactions))
+	return block, nil
+}
+
 // SetConsensusEngine sets the PoS consensus engine
 func (bc *Blockchain) SetConsensusEngine(engine ConsensusEngine) {
 	bc.mu.Lock()

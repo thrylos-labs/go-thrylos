@@ -672,13 +672,30 @@ func (n *Node) eventProcessingLoop() {
 }
 
 // Block Production
-
 func (n *Node) produceBlock() error {
-	// Create block through blockchain
-	block, err := n.blockchain.CreateBlock(n.nodeAddress, n.nodePrivateKey)
-	if err != nil {
-		return fmt.Errorf("failed to create block: %v", err)
+	fmt.Printf("🔍 Node: Producing block with batching...\n")
+
+	// Get transaction pool stats first
+	pendingTxs := n.blockchain.GetPendingTransactions()
+	fmt.Printf("🔍 Node: %d pending transactions before block creation\n", len(pendingTxs))
+
+	// Use the new batching method with minimum transaction requirement
+	minTxsPerBlock := 1 // Minimum 1 transaction per block
+	if len(pendingTxs) > 5 {
+		minTxsPerBlock = 3 // Try to get at least 3 if we have more than 5 pending
 	}
+	if len(pendingTxs) > 10 {
+		minTxsPerBlock = 5 // Try to get at least 5 if we have more than 10 pending
+	}
+
+	// Create block with batching
+	block, err := n.blockchain.CreateBlockWithBatching(n.nodeAddress, n.nodePrivateKey, minTxsPerBlock)
+	if err != nil {
+		return fmt.Errorf("failed to create block with batching: %v", err)
+	}
+
+	fmt.Printf("🔍 Node: Created block with %d transactions (target was %d+)\n",
+		len(block.Transactions), minTxsPerBlock)
 
 	// Add block to blockchain
 	if err := n.blockchain.AddBlock(block); err != nil {
@@ -698,8 +715,8 @@ func (n *Node) produceBlock() error {
 	n.triggerEvent("block_produced", block)
 	n.updateBlockProcessingRate()
 
-	fmt.Printf("Produced and broadcast block %d with %d transactions\n",
-		block.Header.Index, len(block.Transactions))
+	fmt.Printf("✅ Produced block %d with %d transactions (gas: %d, fees calculated)\n",
+		block.Header.Index, len(block.Transactions), block.Header.GasUsed)
 
 	return nil
 }
@@ -840,8 +857,34 @@ func (n *Node) initializeGenesis() error {
 	)
 }
 
+// Fix 1: Update registerAsValidator in node.go to handle existing validators
 func (n *Node) registerAsValidator() error {
+	// Check if validator already exists first
+	_, err := n.blockchain.GetValidator(n.nodeAddress)
+	if err == nil {
+		// Validator already exists, just log and continue
+		fmt.Printf("✅ Validator %s already registered, skipping registration\n", n.nodeAddress)
+		return nil
+	}
+
+	// Only register if validator doesn't exist
 	return n.RegisterValidator(n.config.Staking.MinValidatorStake, 0.1)
+}
+
+// Fix 2: Add the missing SuperOptimizedTPSTestConfig to your tps_testing.go
+func SuperOptimizedTPSTestConfig() TPSTestConfig {
+	return TPSTestConfig{
+		Duration:           45 * time.Second, // Shorter duration for focused testing
+		TargetTPS:          50,               // Much higher TPS target
+		MaxConcurrency:     1000,             // Much higher concurrency
+		TransactionAmount:  15000000,         // 0.015 THRYLOS (above minimum)
+		GasPrice:           1000,
+		WarmupDuration:     3 * time.Second, // Short warmup
+		ReportInterval:     2 * time.Second, // Frequent reporting
+		TestName:           "Super Optimized Batching Test",
+		GenerateRecipients: true,
+		NumRecipients:      100, // Many recipients to avoid nonce conflicts
+	}
 }
 
 func (n *Node) isValidator() bool {

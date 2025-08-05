@@ -45,6 +45,324 @@ type TPSTransactionTester struct {
 	address     string
 	testResults []TPSTestResult
 	mu          sync.RWMutex
+
+	// Add these fields for nonce tracking
+	currentNonce uint64
+	nonceMu      sync.Mutex
+}
+
+func (tps *TPSTransactionTester) CreateTransactionBurst(burstSize int, recipients []string) ([]*core.Transaction, error) {
+	var transactions []*core.Transaction
+
+	// Get the starting nonce once
+	startingNonce, err := tps.node.blockchain.GetNonce(tps.address)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get starting nonce: %v", err)
+	}
+
+	fmt.Printf("🔍 Creating burst with starting nonce: %d\n", startingNonce)
+
+	for i := 0; i < burstSize; i++ {
+		recipient := recipients[i%len(recipients)]
+
+		// Use sequential nonces starting from the current nonce
+		txNonce := startingNonce + uint64(i)
+
+		tx, err := tps.CreateTestTransactionWithNonce(tps.address, recipient, 15000000, 1000, txNonce)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create transaction %d: %v", i, err)
+		}
+
+		transactions = append(transactions, tx)
+
+		// Minimal delay to ensure unique timestamps
+		time.Sleep(time.Millisecond * 2)
+	}
+
+	fmt.Printf("🔍 Created %d transactions with nonces %d-%d\n", len(transactions), startingNonce, startingNonce+uint64(burstSize)-1)
+	return transactions, nil
+}
+
+// Alternative: Even simpler approach - don't track nonces, just get fresh ones
+func (tps *TPSTransactionTester) getNextNonceSimple() (uint64, error) {
+	// Just get the current nonce from blockchain each time
+	// This is slower but guaranteed to be correct
+	return tps.node.blockchain.GetNonce(tps.address)
+}
+
+// Updated CreateTestTransactionWithNonce to use fresh nonce if needed
+func (tps *TPSTransactionTester) CreateTestTransactionWithNonce(from, to string, amount int64, gasPrice int64, nonce uint64) (*core.Transaction, error) {
+	timestamp := time.Now().UnixNano()
+	txID := fmt.Sprintf("tps_tx_%d_%d", timestamp, nonce)
+
+	tx := &core.Transaction{
+		Id:        txID,
+		From:      from,
+		To:        to,
+		Amount:    amount,
+		Gas:       21000,
+		GasPrice:  gasPrice,
+		Nonce:     nonce,
+		Type:      core.TransactionType_TRANSFER,
+		Data:      nil,
+		Timestamp: time.Now().Unix(),
+	}
+
+	tx.Hash = tps.calculateTransactionHashExact(tx)
+
+	signature, err := tps.signTransaction(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %v", err)
+	}
+	tx.Signature = signature
+
+	return tx, nil
+}
+
+func (tps *TPSTransactionTester) RunCustomSlowTPSTestWithMetrics(targetTPS float64, duration time.Duration) (*TPSTestResult, error) {
+	fmt.Printf("🚀 Starting Enhanced TPS Test (Target: %.2f TPS)\n", targetTPS)
+
+	recipients, err := tps.generateRecipients(20)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate recipients: %v", err)
+	}
+
+	var totalTxs int64
+	var successfulTxs int64
+	var consecutiveFailures int64
+	var maxConsecutiveFailures int64
+
+	startTime := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), duration)
+	defer cancel()
+
+	// Get starting nonce ONCE at the beginning
+	startingNonce, err := tps.node.blockchain.GetNonce(tps.address)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get starting nonce: %v", err)
+	}
+
+	fmt.Printf("🔍 Starting with nonce: %d\n", startingNonce)
+
+	// Calculate interval for fractional TPS
+	var interval time.Duration
+	if targetTPS >= 1.0 {
+		interval = time.Duration(float64(time.Second) / targetTPS)
+	} else {
+		secondsPerTx := 1.0 / targetTPS
+		interval = time.Duration(secondsPerTx * float64(time.Second))
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	fmt.Printf("🎯 Creating transactions every %v (%.2f TPS target)\n", interval, targetTPS)
+
+	lastReportTime := startTime
+	reportInterval := 10 * time.Second
+	if targetTPS >= 2.0 {
+		reportInterval = 5 * time.Second // More frequent reporting for high TPS
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			// Use sequential nonce
+			currentNonce := startingNonce + uint64(totalTxs)
+
+			// Create transaction
+			recipient := recipients[totalTxs%int64(len(recipients))]
+			tx, err := tps.CreateTestTransactionWithNonce(tps.address, recipient, 15000000, 1000, currentNonce)
+			if err != nil {
+				fmt.Printf("❌ Failed to create transaction: %v\n", err)
+				consecutiveFailures++
+				totalTxs++
+				continue
+			}
+
+			// Submit transaction
+			if err := tps.node.SubmitTransaction(tx); err == nil {
+				successfulTxs++
+				consecutiveFailures = 0 // Reset consecutive failures
+				// Only log success for very high TPS or first few
+				if targetTPS < 1.0 || successfulTxs <= 3 {
+					fmt.Printf("✅ TX success (nonce %d)\n", currentNonce)
+				}
+			} else {
+				consecutiveFailures++
+				if consecutiveFailures > maxConsecutiveFailures {
+					maxConsecutiveFailures = consecutiveFailures
+				}
+				// Log failures more selectively based on TPS
+				if targetTPS < 1.0 || consecutiveFailures <= 3 {
+					fmt.Printf("🔍 TX failed (nonce %d): %v\n", currentNonce, err)
+				}
+			}
+			totalTxs++
+
+			// Progress reporting
+			now := time.Now()
+			if now.Sub(lastReportTime) >= reportInterval {
+				elapsed := now.Sub(startTime)
+				currentTPS := float64(successfulTxs) / elapsed.Seconds()
+				successRate := float64(successfulTxs) / float64(totalTxs) * 100
+
+				fmt.Printf("📊 Progress: %d/%d txs (%.1f%%), %.3f TPS, %d consecutive failures\n",
+					successfulTxs, totalTxs, successRate, currentTPS, consecutiveFailures)
+
+				lastReportTime = now
+			}
+
+		case <-ctx.Done():
+			goto testComplete
+		}
+	}
+
+testComplete:
+	endTime := time.Now()
+	actualDuration := endTime.Sub(startTime)
+
+	result := &TPSTestResult{
+		TestName:          fmt.Sprintf("Custom Slow TPS Test (Target: %.2f)", targetTPS),
+		Duration:          actualDuration,
+		TotalTransactions: totalTxs,
+		SuccessfulTxs:     successfulTxs,
+		FailedTxs:         totalTxs - successfulTxs,
+		AverageTPS:        float64(successfulTxs) / actualDuration.Seconds(),
+		ErrorRate:         float64(totalTxs-successfulTxs) / float64(totalTxs) * 100,
+		StartTime:         startTime,
+		EndTime:           endTime,
+	}
+
+	// Enhanced results display
+	fmt.Printf("\n📊 === ENHANCED TPS RESULTS ===\n")
+	fmt.Printf("Target: %.2f TPS | Achieved: %.3f TPS (%.1f%% efficiency)\n",
+		targetTPS, result.AverageTPS, (result.AverageTPS/targetTPS)*100)
+	fmt.Printf("Duration: %v\n", result.Duration.Truncate(time.Millisecond))
+	fmt.Printf("Success: %d/%d (%.1f%%)\n", result.SuccessfulTxs, result.TotalTransactions,
+		float64(result.SuccessfulTxs)/float64(result.TotalTransactions)*100)
+	fmt.Printf("Max Consecutive Failures: %d\n", maxConsecutiveFailures)
+	fmt.Printf("===========================\n")
+
+	return result, nil
+}
+
+// Method 3: Alternative - Modify your existing RunQuickSimpleTests
+func (tps *TPSTransactionTester) RunQuickSimpleTests() ([]*TPSTestResult, error) {
+	fmt.Printf("🚀 === QUICK SIMPLE TPS TESTS ===\n")
+
+	var results []*TPSTestResult
+
+	// Test with very slow rates first to establish baseline
+	slowTests := []struct {
+		tps      float64
+		duration time.Duration
+		name     string
+	}{
+		{0.25, 20 * time.Second, "Ultra Slow (0.25 TPS)"}, // 1 tx every 4 seconds
+		{0.33, 20 * time.Second, "Very Slow (0.33 TPS)"},  // 1 tx every 3 seconds
+		{0.5, 20 * time.Second, "Slow (0.5 TPS)"},         // 1 tx every 2 seconds
+		{1.0, 20 * time.Second, "Normal (1 TPS)"},         // 1 tx every 1 second
+	}
+
+	for i, test := range slowTests {
+		fmt.Printf("\n%d️⃣ Testing %s...\n", i+1, test.name)
+
+		result, err := tps.RunCustomSlowTPSTestWithMetrics(test.tps, test.duration)
+		if err != nil {
+			fmt.Printf("❌ Test failed: %v\n", err)
+			continue
+		}
+
+		results = append(results, result)
+
+		efficiency := (result.AverageTPS / test.tps) * 100
+		successRate := float64(result.SuccessfulTxs) / float64(result.TotalTransactions) * 100
+
+		fmt.Printf("✅ Result: %.3f TPS (%.1f%% efficiency, %.1f%% success)\n",
+			result.AverageTPS, efficiency, successRate)
+
+		// Brief pause between tests
+		if i < len(slowTests)-1 {
+			fmt.Printf("⏳ Pausing 3 seconds...\n")
+			time.Sleep(3 * time.Second)
+		}
+	}
+
+	return results, nil
+}
+func (tps *TPSTransactionTester) RunOptimalBurstTPSTest(config TPSTestConfig) (*TPSTestResult, error) {
+	fmt.Printf("🚀 Starting Optimal Burst TPS Test: %s\n", config.TestName)
+
+	recipients, err := tps.generateRecipients(config.NumRecipients)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate recipients: %v", err)
+	}
+
+	var totalTxs int64
+	var successfulTxs int64
+
+	startTime := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), config.Duration)
+	defer cancel()
+
+	// Smaller, more frequent bursts
+	burstInterval := 1 * time.Second // Create burst every second
+	burstSize := config.TargetTPS    // 1 second worth of transactions per burst
+
+	burstTicker := time.NewTicker(burstInterval)
+	defer burstTicker.Stop()
+
+	fmt.Printf("🎯 Creating optimal bursts: %d transactions every %v\n", burstSize, burstInterval)
+
+	for {
+		select {
+		case <-burstTicker.C:
+			// Create a smaller burst of transactions
+			transactions, err := tps.CreateTransactionBurst(burstSize, recipients)
+			if err != nil {
+				fmt.Printf("❌ Failed to create transaction burst: %v\n", err)
+				continue
+			}
+
+			// Submit all transactions in the burst rapidly
+			successCount := 0
+			for _, tx := range transactions {
+				if err := tps.node.SubmitTransaction(tx); err == nil {
+					successCount++
+				}
+			}
+
+			totalTxs += int64(len(transactions))
+			successfulTxs += int64(successCount)
+
+			elapsed := time.Since(startTime)
+			currentTPS := float64(totalTxs) / elapsed.Seconds()
+
+			fmt.Printf("📊 Burst: %d/%d successful (%.1f%%), %.2f TPS overall\n",
+				successCount, len(transactions), float64(successCount)/float64(len(transactions))*100, currentTPS)
+
+		case <-ctx.Done():
+			goto testComplete
+		}
+	}
+
+testComplete:
+	endTime := time.Now()
+
+	result := &TPSTestResult{
+		TestName:          config.TestName,
+		Duration:          endTime.Sub(startTime),
+		TotalTransactions: totalTxs,
+		SuccessfulTxs:     successfulTxs,
+		FailedTxs:         totalTxs - successfulTxs,
+		AverageTPS:        float64(totalTxs) / endTime.Sub(startTime).Seconds(),
+		StartTime:         startTime,
+		EndTime:           endTime,
+	}
+
+	tps.printResults(result)
+	return result, nil
 }
 
 // NewTPSTransactionTester creates a new TPS testing utility
@@ -432,37 +750,152 @@ func (tps *TPSTransactionTester) printStressTestSummary(results []*TPSTestResult
 // Transaction creation (matching existing implementation)
 // Fix for tps_testing.go - Replace the CreateTestTransaction method with this corrected version:
 
+// Fixed RunSimpleSequentialTest method - replace your current version with this
+func (tps *TPSTransactionTester) RunSimpleSequentialTest(targetTPS int, duration time.Duration) (*TPSTestResult, error) {
+	fmt.Printf("🚀 Starting Simple Sequential TPS Test (Target: %d TPS)\n", targetTPS)
+
+	recipients, err := tps.generateRecipients(20)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate recipients: %v", err)
+	}
+
+	var totalTxs int64
+	var successfulTxs int64
+
+	startTime := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), duration)
+	defer cancel()
+
+	// ⚠️ CRITICAL FIX: Get starting nonce ONCE at the beginning
+	startingNonce, err := tps.node.blockchain.GetNonce(tps.address)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get starting nonce: %v", err)
+	}
+
+	fmt.Printf("🔍 Starting with nonce: %d\n", startingNonce)
+
+	// Create transactions at steady rate
+	interval := time.Second / time.Duration(targetTPS)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	fmt.Printf("🎯 Creating transactions every %v\n", interval)
+
+	lastReportTime := startTime
+
+	for {
+		select {
+		case <-ticker.C:
+			// ⚠️ CRITICAL FIX: Use sequential nonce, don't query blockchain each time
+			currentNonce := startingNonce + uint64(totalTxs)
+
+			// Create single transaction with sequential nonce
+			recipient := recipients[totalTxs%int64(len(recipients))]
+			tx, err := tps.CreateTestTransactionWithNonce(tps.address, recipient, 15000000, 1000, currentNonce)
+			if err != nil {
+				fmt.Printf("❌ Failed to create transaction: %v\n", err)
+				totalTxs++
+				continue
+			}
+
+			// Submit transaction
+			if err := tps.node.SubmitTransaction(tx); err == nil {
+				successfulTxs++
+				// Only log success for first few to avoid spam
+				if successfulTxs <= 3 {
+					fmt.Printf("✅ TX success (nonce %d): %s\n", currentNonce, tx.Id)
+				}
+			} else {
+				// Only log first few failures
+				if totalTxs < 5 {
+					fmt.Printf("🔍 TX failed (nonce %d): %v\n", currentNonce, err)
+				}
+			}
+			totalTxs++
+
+			// Progress reporting every 5 seconds
+			now := time.Now()
+			if now.Sub(lastReportTime) >= 5*time.Second {
+				elapsed := now.Sub(startTime)
+				currentTPS := float64(successfulTxs) / elapsed.Seconds()
+				successRate := float64(successfulTxs) / float64(totalTxs) * 100
+
+				fmt.Printf("📊 Progress: %d/%d txs (%.1f%%), %.2f TPS\n",
+					successfulTxs, totalTxs, successRate, currentTPS)
+
+				lastReportTime = now
+			}
+
+		case <-ctx.Done():
+			goto testComplete
+		}
+	}
+
+testComplete:
+	endTime := time.Now()
+	actualDuration := endTime.Sub(startTime)
+
+	result := &TPSTestResult{
+		TestName:          fmt.Sprintf("Simple Sequential (Target: %d)", targetTPS),
+		Duration:          actualDuration,
+		TotalTransactions: totalTxs,
+		SuccessfulTxs:     successfulTxs,
+		FailedTxs:         totalTxs - successfulTxs,
+		AverageTPS:        float64(successfulTxs) / actualDuration.Seconds(),
+		ErrorRate:         float64(totalTxs-successfulTxs) / float64(totalTxs) * 100,
+		StartTime:         startTime,
+		EndTime:           endTime,
+	}
+
+	// Print results
+	fmt.Printf("\n📊 === SIMPLE SEQUENTIAL RESULTS ===\n")
+	fmt.Printf("Target TPS: %d\n", targetTPS)
+	fmt.Printf("Duration: %v\n", result.Duration.Truncate(time.Millisecond))
+	fmt.Printf("Total Transactions: %d\n", result.TotalTransactions)
+	fmt.Printf("Successful: %d (%.1f%%)\n", result.SuccessfulTxs,
+		float64(result.SuccessfulTxs)/float64(result.TotalTransactions)*100)
+	fmt.Printf("Achieved TPS: %.2f\n", result.AverageTPS)
+	fmt.Printf("Efficiency: %.1f%% of target\n", (result.AverageTPS/float64(targetTPS))*100)
+	fmt.Printf("===================================\n")
+
+	return result, nil
+}
+
+// Also update your main CreateTestTransaction method to fix the same issue:
 func (tps *TPSTransactionTester) CreateTestTransaction(from, to string, amount int64, gasPrice int64) (*core.Transaction, error) {
+	// ⚠️ PROBLEM: This calls GetNonce every time, causing conflicts
+	// For TPS testing, use CreateTestTransactionWithNonce instead
 	nonce, err := tps.node.blockchain.GetNonce(from)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce: %v", err)
 	}
 
-	timestamp := time.Now().UnixNano()
-	txID := fmt.Sprintf("tps_tx_%d_%d", timestamp, nonce)
+	return tps.CreateTestTransactionWithNonce(from, to, amount, gasPrice, nonce)
+}
 
-	tx := &core.Transaction{
-		Id:        txID,
-		From:      from,
-		To:        to,
-		Amount:    amount,
-		Gas:       21000,
-		GasPrice:  gasPrice,
-		Nonce:     nonce,
-		Type:      core.TransactionType_TRANSFER, // ⚠️  THIS WAS MISSING!
-		Data:      nil,                           // ⚠️  THIS WAS MISSING!
-		Timestamp: time.Now().Unix(),
-	}
-
-	tx.Hash = tps.calculateTransactionHashExact(tx)
-
-	signature, err := tps.signTransaction(tx)
+// Enhanced version that's better for TPS testing:
+func (tps *TPSTransactionTester) CreateTestTransactionBatch(from string, recipients []string, amount int64, gasPrice int64, batchSize int) ([]*core.Transaction, error) {
+	// Get starting nonce once
+	startingNonce, err := tps.node.blockchain.GetNonce(from)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign transaction: %v", err)
+		return nil, fmt.Errorf("failed to get starting nonce: %v", err)
 	}
-	tx.Signature = signature
 
-	return tx, nil
+	var transactions []*core.Transaction
+
+	for i := 0; i < batchSize; i++ {
+		recipient := recipients[i%len(recipients)]
+		nonce := startingNonce + uint64(i)
+
+		tx, err := tps.CreateTestTransactionWithNonce(from, recipient, amount, gasPrice, nonce)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create transaction %d: %v", i, err)
+		}
+
+		transactions = append(transactions, tx)
+	}
+
+	return transactions, nil
 }
 
 // Also ensure the hash calculation method is identical to the working version:
@@ -719,4 +1152,304 @@ func (tps *TPSTransactionTester) ClearTestResults() {
 	tps.mu.Lock()
 	defer tps.mu.Unlock()
 	tps.testResults = tps.testResults[:0]
+}
+
+// Add these methods to your TPSTransactionTester struct
+
+// Thread-safe nonce management
+func (tps *TPSTransactionTester) getNextNonce() (uint64, error) {
+	tps.nonceMu.Lock()
+	defer tps.nonceMu.Unlock()
+
+	// Initialize nonce on first use
+	if tps.currentNonce == 0 {
+		nonce, err := tps.node.blockchain.GetNonce(tps.address)
+		if err != nil {
+			return 0, fmt.Errorf("failed to initialize nonce: %v", err)
+		}
+		tps.currentNonce = nonce
+	}
+
+	nextNonce := tps.currentNonce
+	tps.currentNonce++ // Increment for next use
+	return nextNonce, nil
+}
+
+// Reset nonce tracking for TPSTransactionTester
+func (tps *TPSTransactionTester) resetNonceTracking() error {
+	tps.nonceMu.Lock()
+	defer tps.nonceMu.Unlock()
+
+	nonce, err := tps.node.blockchain.GetNonce(tps.address)
+	if err != nil {
+		return err
+	}
+	tps.currentNonce = nonce
+	return nil
+}
+
+// Updated Sequential TPS Test - Clean and Simple
+func (tps *TPSTransactionTester) RunSequentialTPSTest(targetTPS int, duration time.Duration) (*TPSTestResult, error) {
+	fmt.Printf("🚀 Starting Sequential TPS Test (Target: %d TPS)\n", targetTPS)
+
+	// Reset nonce tracking
+	if err := tps.resetNonceTracking(); err != nil {
+		return nil, fmt.Errorf("failed to reset nonce tracking: %v", err)
+	}
+
+	recipients, err := tps.generateRecipients(20)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate recipients: %v", err)
+	}
+
+	var totalTxs int64
+	var successfulTxs int64
+	var failedTxs int64
+
+	startTime := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), duration)
+	defer cancel()
+
+	// Create transactions at steady rate
+	interval := time.Second / time.Duration(targetTPS)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	fmt.Printf("🎯 Creating transactions every %v (target %d TPS)\n", interval, targetTPS)
+	fmt.Printf("⏱️  Test duration: %v\n", duration)
+
+	lastReportTime := startTime
+	reportInterval := 5 * time.Second
+
+	for {
+		select {
+		case <-ticker.C:
+			// Get next nonce
+			nonce, err := tps.getNextNonce()
+			if err != nil {
+				fmt.Printf("❌ Failed to get nonce: %v\n", err)
+				failedTxs++
+				totalTxs++
+				continue
+			}
+
+			// Create single transaction
+			recipient := recipients[totalTxs%int64(len(recipients))]
+			tx, err := tps.CreateTestTransactionWithNonce(tps.address, recipient, 15000000, 1000, nonce)
+			if err != nil {
+				fmt.Printf("❌ Failed to create transaction: %v\n", err)
+				failedTxs++
+				totalTxs++
+				continue
+			}
+
+			// Submit transaction
+			if err := tps.node.SubmitTransaction(tx); err == nil {
+				successfulTxs++
+			} else {
+				failedTxs++
+				// Log first few failures for debugging
+				if failedTxs <= 3 {
+					fmt.Printf("🔍 Transaction failed: %v\n", err)
+				}
+			}
+			totalTxs++
+
+			// Progress reporting every 5 seconds
+			now := time.Now()
+			if now.Sub(lastReportTime) >= reportInterval {
+				elapsed := now.Sub(startTime)
+				currentTPS := float64(successfulTxs) / elapsed.Seconds()
+				successRate := float64(successfulTxs) / float64(totalTxs) * 100
+
+				fmt.Printf("📊 Progress: %d successful txs, %.2f TPS, %.1f%% success rate\n",
+					successfulTxs, currentTPS, successRate)
+
+				// Show pool status
+				pendingTxs := tps.node.blockchain.GetPendingTransactions()
+				fmt.Printf("📋 Pool: %d pending transactions\n", len(pendingTxs))
+
+				lastReportTime = now
+			}
+
+		case <-ctx.Done():
+			goto testComplete
+		}
+	}
+
+testComplete:
+	endTime := time.Now()
+	actualDuration := endTime.Sub(startTime)
+
+	result := &TPSTestResult{
+		TestName:          fmt.Sprintf("Sequential TPS Test (Target: %d)", targetTPS),
+		Duration:          actualDuration,
+		TotalTransactions: totalTxs,
+		SuccessfulTxs:     successfulTxs,
+		FailedTxs:         failedTxs,
+		AverageTPS:        float64(successfulTxs) / actualDuration.Seconds(),
+		ErrorRate:         float64(failedTxs) / float64(totalTxs) * 100,
+		StartTime:         startTime,
+		EndTime:           endTime,
+	}
+
+	// Print detailed results
+	fmt.Printf("\n📊 === SEQUENTIAL TPS RESULTS ===\n")
+	fmt.Printf("Target TPS: %d\n", targetTPS)
+	fmt.Printf("Duration: %v\n", result.Duration.Truncate(time.Millisecond))
+	fmt.Printf("Total Transactions: %d\n", result.TotalTransactions)
+	fmt.Printf("Successful: %d (%.1f%%)\n", result.SuccessfulTxs,
+		float64(result.SuccessfulTxs)/float64(result.TotalTransactions)*100)
+	fmt.Printf("Failed: %d (%.1f%%)\n", result.FailedTxs, result.ErrorRate)
+	fmt.Printf("Achieved TPS: %.2f\n", result.AverageTPS)
+	fmt.Printf("Efficiency: %.1f%% of target\n", (result.AverageTPS/float64(targetTPS))*100)
+	fmt.Printf("===============================\n")
+
+	return result, nil
+}
+
+// Comprehensive TPS Testing Suite with Sequential Tests
+func (tps *TPSTransactionTester) RunComprehensiveSequentialTests() ([]*TPSTestResult, error) {
+	fmt.Printf("🚀 === COMPREHENSIVE SEQUENTIAL TPS TESTING ===\n")
+
+	var results []*TPSTestResult
+
+	// Test different TPS targets to find the sweet spot
+	testTargets := []int{0} // We'll manually set a custom rate
+	testDuration := 30 * time.Second
+
+	for i, targetTPS := range testTargets {
+		fmt.Printf("\n%d️⃣ Testing %d TPS target...\n", i+1, targetTPS)
+
+		result, err := tps.RunSequentialTPSTest(targetTPS, testDuration)
+		if err != nil {
+			fmt.Printf("❌ Test %d TPS failed: %v\n", targetTPS, err)
+			continue
+		}
+
+		results = append(results, result)
+
+		// Analyze result
+		efficiency := (result.AverageTPS / float64(targetTPS)) * 100
+		if efficiency > 95 {
+			fmt.Printf("✅ Excellent: %.1f%% efficiency\n", efficiency)
+		} else if efficiency > 80 {
+			fmt.Printf("🟡 Good: %.1f%% efficiency\n", efficiency)
+		} else {
+			fmt.Printf("🔴 Poor: %.1f%% efficiency - may have hit capacity\n", efficiency)
+		}
+
+		// Brief pause between tests
+		if i < len(testTargets)-1 {
+			fmt.Printf("⏳ Cooling down for 3 seconds...\n")
+			time.Sleep(3 * time.Second)
+		}
+	}
+
+	// Print comprehensive summary
+	tps.printSequentialTestSummary(results)
+
+	return results, nil
+}
+
+// Print summary of sequential tests
+func (tps *TPSTransactionTester) printSequentialTestSummary(results []*TPSTestResult) {
+	if len(results) == 0 {
+		return
+	}
+
+	fmt.Printf("\n🏆 === SEQUENTIAL TPS TESTING SUMMARY ===\n")
+	fmt.Printf("Completed %d tests\n", len(results))
+
+	var bestTPS float64
+	var bestEfficiency float64
+	var bestTarget int
+
+	fmt.Printf("\n📈 Results by Target TPS:\n")
+	for _, result := range results {
+		// Extract target from test name
+		var target int
+		fmt.Sscanf(result.TestName, "Sequential TPS Test (Target: %d)", &target)
+
+		efficiency := (result.AverageTPS / float64(target)) * 100
+
+		fmt.Printf("Target %3d TPS: Achieved %6.2f TPS (%.1f%% efficiency, %.1f%% success)\n",
+			target, result.AverageTPS, efficiency,
+			float64(result.SuccessfulTxs)/float64(result.TotalTransactions)*100)
+
+		if result.AverageTPS > bestTPS {
+			bestTPS = result.AverageTPS
+			bestTarget = target
+		}
+
+		if efficiency > bestEfficiency && efficiency <= 100 {
+			bestEfficiency = efficiency
+		}
+	}
+
+	fmt.Printf("\n🎯 Peak Performance:\n")
+	fmt.Printf("Highest TPS: %.2f (target %d TPS)\n", bestTPS, bestTarget)
+	fmt.Printf("Best Efficiency: %.1f%%\n", bestEfficiency)
+
+	// Determine sustainable TPS (where efficiency > 95%)
+	var sustainableTPS float64
+	for _, result := range results {
+		var target int
+		fmt.Sscanf(result.TestName, "Sequential TPS Test (Target: %d)", &target)
+		efficiency := (result.AverageTPS / float64(target)) * 100
+
+		if efficiency > 95 {
+			sustainableTPS = result.AverageTPS
+		}
+	}
+
+	if sustainableTPS > 0 {
+		fmt.Printf("Sustainable TPS: %.2f (>95%% efficiency)\n", sustainableTPS)
+	}
+
+	fmt.Printf("=====================================\n")
+}
+
+// Update your main.go test suite to use sequential testing:
+func runOptimizedSequentialTestSuite(tester *TPSTransactionTester) {
+	fmt.Printf("\n🧪 === OPTIMIZED SEQUENTIAL TPS TEST SUITE ===\n")
+
+	// Test 1: Find maximum sustainable TPS
+	fmt.Printf("\n1️⃣ Running comprehensive sequential tests...\n")
+	results, err := tester.RunComprehensiveSequentialTests()
+	if err != nil {
+		fmt.Printf("❌ Comprehensive tests failed: %v\n", err)
+		return
+	}
+
+	// Test 2: Extended test at optimal TPS
+	if len(results) > 0 {
+		// Find the best performing test
+		var bestResult *TPSTestResult
+		var bestEfficiency float64
+
+		for _, result := range results {
+			var target int
+			fmt.Sscanf(result.TestName, "Sequential TPS Test (Target: %d)", &target)
+			efficiency := (result.AverageTPS / float64(target)) * 100
+
+			if efficiency > bestEfficiency && efficiency <= 100 {
+				bestEfficiency = efficiency
+				bestResult = result
+			}
+		}
+
+		if bestResult != nil {
+			var optimalTarget int
+			fmt.Sscanf(bestResult.TestName, "Sequential TPS Test (Target: %d)", &optimalTarget)
+
+			fmt.Printf("\n2️⃣ Running extended test at optimal %d TPS...\n", optimalTarget)
+			extendedResult, err := tester.RunSequentialTPSTest(optimalTarget, 60*time.Second)
+			if err != nil {
+				fmt.Printf("❌ Extended test failed: %v\n", err)
+			} else {
+				fmt.Printf("🎉 Extended test: %.2f TPS sustained over 60 seconds\n", extendedResult.AverageTPS)
+			}
+		}
+	}
 }

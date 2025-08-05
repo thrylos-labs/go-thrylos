@@ -217,9 +217,12 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	var executable []*core.Transaction
+	fmt.Printf("🔍 Pool: GetExecutableTransactions called, max=%d, pending=%d\n", maxCount, len(p.pending))
 
-	// Process each address
+	var executable []*core.Transaction
+	processed := make(map[string]bool) // Track processed addresses
+
+	// First pass: Get transactions with perfect nonce sequence
 	for address, txs := range p.byAddress {
 		if len(executable) >= maxCount {
 			break
@@ -228,30 +231,112 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 		// Get current nonce for this address
 		currentNonce, err := accountManager.GetNonce(address)
 		if err != nil {
-			continue // Skip if we can't get the nonce
+			fmt.Printf("🔍 Pool: Skipping address %s, can't get nonce: %v\n", address[:10]+"...", err)
+			continue
 		}
 
-		// Find executable transactions for this address
+		account, err := accountManager.GetAccount(address)
+		if err != nil {
+			fmt.Printf("🔍 Pool: Skipping address %s, can't get account: %v\n", address[:10]+"...", err)
+			continue
+		}
+
+		consecutiveCount := 0
+		expectedNonce := currentNonce
+		remainingBalance := account.Balance
+
+		// Process transactions in nonce order
 		for _, tx := range txs {
 			if len(executable) >= maxCount {
 				break
 			}
 
-			// Transaction is executable if its nonce matches the account's current nonce
-			if tx.Nonce == currentNonce {
-				executable = append(executable, tx)
-				currentNonce++ // Next expected nonce
-			} else {
-				break // Gap in nonces, can't execute further transactions
+			// Check if transaction has expected nonce (consecutive)
+			if tx.Nonce == expectedNonce {
+				// Check if account has sufficient balance for this transaction
+				totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+				if remainingBalance >= totalCost {
+					executable = append(executable, tx)
+					expectedNonce++
+					consecutiveCount++
+					remainingBalance -= totalCost
+
+					fmt.Printf("🔍 Pool: Added tx from %s, nonce %d, remaining balance %d\n",
+						address[:10]+"...", tx.Nonce, remainingBalance)
+				} else {
+					fmt.Printf("🔍 Pool: Insufficient balance for tx from %s, nonce %d (need %d, have %d)\n",
+						address[:10]+"...", tx.Nonce, totalCost, remainingBalance)
+					break // Insufficient balance, skip remaining
+				}
+			} else if tx.Nonce > expectedNonce {
+				fmt.Printf("🔍 Pool: Nonce gap for address %s, expected %d, got %d\n",
+					address[:10]+"...", expectedNonce, tx.Nonce)
+				break // Gap in nonces, can't execute remaining
+			}
+			// Skip transactions with nonce < expectedNonce (already executed)
+		}
+
+		processed[address] = true
+		fmt.Printf("🔍 Pool: Processed address %s, added %d consecutive transactions\n",
+			address[:10]+"...", consecutiveCount)
+	}
+
+	// Second pass: If we still need more transactions, be more lenient
+	if len(executable) < maxCount && len(executable) < len(p.pending)/2 {
+		fmt.Printf("🔍 Pool: Second pass - looking for more transactions (%d/%d found)\n",
+			len(executable), maxCount)
+
+		// Get all remaining transactions and sort by gas price
+		var remaining []*core.Transaction
+		for _, tx := range p.pending {
+			// Skip if already included
+			isIncluded := false
+			for _, execTx := range executable {
+				if execTx.Id == tx.Id {
+					isIncluded = true
+					break
+				}
+			}
+			if !isIncluded {
+				remaining = append(remaining, tx)
+			}
+		}
+
+		// Sort by gas price (highest first)
+		sort.Slice(remaining, func(i, j int) bool {
+			return remaining[i].GasPrice > remaining[j].GasPrice
+		})
+
+		// Add high gas price transactions even if nonce isn't perfect
+		for _, tx := range remaining {
+			if len(executable) >= maxCount {
+				break
+			}
+
+			// Basic validation - ensure transaction can be executed
+			account, err := accountManager.GetAccount(tx.From)
+			if err != nil {
+				continue
+			}
+
+			currentNonce, err := accountManager.GetNonce(tx.From)
+			if err != nil {
+				continue
+			}
+
+			// Allow transactions that are close to the expected nonce (within 5)
+			if tx.Nonce >= currentNonce && tx.Nonce <= currentNonce+5 {
+				totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+				if account.Balance >= totalCost {
+					executable = append(executable, tx)
+					fmt.Printf("🔍 Pool: Second pass added tx from %s, nonce %d (current %d)\n",
+						tx.From[:10]+"...", tx.Nonce, currentNonce)
+				}
 			}
 		}
 	}
 
-	// Sort by gas price (descending) for prioritization
-	sort.Slice(executable, func(i, j int) bool {
-		return executable[i].GasPrice > executable[j].GasPrice
-	})
-
+	fmt.Printf("🔍 Pool: Returning %d executable transactions\n", len(executable))
 	return executable
 }
 
