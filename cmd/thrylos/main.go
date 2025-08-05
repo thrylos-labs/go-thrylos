@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -63,7 +64,7 @@ func getConsistentNodePrivateKeyFromBytes() (crypto.PrivateKey, error) {
 }
 
 func main() {
-	fmt.Println("🚀 Starting Thrylos ...")
+	fmt.Println("🚀 Starting Thrylos TPS Testing Node...")
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -116,10 +117,7 @@ func main() {
 		// P2P Configuration
 		EnableP2P:      true,
 		P2PListenPort:  9000,
-		BootstrapPeers: []string{
-			// Add bootstrap peer addresses here if you have them
-			// Example: "/ip4/127.0.0.1/tcp/9001/p2p/12D3KooW..."
-		},
+		BootstrapPeers: []string{},
 
 		GenesisValidators: []*core.Validator{
 			{
@@ -152,63 +150,70 @@ func main() {
 
 	fmt.Printf("✅ Node started successfully!\n")
 
-	// Add P2P-specific event handlers
+	// Initialize TPS transaction tester (MOVED UP)
+	tpsTester := node.NewTPSTransactionTester(thrylosNode, nodePrivateKey, nodeAddress)
+
+	// NOW we can test transaction creation (MOVED AFTER tpsTester initialization)
+	fmt.Println("🧪 Testing transaction creation fix...")
+	tpsTester.DebugTransactionCreation()
+
+	// Add event handlers for TPS testing
 	thrylosNode.AddEventHandler("block_produced", func(data interface{}) {
 		if block, ok := data.(*core.Block); ok {
-			fmt.Printf("📦 Block produced and broadcasted: #%d with %d transactions\n",
-				block.Header.Index, len(block.Transactions))
+			if len(block.Transactions) > 0 {
+				fmt.Printf("📦 Block #%d: %d transactions, gas: %d\n",
+					block.Header.Index, len(block.Transactions), block.Header.GasUsed)
+			}
 		}
 	})
 
 	thrylosNode.AddEventHandler("transaction_submitted", func(data interface{}) {
+		// Only log every 10th transaction to avoid spam
 		if tx, ok := data.(*core.Transaction); ok {
-			fmt.Printf("💰 Transaction submitted and broadcasted: %s -> %s (amount: %d)\n",
-				tx.From, tx.To, tx.Amount)
+			// Extract nonce from transaction to mod by 10
+			if tx.Nonce%10 == 0 {
+				fmt.Printf("💰 TX #%d: %s -> %s (%.3f THRYLOS)\n",
+					tx.Nonce, tx.From[:8]+"...", tx.To[:8]+"...", float64(tx.Amount)/1000000000)
+			}
 		}
 	})
 
-	thrylosNode.AddEventHandler("validator_registered", func(data interface{}) {
-		if validator, ok := data.(*core.Validator); ok {
-			fmt.Printf("👑 Validator registered: %s (stake: %d)\n",
-				validator.Address, validator.Stake)
-		}
-	})
-
-	// Print initial status with P2P info
+	// Print initial status
 	printNodeStatus(thrylosNode)
 
-	// Initialize transaction tester for development/testing
-	transactionTester := node.NewTransactionTester(thrylosNode, nodePrivateKey, nodeAddress)
+	// Check if we should run TPS tests
+	if shouldRunTPSTests() {
+		// Start TPS testing after a brief delay
+		go func() {
+			time.Sleep(10 * time.Second) // Allow node to stabilize
 
-	// Create test transaction after delay (for development/testing only)
-	go func() {
-		time.Sleep(5 * time.Second)
+			// Check balance before testing
+			balance, err := tpsTester.GetBalance(nodeAddress)
+			if err != nil {
+				fmt.Printf("❌ Failed to get balance for TPS testing: %v\n", err)
+				return
+			}
 
-		// Check if we want to run test transactions (can be controlled by env var or config)
-		if shouldRunTestTransactions() {
-			createTestTransaction(transactionTester, nodeAddress)
+			fmt.Printf("💰 Balance available for TPS testing: %d tokens (%.3f THRYLOS)\n",
+				balance, float64(balance)/1000000000)
 
-			// Try more advanced testing
-			time.Sleep(10 * time.Second)
-			runBatchTransactionTest(transactionTester, nodeAddress)
-		}
+			if balance < 1000000000 { // Less than 1 THRYLOS
+				fmt.Printf("⚠️  Insufficient balance for meaningful TPS testing\n")
+				return
+			}
 
-		// Try to sync with peers after 30 seconds
-		time.Sleep(15 * time.Second)
-		fmt.Println("🔄 Attempting to sync with P2P peers...")
-		if err := thrylosNode.SyncWithPeers(); err != nil {
-			fmt.Printf("⚠️  P2P sync failed: %v\n", err)
-		} else {
-			fmt.Println("✅ P2P sync completed successfully")
-		}
-	}()
+			// Run TPS tests based on environment variables or defaults
+			runTPSTestSuite(tpsTester)
+		}()
+	}
 
 	// Graceful shutdown
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
-	fmt.Println("🎉 Go Thrylos node running! Press Ctrl+C to stop.")
+	fmt.Println("🎉 Go Thrylos TPS Testing Node running! Press Ctrl+C to stop.")
 	fmt.Println("📊 Node status will be printed every 30 seconds...")
+	fmt.Println("🧪 TPS testing will begin in 10 seconds...")
 
 	// Status reporting ticker
 	statusTicker := time.NewTicker(30 * time.Second)
@@ -217,7 +222,27 @@ func main() {
 	for {
 		select {
 		case <-c:
-			fmt.Println("\n🛑 Shutting down Thrylos ...")
+			fmt.Println("\n🛑 Shutting down Thrylos TPS Testing Node...")
+
+			// Print final TPS test results
+			results := tpsTester.GetTestResults()
+			if len(results) > 0 {
+				fmt.Printf("\n📊 FINAL TPS TEST SUMMARY\n")
+				fmt.Printf("Total tests completed: %d\n", len(results))
+
+				var totalTxs int64
+				var bestTPS float64
+
+				for _, result := range results {
+					totalTxs += result.TotalTransactions
+					if result.AverageTPS > bestTPS {
+						bestTPS = result.AverageTPS
+					}
+				}
+
+				fmt.Printf("Total transactions processed: %d\n", totalTxs)
+				fmt.Printf("Best TPS achieved: %.2f\n", bestTPS)
+			}
 
 			// Stop the node gracefully
 			if err := thrylosNode.Stop(); err != nil {
@@ -233,16 +258,160 @@ func main() {
 	}
 }
 
-// shouldRunTestTransactions checks if test transactions should be created
-// In production, this would return false. For development, it can be controlled by env vars.
-func shouldRunTestTransactions() bool {
+// shouldRunTPSTests checks if TPS tests should be run
+func shouldRunTPSTests() bool {
 	// Check environment variable
-	if os.Getenv("THRYLOS_ENABLE_TEST_TXS") == "true" {
-		return true
+	if os.Getenv("THRYLOS_ENABLE_TPS_TESTS") == "false" {
+		return false
 	}
 
-	// For development, default to true. In production builds, this should be false.
-	return true // Change to false for production
+	// Default to true for TPS testing build
+	return true
+}
+
+// runTPSTestSuite runs a comprehensive suite of TPS tests
+func runTPSTestSuite(tester *node.TPSTransactionTester) {
+	fmt.Printf("\n🧪 === STARTING TPS TEST SUITE ===\n")
+
+	// Test 1: Quick validation test
+	fmt.Printf("\n1️⃣ Running quick validation test...\n")
+	quickConfig := node.DefaultTPSTestConfig()
+	quickConfig.TestName = "Quick Validation"
+	quickConfig.Duration = 30 * time.Second
+	quickConfig.TargetTPS = 5
+	quickConfig.WarmupDuration = 5 * time.Second
+	quickConfig.TransactionAmount = 15000000 // 0.015 THRYLOS - above minimum
+
+	result, err := tester.RunTPSTest(quickConfig)
+	if err != nil {
+		fmt.Printf("❌ Quick test failed: %v\n", err)
+		return
+	}
+
+	if result.SuccessfulTxs < 10 { // Lower threshold since we fixed the issue
+		fmt.Printf("⚠️  Low transaction success rate, stopping tests\n")
+		return
+	}
+
+	// Test 2: Standard TPS test
+	fmt.Printf("\n2️⃣ Running standard TPS test...\n")
+	standardConfig := node.DefaultTPSTestConfig()
+	standardConfig.TestName = "Standard TPS Test"
+	standardConfig.Duration = 60 * time.Second
+	standardConfig.TargetTPS = getTargetTPS("THRYLOS_TARGET_TPS", 10)
+	standardConfig.WarmupDuration = 10 * time.Second
+	standardConfig.TransactionAmount = 15000000 // Valid amount
+
+	_, err = tester.RunTPSTest(standardConfig)
+	if err != nil {
+		fmt.Printf("❌ Standard test failed: %v\n", err)
+	}
+
+	// Test 3: Stress test (optional)
+	if os.Getenv("THRYLOS_RUN_STRESS_TEST") == "true" {
+		fmt.Printf("\n3️⃣ Running stress test...\n")
+		maxTPS := getTargetTPS("THRYLOS_MAX_TPS", 50)
+		stepSize := getTargetTPS("THRYLOS_STEP_SIZE", 5)
+		stepDuration := getDuration("THRYLOS_STEP_DURATION", 30*time.Second)
+
+		_, err = tester.RunStressTest(maxTPS, stepSize, stepDuration)
+		if err != nil {
+			fmt.Printf("❌ Stress test failed: %v\n", err)
+		}
+	}
+
+	// Test 4: Sustained load test (optional)
+	if os.Getenv("THRYLOS_RUN_SUSTAINED_TEST") == "true" {
+		fmt.Printf("\n4️⃣ Running sustained load test...\n")
+		sustainedTPS := getTargetTPS("THRYLOS_SUSTAINED_TPS", 15)
+		sustainedDuration := getDuration("THRYLOS_SUSTAINED_DURATION", 300*time.Second)
+
+		_, err = tester.RunSustainedLoadTest(sustainedTPS, sustainedDuration)
+		if err != nil {
+			fmt.Printf("❌ Sustained test failed: %v\n", err)
+		}
+	}
+
+	fmt.Printf("\n✅ TPS TEST SUITE COMPLETED\n")
+
+	// Print summary of all tests
+	results := tester.GetTestResults()
+	printTestSuiteSummary(results)
+}
+
+// Helper functions for environment variable parsing
+func getTargetTPS(envVar string, defaultValue int) int {
+	if val := os.Getenv(envVar); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+func getDuration(envVar string, defaultValue time.Duration) time.Duration {
+	if val := os.Getenv(envVar); val != "" {
+		if parsed, err := time.ParseDuration(val); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+func printTestSuiteSummary(results []node.TPSTestResult) {
+	if len(results) == 0 {
+		return
+	}
+
+	fmt.Printf("\n📊 === TPS TEST SUITE SUMMARY ===\n")
+	fmt.Printf("Tests completed: %d\n", len(results))
+
+	var totalTxs int64
+	var totalSuccessful int64
+	var bestTPS float64
+	var bestLatency time.Duration = time.Hour // Start with high value
+	var totalDuration time.Duration
+
+	for i, result := range results {
+		fmt.Printf("\n%d. %s:\n", i+1, result.TestName)
+		fmt.Printf("   TPS: %.2f (Peak: %.2f)\n", result.AverageTPS, result.PeakTPS)
+		fmt.Printf("   Success: %d/%d (%.1f%%)\n",
+			result.SuccessfulTxs, result.TotalTransactions,
+			float64(result.SuccessfulTxs)/float64(result.TotalTransactions)*100)
+		fmt.Printf("   Latency: %v (Max: %v)\n",
+			result.AverageLatency.Truncate(time.Millisecond),
+			result.MaxLatency.Truncate(time.Millisecond))
+
+		totalTxs += result.TotalTransactions
+		totalSuccessful += result.SuccessfulTxs
+		totalDuration += result.Duration
+
+		if result.AverageTPS > bestTPS {
+			bestTPS = result.AverageTPS
+		}
+
+		if result.AverageLatency < bestLatency {
+			bestLatency = result.AverageLatency
+		}
+	}
+
+	fmt.Printf("\n🏆 OVERALL PERFORMANCE:\n")
+	fmt.Printf("Total Transactions: %d\n", totalTxs)
+	fmt.Printf("Overall Success Rate: %.2f%%\n", float64(totalSuccessful)/float64(totalTxs)*100)
+	fmt.Printf("Best TPS Achieved: %.2f\n", bestTPS)
+	fmt.Printf("Best Average Latency: %v\n", bestLatency.Truncate(time.Millisecond))
+	fmt.Printf("Total Testing Time: %v\n", totalDuration.Truncate(time.Second))
+
+	// Performance rating
+	rating := "🥉 Bronze"
+	if bestTPS >= 50 {
+		rating = "🥇 Gold"
+	} else if bestTPS >= 25 {
+		rating = "🥈 Silver"
+	}
+
+	fmt.Printf("Performance Rating: %s\n", rating)
+	fmt.Printf("===============================\n")
 }
 
 // printNodeStatus displays comprehensive node status including P2P information
@@ -288,150 +457,4 @@ func printNodeStatus(n *node.Node) {
 	}
 
 	fmt.Println("===================\n")
-}
-
-// Replace the createTestTransaction function in your main.go with this:
-
-func createTestTransaction(tester *node.TransactionTester, nodeAddress string) {
-	fmt.Println("🧪 Creating test transaction...")
-
-	// Check node balance first using the helper method
-	balance, err := tester.GetBalance(nodeAddress)
-	if err != nil {
-		fmt.Printf("❌ Failed to get node balance: %v\n", err)
-		return
-	}
-
-	fmt.Printf("💰 Node balance: %d tokens\n", balance)
-
-	if balance == 0 {
-		fmt.Println("⚠️  Node has zero balance. This is expected for fresh nodes.")
-		fmt.Println("💡 In production, nodes get balance from:")
-		fmt.Println("   - Genesis allocation")
-		fmt.Println("   - Block rewards from validation")
-		fmt.Println("   - Token transfers from other accounts")
-		fmt.Println()
-		fmt.Println("✅ HASH VALIDATION IS NOW WORKING! 🎉")
-		fmt.Println("   The error changed from 'hash mismatch' to 'insufficient balance'")
-		fmt.Println("   This means the transaction hash calculation is correct!")
-		return
-	}
-
-	// Create recipient address
-	recipientKey, err := crypto.NewPrivateKey()
-	if err != nil {
-		log.Printf("Failed to generate recipient key: %v", err)
-		return
-	}
-
-	recipientAddress, err := account.GenerateAddress(recipientKey.PublicKey())
-	if err != nil {
-		log.Printf("Failed to generate recipient address: %v", err)
-		return
-	}
-
-	// Calculate reasonable amounts based on balance
-	gasAmount := int64(21000 * 1000) // 21M for gas
-	maxTransfer := balance - gasAmount
-
-	if maxTransfer <= 0 {
-		fmt.Printf("⚠️  Insufficient balance for transaction (need at least %d for gas)\n", gasAmount)
-		return
-	}
-
-	// Use 10% of available balance for transfer
-	transferAmount := maxTransfer / 10
-	if transferAmount < 10000000 { // Minimum 10M
-		transferAmount = 10000000
-	}
-
-	// Create and submit transaction using corrected method
-	tx, err := tester.SubmitTestTransaction(
-		nodeAddress,      // from
-		recipientAddress, // to
-		transferAmount,   // amount
-		1000,             // gas price
-	)
-	if err != nil {
-		log.Printf("Failed to create/submit test transaction: %v", err)
-		return
-	}
-
-	fmt.Printf("✅ Test transaction created and submitted successfully!\n")
-	fmt.Printf("   Transaction ID: %s\n", tx.Id)
-	fmt.Printf("   Hash: %s\n", tx.Hash)
-	fmt.Printf("   Amount: %d tokens\n", tx.Amount)
-	fmt.Printf("   From: %s\n", tx.From)
-	fmt.Printf("   To: %s\n", tx.To)
-}
-
-// runBatchTransactionTest demonstrates batch transaction creation for load testing
-func runBatchTransactionTest(tester *node.TransactionTester, nodeAddress string) {
-	fmt.Println("🔄 Running batch transaction test...")
-
-	// Create multiple recipient addresses
-	var recipientAddresses []string
-	for i := 0; i < 3; i++ {
-		key, err := crypto.NewPrivateKey()
-		if err != nil {
-			log.Printf("Failed to generate key %d: %v", i, err)
-			continue
-		}
-
-		addr, err := account.GenerateAddress(key.PublicKey())
-		if err != nil {
-			log.Printf("Failed to generate address %d: %v", i, err)
-			continue
-		}
-
-		recipientAddresses = append(recipientAddresses, addr)
-	}
-
-	if len(recipientAddresses) == 0 {
-		log.Printf("No recipient addresses created for batch test")
-		return
-	}
-
-	// Create batch of test transactions
-	transactions, err := tester.BatchCreateTestTransactions(
-		nodeAddress,
-		recipientAddresses[0], // send to first recipient
-		3,                     // create 3 transactions
-		15000000,              // Changed from 1000000 to 15000000
-		1000,                  // gas price
-	)
-	if err != nil {
-		log.Printf("Failed to create batch transactions: %v", err)
-		return
-	}
-
-	fmt.Printf("✅ Created %d test transactions in batch\n", len(transactions))
-
-	// Submit them one by one with small delays
-	for i, tx := range transactions {
-		submittedTx, err := tester.SubmitTestTransaction(tx.From, tx.To, tx.Amount, tx.GasPrice)
-		if err != nil {
-			log.Printf("Failed to submit batch transaction %d: %v", i, err)
-		} else {
-			fmt.Printf("📤 Submitted batch transaction %d: %s\n", i+1, submittedTx.Id)
-		}
-		time.Sleep(500 * time.Millisecond) // Small delay between submissions
-	}
-
-	fmt.Println("✅ Batch transaction test completed")
-}
-
-// Additional helper function for development
-func printP2PDebugInfo(n *node.Node) {
-	stats := n.GetP2PStats()
-	fmt.Println("\n🔍 === P2P DEBUG INFO ===")
-
-	for key, value := range stats {
-		fmt.Printf("%s: %v\n", key, value)
-	}
-
-	fmt.Printf("Peer ID: %s\n", n.GetPeerID())
-	fmt.Printf("Connected Peers: %d\n", n.GetConnectedPeers())
-	fmt.Printf("Is Connected: %v\n", n.IsP2PConnected())
-	fmt.Println("========================\n")
 }

@@ -69,8 +69,6 @@ type WorldState struct {
 
 // InitializeFromConfig initializes the world state with config-driven genesis data
 func (ws *WorldState) InitializeFromConfig() error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
 
 	fmt.Printf("🔍 InitializeFromConfig: Setting up genesis state from config...\n")
 

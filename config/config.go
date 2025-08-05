@@ -213,37 +213,13 @@ func Load() (*Config, error) {
 		Genesis: GenesisAllocation{
 			TotalGenesis: GenesisSupply,
 			Accounts: []GenesisAccount{
-				// Node developer/validator account - 1M THRYLOS (for testing and validation)
+				// Node developer/validator account - ALL 15M THRYLOS for testing
 				{
-					Address:      "tl10p47her0k6utqktpeu0", // Your current node address (will be dynamic)
-					Balance:      1000000 * BaseUnit,       // 1M THRYLOS for testing
-					Purpose:      "Development node and initial validator",
+					Address:      "tl19k43hwvcdx0zvz454w6", // Your consistent node address
+					Balance:      15000000 * BaseUnit,      // 15M THRYLOS (full genesis supply for testing)
+					Purpose:      "Development node with full genesis supply for testing",
 					Locked:       false,
 					UnlockBlocks: 0,
-				},
-				// Public distribution - 9M THRYLOS (immediate circulation)
-				{
-					Address:      "tl1qqqqqqqqqqqqqqqqs52yt6", // Proper null-like address with correct checksum
-					Balance:      9000000 * BaseUnit,          // 9M THRYLOS (reduced by 1M)
-					Purpose:      "Public launch and early adopters",
-					Locked:       false,
-					UnlockBlocks: 0,
-				},
-				// Ecosystem bootstrap - 3M THRYLOS (gradual unlock)
-				{
-					Address:      "tl1qqqqqqqqqqqqqqqqczk2t8", // Another valid address pattern
-					Balance:      3000000 * BaseUnit,          // 3M THRYLOS
-					Purpose:      "Initial ecosystem partnerships and integrations",
-					Locked:       true,
-					UnlockBlocks: 525600, // ~1 year of blocks (3 sec blocks)
-				},
-				// Community incentives - 2M THRYLOS (locked for fairness)
-				{
-					Address:      "tl1qqqqqqqqqqqqqqqq6s2yhq", // Third valid address pattern
-					Balance:      2000000 * BaseUnit,          // 2M THRYLOS
-					Purpose:      "Community rewards and airdrops",
-					Locked:       true,
-					UnlockBlocks: 262800, // ~6 months of blocks
 				},
 			},
 		},
