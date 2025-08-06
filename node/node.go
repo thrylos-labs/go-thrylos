@@ -871,22 +871,6 @@ func (n *Node) registerAsValidator() error {
 	return n.RegisterValidator(n.config.Staking.MinValidatorStake, 0.1)
 }
 
-// Fix 2: Add the missing SuperOptimizedTPSTestConfig to your tps_testing.go
-func SuperOptimizedTPSTestConfig() TPSTestConfig {
-	return TPSTestConfig{
-		Duration:           45 * time.Second, // Shorter duration for focused testing
-		TargetTPS:          50,               // Much higher TPS target
-		MaxConcurrency:     1000,             // Much higher concurrency
-		TransactionAmount:  15000000,         // 0.015 THRYLOS (above minimum)
-		GasPrice:           1000,
-		WarmupDuration:     3 * time.Second, // Short warmup
-		ReportInterval:     2 * time.Second, // Frequent reporting
-		TestName:           "Super Optimized Batching Test",
-		GenerateRecipients: true,
-		NumRecipients:      100, // Many recipients to avoid nonce conflicts
-	}
-}
-
 func (n *Node) isValidator() bool {
 	validator, err := n.blockchain.GetValidator(n.nodeAddress)
 	if err != nil {
