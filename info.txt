@@ -5,6 +5,7 @@ TO DO
 Consensus.proto - Use for the consensus
 Make sure the database is used correctly 
 
+.THR - Wallet usernames
 Multi-node Testing - Start multiple nodes with different ports
 Wallet Integration - External wallets can submit transactions
 Remove internal testing - Use an external wallet instead to test transactions
