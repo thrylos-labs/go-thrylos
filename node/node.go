@@ -75,7 +75,9 @@ type Node struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 
-	syncManager *thrylosSync.SyncManager // Use the alias
+	syncManager *thrylosSync.SyncManager
+
+	genesisValidators []*core.Validator
 }
 
 // NodeConfig represents comprehensive node configuration
@@ -210,6 +212,7 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		eventHandlers:     make(map[string][]func(interface{})),
 		ctx:               ctx,
 		cancelFunc:        cancelFunc,
+		genesisValidators: nodeConfig.GenesisValidators,
 	}
 
 	if nodeConfig.EnableAPI {
@@ -828,33 +831,54 @@ func (n *Node) storeGenesisConfig(config *NodeConfig) {
 }
 
 func (n *Node) initializeGenesis() error {
-	if n.blockchain.GetHeight() >= 0 {
-		return nil // Genesis already initialized
+	// Check if validators already exist instead of just checking height
+	existingValidators := n.blockchain.GetActiveValidators()
+	if len(existingValidators) >= len(n.genesisValidators) && len(n.genesisValidators) > 0 {
+		fmt.Printf("🏛️  Genesis validators already initialized (%d active validators)\n", len(existingValidators))
+		return nil
 	}
 
-	genesisValidators := []*core.Validator{}
-	if n.isValidatorNode {
-		genesisValidators = append(genesisValidators, &core.Validator{
-			Address:        n.nodeAddress,
-			Pubkey:         n.nodePrivateKey.PublicKey().Bytes(),
-			Stake:          n.config.Staking.MinValidatorStake,
-			SelfStake:      n.config.Staking.MinValidatorStake,
-			DelegatedStake: 0,
-			Commission:     0.1,
-			Active:         true,
-			Delegators:     make(map[string]int64),
-			CreatedAt:      time.Now().Unix(),
-			UpdatedAt:      time.Now().Unix(),
-		})
+	// Use ALL genesis validators from config, not just this node's validator
+	genesisValidators := n.genesisValidators
+
+	// If no genesis validators provided, create one for this node (backward compatibility)
+	if len(genesisValidators) == 0 && n.isValidatorNode {
+		genesisValidators = []*core.Validator{
+			{
+				Address:        n.nodeAddress,
+				Pubkey:         n.nodePrivateKey.PublicKey().Bytes(),
+				Stake:          n.config.Staking.MinValidatorStake,
+				SelfStake:      n.config.Staking.MinValidatorStake,
+				DelegatedStake: 0,
+				Commission:     0.1,
+				Active:         true,
+				Delegators:     make(map[string]int64),
+				CreatedAt:      time.Now().Unix(),
+				UpdatedAt:      time.Now().Unix(),
+			},
+		}
 	}
 
-	return n.blockchain.InitializeGenesis(
-		n.nodeAddress,
-		n.nodeAddress,
-		n.config.Economics.GenesisSupply,
-		genesisValidators,
-		n.nodePrivateKey,
-	)
+	fmt.Printf("🏛️  Initializing genesis with %d validators\n", len(genesisValidators))
+
+	// Print all validator addresses being initialized
+	for i, validator := range genesisValidators {
+		fmt.Printf("   Validator %d: %s\n", i+1, validator.Address)
+	}
+
+	// Instead of calling blockchain.InitializeGenesis (which might be skipped),
+	// directly add all validators to the blockchain
+	for _, validator := range genesisValidators {
+		if err := n.blockchain.AddValidator(validator); err != nil {
+			fmt.Printf("⚠️  Failed to add genesis validator %s: %v\n", validator.Address, err)
+			// Don't return error - continue with other validators
+		} else {
+			fmt.Printf("✅ Added genesis validator: %s\n", validator.Address)
+		}
+	}
+
+	fmt.Printf("🏛️  Genesis initialization completed with %d validators\n", len(genesisValidators))
+	return nil
 }
 
 // Fix 1: Update registerAsValidator in node.go to handle existing validators

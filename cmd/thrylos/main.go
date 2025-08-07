@@ -1,13 +1,15 @@
-// File: cmd/thrylos/main.go
+// File: cmd/thrylos/main.go - Fixed version with shared genesis
 package main
 
 import (
 	"bytes"
 	"crypto/sha256"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,10 +21,10 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
-// getConsistentNodePrivateKey generates a deterministic private key for development
-func getConsistentNodePrivateKey() (crypto.PrivateKey, error) {
-	// Use a fixed seed for development (ensures same address every time)
-	seed := "thrylos-development-node-key-for-testing-2024"
+// getNodeSpecificPrivateKey generates a deterministic private key for each node
+func getNodeSpecificPrivateKey(nodeID int) (crypto.PrivateKey, error) {
+	// Different seed for each node
+	seed := fmt.Sprintf("thrylos-development-node-key-%d-2024", nodeID)
 
 	// Hash the seed to get proper random bytes
 	hash := sha256.Sum256([]byte(seed))
@@ -41,10 +43,11 @@ func getConsistentNodePrivateKey() (crypto.PrivateKey, error) {
 }
 
 // Alternative approach using raw bytes if the above doesn't work:
-func getConsistentNodePrivateKeyFromBytes() (crypto.PrivateKey, error) {
-	// Create a fixed 32-byte seed
+func getNodeSpecificPrivateKeyFromBytes(nodeID int) (crypto.PrivateKey, error) {
+	// Create a node-specific 32-byte seed
+	seedStr := fmt.Sprintf("thrylos-dev-node-key-%d", nodeID)
 	seed := make([]byte, 32)
-	copy(seed, []byte("thrylos-dev-node-consistent-key"))
+	copy(seed, []byte(seedStr))
 
 	// Hash it to ensure proper distribution
 	hash := sha256.Sum256(seed)
@@ -63,8 +66,71 @@ func getConsistentNodePrivateKeyFromBytes() (crypto.PrivateKey, error) {
 	return crypto.NewPrivateKeyFromBytes(keyBytes)
 }
 
+// createAllValidators generates all validator info for shared genesis
+func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.PrivateKey, []string, error) {
+	validators := make([]*core.Validator, 0)
+	privateKeys := make([]crypto.PrivateKey, 0)
+	addresses := make([]string, 0)
+
+	// Create validators for nodes 1, 2, and 3
+	for nodeID := 1; nodeID <= 3; nodeID++ {
+		// Generate private key for this node
+		privateKey, err := getNodeSpecificPrivateKey(nodeID)
+		if err != nil {
+			privateKey, err = getNodeSpecificPrivateKeyFromBytes(nodeID)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("failed to generate key for node %d: %v", nodeID, err)
+			}
+		}
+
+		// Generate address
+		address, err := account.GenerateAddress(privateKey.PublicKey())
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to generate address for node %d: %v", nodeID, err)
+		}
+
+		// Create validator
+		validator := &core.Validator{
+			Address:        address,
+			Pubkey:         privateKey.PublicKey().Bytes(),
+			Stake:          cfg.Staking.MinValidatorStake,
+			SelfStake:      cfg.Staking.MinValidatorStake,
+			DelegatedStake: 0,
+			Commission:     0.1,
+			Active:         true,
+			Delegators:     make(map[string]int64),
+			CreatedAt:      time.Now().Unix(),
+			UpdatedAt:      time.Now().Unix(),
+		}
+
+		validators = append(validators, validator)
+		privateKeys = append(privateKeys, privateKey)
+		addresses = append(addresses, address)
+	}
+
+	return validators, privateKeys, addresses, nil
+}
+
 func main() {
-	fmt.Println("🚀 Starting Thrylos Node...")
+	// Command line arguments
+	var nodeID = flag.Int("node", 1, "Node ID (1, 2, 3)")
+	var port = flag.Int("port", 9000, "P2P listen port")
+	var bootstraps = flag.String("bootstrap", "", "Comma-separated bootstrap peers")
+	var dataDir = flag.String("data", "", "Data directory (default: ./data-nodeN)")
+	var validator = flag.Bool("validator", true, "Run as validator")
+	flag.Parse()
+
+	// Validate node ID
+	if *nodeID < 1 || *nodeID > 3 {
+		log.Fatalf("Node ID must be 1, 2, or 3")
+	}
+
+	// Set default data directory if not provided
+	if *dataDir == "" {
+		*dataDir = fmt.Sprintf("./data-node%d", *nodeID)
+	}
+
+	fmt.Printf("🚀 Starting Thrylos Node %d on port %d...\n", *nodeID, *port)
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -74,7 +140,7 @@ func main() {
 
 	// Test protobuf generation
 	testAccount := &core.Account{
-		Address:      "tl1example123",
+		Address:      fmt.Sprintf("tl1example%d", *nodeID),
 		Balance:      1000000000, // 1 THRYLOS
 		Nonce:        0,
 		StakedAmount: 0,
@@ -84,55 +150,47 @@ func main() {
 
 	fmt.Printf("✅ Protobuf working! Test account: %+v\n", testAccount)
 
-	// Generate consistent node private key for development
-	nodePrivateKey, err := getConsistentNodePrivateKey()
+	// Create ALL validators for shared genesis state
+	allValidators, allPrivateKeys, allAddresses, err := createAllValidators(cfg)
 	if err != nil {
-		// Fallback to bytes approach if the first method fails
-		nodePrivateKey, err = getConsistentNodePrivateKeyFromBytes()
-		if err != nil {
-			log.Fatalf("Failed to generate consistent node private key: %v", err)
-		}
+		log.Fatalf("Failed to create validators: %v", err)
 	}
 
-	// Generate node address
-	nodeAddress, err := account.GenerateAddress(nodePrivateKey.PublicKey())
-	if err != nil {
-		log.Fatalf("Failed to generate node address: %v", err)
+	// Get this node's specific private key and address
+	nodePrivateKey := allPrivateKeys[*nodeID-1] // Arrays are 0-indexed
+	nodeAddress := allAddresses[*nodeID-1]
+
+	fmt.Printf("🔑 Node %d address: %s\n", *nodeID, nodeAddress)
+	fmt.Printf("👥 All validator addresses: %v\n", allAddresses)
+
+	// Parse bootstrap peers
+	var bootstrapPeers []string
+	if *bootstraps != "" {
+		bootstrapPeers = strings.Split(*bootstraps, ",")
+		fmt.Printf("📡 Bootstrap peers: %v\n", bootstrapPeers)
+	} else {
+		fmt.Printf("📡 No bootstrap peers (this node will be isolated unless discovered)\n")
 	}
 
-	fmt.Printf("🔑 Node address: %s\n", nodeAddress)
-
-	// Configure node with P2P support
+	// Configure node with P2P support and SHARED genesis validators
 	nodeConfig := &node.NodeConfig{
 		Config:            cfg,
 		PrivateKey:        nodePrivateKey,
 		ShardID:           0,
 		TotalShards:       1,
-		IsValidator:       true,
-		DataDir:           "./data",
+		IsValidator:       *validator,
+		DataDir:           *dataDir,
 		CrossShardEnabled: false,
 		GenesisAccount:    nodeAddress,
 		GenesisSupply:     1000000000000,
 
 		// P2P Configuration
 		EnableP2P:      true,
-		P2PListenPort:  9000,
-		BootstrapPeers: []string{},
+		P2PListenPort:  *port,
+		BootstrapPeers: bootstrapPeers,
 
-		GenesisValidators: []*core.Validator{
-			{
-				Address:        nodeAddress,
-				Pubkey:         nodePrivateKey.PublicKey().Bytes(),
-				Stake:          cfg.Staking.MinValidatorStake,
-				SelfStake:      cfg.Staking.MinValidatorStake,
-				DelegatedStake: 0,
-				Commission:     0.1,
-				Active:         true,
-				Delegators:     make(map[string]int64),
-				CreatedAt:      time.Now().Unix(),
-				UpdatedAt:      time.Now().Unix(),
-			},
-		},
+		// CRITICAL: All nodes must have the SAME genesis validators
+		GenesisValidators: allValidators,
 	}
 
 	// Initialize node with P2P support
@@ -141,21 +199,22 @@ func main() {
 		log.Fatalf("Failed to initialize node: %v", err)
 	}
 
-	fmt.Printf("✅ Node initialized! Address: %s\n", nodeAddress)
+	fmt.Printf("✅ Node %d initialized! Address: %s\n", *nodeID, nodeAddress)
 
 	// Start the node (this will start P2P services automatically)
 	if err := thrylosNode.Start(); err != nil {
 		log.Fatalf("Failed to start node: %v", err)
 	}
 
-	fmt.Printf("✅ Node started successfully!\n")
+	fmt.Printf("✅ Node %d started successfully!\n", *nodeID)
+	fmt.Printf("🏛️  Node %d knows about %d validators in genesis\n", *nodeID, len(allValidators))
 
 	// Add basic event handlers for monitoring
 	thrylosNode.AddEventHandler("block_produced", func(data interface{}) {
 		if block, ok := data.(*core.Block); ok {
 			if len(block.Transactions) > 0 {
-				fmt.Printf("📦 Block #%d: %d transactions, gas: %d\n",
-					block.Header.Index, len(block.Transactions), block.Header.GasUsed)
+				fmt.Printf("📦 Node %d - Block #%d: %d transactions, gas: %d\n",
+					*nodeID, block.Header.Index, len(block.Transactions), block.Header.GasUsed)
 			}
 		}
 	})
@@ -164,20 +223,20 @@ func main() {
 		if tx, ok := data.(*core.Transaction); ok {
 			// Only log every 10th transaction to avoid spam
 			if tx.Nonce%10 == 0 {
-				fmt.Printf("💰 TX #%d: %s -> %s (%.3f THRYLOS)\n",
-					tx.Nonce, tx.From[:8]+"...", tx.To[:8]+"...", float64(tx.Amount)/1000000000)
+				fmt.Printf("💰 Node %d - TX #%d: %s -> %s (%.3f THRYLOS)\n",
+					*nodeID, tx.Nonce, tx.From[:8]+"...", tx.To[:8]+"...", float64(tx.Amount)/1000000000)
 			}
 		}
 	})
 
 	// Print initial status
-	printNodeStatus(thrylosNode)
+	printNodeStatus(thrylosNode, *nodeID)
 
 	// Graceful shutdown
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
-	fmt.Println("🎉 Thrylos Node running! Press Ctrl+C to stop.")
+	fmt.Printf("🎉 Thrylos Node %d running! Press Ctrl+C to stop.\n", *nodeID)
 	fmt.Println("📊 Node status will be printed every 30 seconds...")
 	fmt.Println("🧪 Run TPS tests with: go test ./node -v -run=TestTPS")
 
@@ -188,7 +247,7 @@ func main() {
 	for {
 		select {
 		case <-c:
-			fmt.Println("\n🛑 Shutting down Thrylos Node...")
+			fmt.Printf("\n🛑 Shutting down Thrylos Node %d...\n", *nodeID)
 
 			// Stop the node gracefully
 			if err := thrylosNode.Stop(); err != nil {
@@ -199,16 +258,16 @@ func main() {
 			return
 
 		case <-statusTicker.C:
-			printNodeStatus(thrylosNode)
+			printNodeStatus(thrylosNode, *nodeID)
 		}
 	}
 }
 
 // printNodeStatus displays comprehensive node status including P2P information
-func printNodeStatus(n *node.Node) {
+func printNodeStatus(n *node.Node, nodeID int) {
 	status := n.GetNodeStatus()
 
-	fmt.Println("\n📊 === NODE STATUS ===")
+	fmt.Printf("\n📊 === NODE %d STATUS ===\n", nodeID)
 	fmt.Printf("Running: %v\n", status["running"])
 	fmt.Printf("Address: %s\n", status["node_address"])
 	fmt.Printf("Shard: %d/%d\n", status["shard_id"], status["total_shards"])
@@ -240,7 +299,9 @@ func printNodeStatus(n *node.Node) {
 		connected := n.IsP2PConnected()
 		fmt.Printf("P2P Connected: %v\n", connected)
 		if !connected {
-			fmt.Printf("⚠️  No P2P peers connected\n")
+			fmt.Printf("⚠️  Node %d: No P2P peers connected\n", nodeID)
+		} else {
+			fmt.Printf("✅ Node %d: P2P network active\n", nodeID)
 		}
 	} else {
 		fmt.Printf("P2P: disabled or error\n")

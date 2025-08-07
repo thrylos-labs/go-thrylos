@@ -1,10 +1,12 @@
 # Data directories
 data/
 bin/
+echo "data-node*/" >> .gitignore
+echo "logs/" >> .gitignore
+echo "*.log" >> .gitignore
 
 # api info
 server.crt
 server.key
 
-# how to generate dev certificates
-openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"
+
