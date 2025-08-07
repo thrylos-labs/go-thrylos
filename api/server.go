@@ -138,14 +138,31 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/validators/active", s.getActiveValidators).Methods("GET")
 	api.HandleFunc("/status", s.getStatus).Methods("GET")
 	api.HandleFunc("/health", s.getHealth).Methods("GET")
-	api.HandleFunc("/transaction/submit", s.submitTransaction).Methods("POST")
+	api.HandleFunc("/estimate-gas", s.estimateGas).Methods("POST")
+	api.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST")
 
 	c := cors.New(cors.Options{
-		AllowedOrigins: []string{"*"},
+		AllowedOrigins: []string{
+			"http://localhost:3000", // React default
+			"http://localhost:5173", // Vite default
+			"http://localhost:8080", // Same origin
+			"http://127.0.0.1:5173", // Alternative localhost
+			"http://127.0.0.1:3000", // Alternative localhost
+		},
 		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders: []string{"*"},
+		AllowedHeaders: []string{
+			"*",
+			"Content-Type",
+			"Authorization",
+			"Accept",
+			"Origin",
+			"X-Requested-With",
+		},
+		AllowCredentials: true, // Allow credentials if needed
+		Debug:            true, // Enable for development debugging
 	})
 
+	// Apply CORS middleware to the entire router
 	s.router.Use(c.Handler)
 	s.router.Use(s.loggingMiddleware)
 	s.router.Use(s.jsonMiddleware)
@@ -183,23 +200,74 @@ func (s *Server) Stop() error {
 	return nil
 }
 
-func (s *Server) submitTransaction(w http.ResponseWriter, r *http.Request) {
+func (s *Server) submitSignedTransaction(w http.ResponseWriter, r *http.Request) {
 	var tx core.Transaction
 	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
 		s.writeError(w, "Invalid transaction format", http.StatusBadRequest)
 		return
 	}
 
-	// Add transaction to your existing transaction pool
-	if err := s.worldState.AddTransaction(&tx); err != nil {
-		s.writeError(w, fmt.Sprintf("Failed to add transaction: %v", err), http.StatusBadRequest)
+	// Expect transaction to be fully formed and signed
+	if tx.Id == "" {
+		s.writeError(w, "Transaction ID required", http.StatusBadRequest)
 		return
 	}
 
+	if tx.Hash == "" {
+		s.writeError(w, "Transaction hash required", http.StatusBadRequest)
+		return
+	}
+
+	if len(tx.Signature) == 0 {
+		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
+		return
+	}
+
+	// Validate signature using your crypto system
+	// This is where your existing validation logic goes
+	if err := s.worldState.AddTransaction(&tx); err != nil {
+		s.writeError(w, fmt.Sprintf("Invalid transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	s.writeJSON(w, map[string]interface{}{
+		"status":  "accepted",
+		"tx_hash": tx.Hash,
+	})
+}
+
+func (s *Server) estimateGas(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		From   string `json:"from"`
+		To     string `json:"to"`
+		Amount int64  `json:"amount"`
+		Data   string `json:"data,omitempty"` // For smart contracts later
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	// Basic gas estimation based on transaction type
+	var gasEstimate int64 = 21000 // Standard transaction gas from your config
+
+	// If there's data (smart contract call), increase gas
+	if req.Data != "" {
+		gasEstimate += int64(len(req.Data)) * 68 // Gas per byte
+	}
+
+	// Get current gas price from your config (1000 from config.go)
+	gasPrice := int64(1000)
+
+	// Calculate total fee
+	totalFee := gasEstimate * gasPrice
+
 	response := map[string]interface{}{
-		"message": "Transaction added to pool",
-		"tx_id":   tx.Id,
-		"status":  "pending",
+		"gas_estimate": gasEstimate,
+		"gas_price":    gasPrice,
+		"total_fee":    totalFee,
+		"fee_thrylos":  float64(totalFee) / 1000000000, // Convert to THRYLOS
 	}
 
 	s.writeJSON(w, response)
@@ -389,27 +457,42 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get or create the account using your existing WorldState method
+	// Try to get existing account first
 	account, err := s.worldState.GetAccount(req.Address)
 	if err != nil {
-		s.writeError(w, "Failed to get/create account", http.StatusInternalServerError)
-		return
+		// Account doesn't exist, create a new one
+		account = &core.Account{
+			Address:      req.Address,
+			Balance:      req.Amount, // Set initial balance
+			Nonce:        0,
+			StakedAmount: 0,
+			DelegatedTo:  make(map[string]int64),
+			Rewards:      0,
+		}
+	} else {
+		// Account exists, add funding to existing balance
+		account.Balance += req.Amount
 	}
 
-	// Add the funding amount to the account balance
-	account.Balance += req.Amount
-
-	// Update the account using your existing method with storage persistence
+	// Use the proper WorldState method to update with storage persistence
 	if err := s.worldState.UpdateAccountWithStorage(account); err != nil {
-		s.writeError(w, "Failed to update account", http.StatusInternalServerError)
+		s.writeError(w, fmt.Sprintf("Failed to create/update account: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// Convert to THRYLOS for display
+	const NANO_PER_THRYLOS = 1000000000
+	balanceThrylos := float64(account.Balance) / NANO_PER_THRYLOS
+	amountThrylos := float64(req.Amount) / NANO_PER_THRYLOS
 
 	response := map[string]interface{}{
-		"message": "Account funded successfully",
-		"address": req.Address,
-		"amount":  req.Amount,
-		"balance": account.Balance,
+		"message":         "Account funded successfully",
+		"address":         req.Address,
+		"amount_added":    req.Amount,
+		"amount_thrylos":  amountThrylos,
+		"new_balance":     account.Balance,
+		"balance_thrylos": balanceThrylos,
+		"nonce":           account.Nonce,
 	}
 
 	s.writeJSON(w, response)
@@ -495,8 +578,6 @@ func (s *Server) getPendingTransactions(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, response)
 }
 
-// Keep all existing block and validator endpoints unchanged...
-
 func (s *Server) getBlockByHash(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	hash := vars["hash"]
@@ -545,8 +626,6 @@ func (s *Server) getLatestBlock(w http.ResponseWriter, r *http.Request) {
 	response := s.formatBlock(block)
 	s.writeJSON(w, response)
 }
-
-// Validator endpoints (keep existing implementation)
 
 func (s *Server) getValidator(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -621,8 +700,6 @@ func (s *Server) getActiveValidators(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, response)
 }
 
-// Status endpoints (keep existing)
-
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	status := s.worldState.GetStatus()
 	s.writeJSON(w, status)
@@ -637,8 +714,6 @@ func (s *Server) getHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	s.writeJSON(w, health)
 }
-
-// Helper methods (keep existing)
 
 func (s *Server) formatBlock(block *core.Block) map[string]interface{} {
 	var transactions []TransactionResponse
