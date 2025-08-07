@@ -1,9 +1,9 @@
 # Data directories
 data/
 bin/
-echo "data-node*/" >> .gitignore
-echo "logs/" >> .gitignore
-echo "*.log" >> .gitignore
+data-node*/
+logs/
+*.log
 
 # api info
 server.crt
