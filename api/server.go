@@ -8,7 +8,7 @@
 // Designed for HTTPS polling approach - simple, reliable, cacheable endpoints
 // Serves as the primary interface between external applications and your blockchain node
 
-// api/server.go
+// Updated for account-based system with staking support
 
 package api
 
@@ -45,6 +45,42 @@ type ServerConfig struct {
 	EnableTLS bool
 	CertFile  string
 	KeyFile   string
+}
+
+// Response structures for account-based system
+type AccountResponse struct {
+	Address      string           `json:"address"`
+	Balance      int64            `json:"balance"`
+	Nonce        uint64           `json:"nonce"`
+	StakedAmount int64            `json:"staked_amount"`
+	Rewards      int64            `json:"rewards"`
+	DelegatedTo  map[string]int64 `json:"delegated_to"`
+}
+
+type DelegationsResponse struct {
+	Address     string           `json:"address"`
+	Delegations map[string]int64 `json:"delegations"`
+	Count       int              `json:"count"`
+}
+
+type TransactionResponse struct {
+	Hash      string `json:"hash"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Amount    int64  `json:"amount"`
+	Nonce     uint64 `json:"nonce"`
+	Gas       int64  `json:"gas"`
+	GasPrice  int64  `json:"gas_price"`
+	Timestamp int64  `json:"timestamp"`
+	Status    string `json:"status"`
+	Signature string `json:"signature,omitempty"`
+}
+
+type TransactionHistoryResponse struct {
+	Address      string                `json:"address"`
+	Transactions []TransactionResponse `json:"transactions"`
+	Count        int                   `json:"count"`
+	Limit        int                   `json:"limit"`
 }
 
 // NewServer creates a new API server
@@ -85,25 +121,25 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/account/{address}/transactions", s.getAccountTransactions).Methods("GET")
 	api.HandleFunc("/account/{address}/delegations", s.getAccountDelegations).Methods("GET")
 
-	// Transaction endpoints
+	// Staking endpoints
+	api.HandleFunc("/account/{address}/stake", s.getAccountStake).Methods("GET")
+	api.HandleFunc("/account/{address}/rewards", s.getAccountRewards).Methods("GET")
+
+	// Development endpoints
+	api.HandleFunc("/fund", s.fundAddress).Methods("POST")
+
 	api.HandleFunc("/transaction/{hash}", s.getTransaction).Methods("GET")
 	api.HandleFunc("/transactions/pending", s.getPendingTransactions).Methods("GET")
-
-	// Block endpoints
 	api.HandleFunc("/block/{hash}", s.getBlockByHash).Methods("GET")
 	api.HandleFunc("/block/height/{height}", s.getBlockByHeight).Methods("GET")
 	api.HandleFunc("/block/latest", s.getLatestBlock).Methods("GET")
-
-	// Validator endpoints
 	api.HandleFunc("/validator/{address}", s.getValidator).Methods("GET")
 	api.HandleFunc("/validators", s.getValidators).Methods("GET")
 	api.HandleFunc("/validators/active", s.getActiveValidators).Methods("GET")
-
-	// Status endpoints
 	api.HandleFunc("/status", s.getStatus).Methods("GET")
 	api.HandleFunc("/health", s.getHealth).Methods("GET")
+	api.HandleFunc("/transaction/submit", s.submitTransaction).Methods("POST")
 
-	// Add CORS middleware
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
@@ -128,12 +164,12 @@ func (s *Server) Start() error {
 	if s.enableTLS {
 		log.Printf("🔒 HTTPS API Server starting on port %d", s.port)
 		log.Printf("📊 Health check: https://localhost:%d/api/v1/health", s.port)
-		log.Printf("💰 Balance endpoint: https://localhost:%d/api/v1/account/{address}/balance", s.port)
+		log.Printf("💰 Account endpoint: https://localhost:%d/api/v1/account/{address}", s.port)
 		return s.server.ListenAndServeTLS(s.certFile, s.keyFile)
 	} else {
 		log.Printf("🌐 HTTP API Server starting on port %d", s.port)
 		log.Printf("📊 Health check: http://localhost:%d/api/v1/health", s.port)
-		log.Printf("💰 Balance endpoint: http://localhost:%d/api/v1/account/{address}/balance", s.port)
+		log.Printf("💰 Account endpoint: http://localhost:%d/api/v1/account/{address}", s.port)
 		log.Printf("⚠️  Warning: Using HTTP in development mode. Use HTTPS for production!")
 		return s.server.ListenAndServe()
 	}
@@ -147,7 +183,59 @@ func (s *Server) Stop() error {
 	return nil
 }
 
-// Account endpoints
+func (s *Server) submitTransaction(w http.ResponseWriter, r *http.Request) {
+	var tx core.Transaction
+	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
+		s.writeError(w, "Invalid transaction format", http.StatusBadRequest)
+		return
+	}
+
+	// Add transaction to your existing transaction pool
+	if err := s.worldState.AddTransaction(&tx); err != nil {
+		s.writeError(w, fmt.Sprintf("Failed to add transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	response := map[string]interface{}{
+		"message": "Transaction added to pool",
+		"tx_id":   tx.Id,
+		"status":  "pending",
+	}
+
+	s.writeJSON(w, response)
+}
+
+// UPDATED Account endpoints for account-based system
+
+func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	address := vars["address"]
+
+	account, err := s.worldState.GetAccount(address)
+	if err != nil {
+		s.writeError(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	// Get additional staking information using existing methods
+	stakedAmount := account.StakedAmount
+	rewards := account.Rewards
+	delegations := account.DelegatedTo
+	if delegations == nil {
+		delegations = make(map[string]int64)
+	}
+
+	response := map[string]interface{}{
+		"address":       account.Address,
+		"balance":       account.Balance,
+		"nonce":         account.Nonce,
+		"staked_amount": stakedAmount,
+		"rewards":       rewards,
+		"delegated_to":  delegations,
+	}
+
+	s.writeJSON(w, response)
+}
 
 func (s *Server) getAccountBalance(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -161,16 +249,21 @@ func (s *Server) getAccountBalance(w http.ResponseWriter, r *http.Request) {
 
 	nonce, _ := s.worldState.GetNonce(address)
 
+	// Convert to THRYLOS (1 THRYLOS = 1e9 nano based on your BaseUnit)
+	const NANO_PER_THRYLOS = 1000000000
+	balanceThrylos := float64(balance) / NANO_PER_THRYLOS
+
 	response := map[string]interface{}{
-		"address": address,
-		"balance": balance,
-		"nonce":   nonce,
+		"address":        address,
+		"balance":        balance,
+		"balanceThrylos": balanceThrylos,
+		"nonce":          nonce,
 	}
 
 	s.writeJSON(w, response)
 }
 
-func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getAccountStake(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	address := vars["address"]
 
@@ -181,12 +274,47 @@ func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"address":       account.Address,
-		"balance":       account.Balance,
-		"nonce":         account.Nonce,
+		"address":       address,
 		"staked_amount": account.StakedAmount,
-		"rewards":       account.Rewards,
-		"delegated_to":  account.DelegatedTo,
+	}
+
+	s.writeJSON(w, response)
+}
+
+func (s *Server) getAccountRewards(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	address := vars["address"]
+
+	account, err := s.worldState.GetAccount(address)
+	if err != nil {
+		s.writeError(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	response := map[string]interface{}{
+		"address": address,
+		"rewards": account.Rewards,
+	}
+
+	s.writeJSON(w, response)
+}
+
+func (s *Server) getAccountDelegations(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	address := vars["address"]
+
+	// Use your existing StakingManager
+	stakingManager := s.worldState.GetStakingManager()
+	delegations, err := stakingManager.GetDelegations(address)
+	if err != nil {
+		s.writeError(w, "Failed to get delegations", http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]interface{}{
+		"address":     address,
+		"delegations": delegations,
+		"count":       len(delegations),
 	}
 
 	s.writeJSON(w, response)
@@ -205,16 +333,13 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// Get recent transactions for the account
-	// Note: This is a simplified implementation
-	// In production, you'd want to index transactions by account for efficient queries
-	pendingTxs := s.worldState.GetPendingTransactions()
-
+	// Get transactions for this account from pending transactions
 	var accountTxs []map[string]interface{}
-	count := 0
 
+	// Check pending transactions
+	pendingTxs := s.worldState.GetPendingTransactions()
 	for _, tx := range pendingTxs {
-		if count >= limit {
+		if len(accountTxs) >= limit {
 			break
 		}
 
@@ -224,16 +349,18 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 				"from":      tx.From,
 				"to":        tx.To,
 				"amount":    tx.Amount,
+				"nonce":     tx.Nonce,
 				"gas":       tx.Gas,
 				"gas_price": tx.GasPrice,
-				"nonce":     tx.Nonce,
 				"timestamp": tx.Timestamp,
 				"status":    "pending",
 			}
 			accountTxs = append(accountTxs, txData)
-			count++
 		}
 	}
+
+	// TODO: Add confirmed transactions from blocks
+	// You can implement this by scanning recent blocks or adding transaction indexing
 
 	response := map[string]interface{}{
 		"address":      address,
@@ -245,27 +372,50 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, response)
 }
 
-func (s *Server) getAccountDelegations(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	address := vars["address"]
+// Development endpoint to fund addresses (for testing)
+func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Address string `json:"address"`
+		Amount  int64  `json:"amount"`
+	}
 
-	stakingManager := s.worldState.GetStakingManager()
-	delegations, err := stakingManager.GetDelegations(address)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Address == "" || req.Amount <= 0 {
+		s.writeError(w, "Invalid address or amount", http.StatusBadRequest)
+		return
+	}
+
+	// Get or create the account using your existing WorldState method
+	account, err := s.worldState.GetAccount(req.Address)
 	if err != nil {
-		s.writeError(w, "Failed to get delegations", http.StatusInternalServerError)
+		s.writeError(w, "Failed to get/create account", http.StatusInternalServerError)
+		return
+	}
+
+	// Add the funding amount to the account balance
+	account.Balance += req.Amount
+
+	// Update the account using your existing method with storage persistence
+	if err := s.worldState.UpdateAccountWithStorage(account); err != nil {
+		s.writeError(w, "Failed to update account", http.StatusInternalServerError)
 		return
 	}
 
 	response := map[string]interface{}{
-		"address":     address,
-		"delegations": delegations,
-		"count":       len(delegations),
+		"message": "Account funded successfully",
+		"address": req.Address,
+		"amount":  req.Amount,
+		"balance": account.Balance,
 	}
 
 	s.writeJSON(w, response)
 }
 
-// Transaction endpoints
+// Transaction endpoints (keep existing implementation)
 
 func (s *Server) getTransaction(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -289,16 +439,16 @@ func (s *Server) getTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := map[string]interface{}{
-		"hash":      tx.Id,
-		"from":      tx.From,
-		"to":        tx.To,
-		"amount":    tx.Amount,
-		"gas":       tx.Gas,
-		"gas_price": tx.GasPrice,
-		"nonce":     tx.Nonce,
-		"timestamp": tx.Timestamp,
-		"signature": tx.Signature,
+	response := TransactionResponse{
+		Hash:      tx.Id,
+		From:      tx.From,
+		To:        tx.To,
+		Amount:    tx.Amount,
+		Nonce:     tx.Nonce,
+		Gas:       tx.Gas,
+		GasPrice:  tx.GasPrice,
+		Timestamp: tx.Timestamp,
+		Status:    "confirmed", // or determine actual status
 	}
 
 	s.writeJSON(w, response)
@@ -316,23 +466,24 @@ func (s *Server) getPendingTransactions(w http.ResponseWriter, r *http.Request) 
 
 	pendingTxs := s.worldState.GetPendingTransactions()
 
-	var transactions []map[string]interface{}
+	var transactions []TransactionResponse
 	for i, tx := range pendingTxs {
 		if i >= limit {
 			break
 		}
 
-		txData := map[string]interface{}{
-			"hash":      tx.Id,
-			"from":      tx.From,
-			"to":        tx.To,
-			"amount":    tx.Amount,
-			"gas":       tx.Gas,
-			"gas_price": tx.GasPrice,
-			"nonce":     tx.Nonce,
-			"timestamp": tx.Timestamp,
+		txResponse := TransactionResponse{
+			Hash:      tx.Id,
+			From:      tx.From,
+			To:        tx.To,
+			Amount:    tx.Amount,
+			Nonce:     tx.Nonce,
+			Gas:       tx.Gas,
+			GasPrice:  tx.GasPrice,
+			Timestamp: tx.Timestamp,
+			Status:    "pending",
 		}
-		transactions = append(transactions, txData)
+		transactions = append(transactions, txResponse)
 	}
 
 	response := map[string]interface{}{
@@ -344,7 +495,7 @@ func (s *Server) getPendingTransactions(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, response)
 }
 
-// Block endpoints
+// Keep all existing block and validator endpoints unchanged...
 
 func (s *Server) getBlockByHash(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -395,7 +546,7 @@ func (s *Server) getLatestBlock(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, response)
 }
 
-// Validator endpoints
+// Validator endpoints (keep existing implementation)
 
 func (s *Server) getValidator(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -470,7 +621,7 @@ func (s *Server) getActiveValidators(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, response)
 }
 
-// Status endpoints
+// Status endpoints (keep existing)
 
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	status := s.worldState.GetStatus()
@@ -487,21 +638,21 @@ func (s *Server) getHealth(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, health)
 }
 
-// Helper methods
+// Helper methods (keep existing)
 
 func (s *Server) formatBlock(block *core.Block) map[string]interface{} {
-	var transactions []map[string]interface{}
+	var transactions []TransactionResponse
 	for _, tx := range block.Transactions {
-		txData := map[string]interface{}{
-			"hash":      tx.Id,
-			"from":      tx.From,
-			"to":        tx.To,
-			"amount":    tx.Amount,
-			"gas":       tx.Gas,
-			"gas_price": tx.GasPrice,
-			"nonce":     tx.Nonce,
+		txResponse := TransactionResponse{
+			Hash:     tx.Id,
+			From:     tx.From,
+			To:       tx.To,
+			Amount:   tx.Amount,
+			Nonce:    tx.Nonce,
+			Gas:      tx.Gas,
+			GasPrice: tx.GasPrice,
 		}
-		transactions = append(transactions, txData)
+		transactions = append(transactions, txResponse)
 	}
 
 	return map[string]interface{}{
@@ -553,7 +704,7 @@ func (s *Server) writeError(w http.ResponseWriter, message string, statusCode in
 	})
 }
 
-// Middleware
+// Middleware (keep existing)
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -216,17 +217,45 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	}
 
 	if nodeConfig.EnableAPI {
+		// Get port from config
 		apiPort := nodeConfig.APIPort
 		if apiPort == 0 {
-			apiPort = 8080 // Default port
+			apiPort = parsePortFromAddr(nodeConfig.Config.API.RESTAddr)
 		}
-		node.apiManager = api.NewAPIManager(worldState, apiPort)
+
+		// Use your existing API system with full config support
+		if nodeConfig.Config.API.EnableTLS {
+			// Production HTTPS setup using your existing APIManagerWithConfig
+			apiConfig := &api.APIManagerConfig{
+				Port:      apiPort,
+				EnableTLS: true,
+				CertFile:  nodeConfig.Config.API.CertFile,
+				KeyFile:   nodeConfig.Config.API.KeyFile,
+			}
+			node.apiManager = api.NewAPIManagerWithConfig(worldState, apiConfig)
+		} else {
+			// Development HTTP setup using your existing NewAPIManager
+			node.apiManager = api.NewAPIManager(worldState, apiPort)
+		}
 	}
 
 	// Store genesis configuration for initialization
 	node.storeGenesisConfig(nodeConfig)
 
 	return node, nil
+}
+
+// port helper
+func parsePortFromAddr(addr string) int {
+	if addr == "" {
+		return 8080
+	}
+	if addr[0] == ':' {
+		if port, err := strconv.Atoi(addr[1:]); err == nil {
+			return port
+		}
+	}
+	return 8080
 }
 
 // Start starts the blockchain node with full initialization

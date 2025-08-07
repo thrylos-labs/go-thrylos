@@ -36,9 +36,10 @@ func NewClient(baseURL string) *Client {
 
 // BalanceResponse represents the response from balance endpoint
 type BalanceResponse struct {
-	Address string `json:"address"`
-	Balance int64  `json:"balance"`
-	Nonce   uint64 `json:"nonce"`
+	Address        string  `json:"address"`
+	Balance        int64   `json:"balance"`
+	BalanceThrylos float64 `json:"balanceThrylos"`
+	Nonce          uint64  `json:"nonce"`
 }
 
 // GetBalance fetches the current balance for an address

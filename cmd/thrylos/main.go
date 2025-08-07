@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -118,6 +119,7 @@ func main() {
 	var bootstraps = flag.String("bootstrap", "", "Comma-separated bootstrap peers")
 	var dataDir = flag.String("data", "", "Data directory (default: ./data-nodeN)")
 	var validator = flag.Bool("validator", true, "Run as validator")
+
 	flag.Parse()
 
 	// Validate node ID
@@ -189,7 +191,10 @@ func main() {
 		P2PListenPort:  *port,
 		BootstrapPeers: bootstrapPeers,
 
-		// CRITICAL: All nodes must have the SAME genesis validators
+		// API Configuration - Use values from config
+		EnableAPI: cfg.API.EnableAPI,                   // From config file
+		APIPort:   parsePortFromAddr(cfg.API.RESTAddr), // Extract port from ":8080"
+
 		GenesisValidators: allValidators,
 	}
 
@@ -261,6 +266,18 @@ func main() {
 			printNodeStatus(thrylosNode, *nodeID)
 		}
 	}
+}
+
+func parsePortFromAddr(addr string) int {
+	if addr == "" {
+		return 8080 // default
+	}
+	if addr[0] == ':' {
+		if port, err := strconv.Atoi(addr[1:]); err == nil {
+			return port
+		}
+	}
+	return 8080 // fallback default
 }
 
 // printNodeStatus displays comprehensive node status including P2P information

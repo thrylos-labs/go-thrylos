@@ -195,12 +195,17 @@ type ShardingConfig struct {
 }
 
 type APIConfig struct {
-	JSONRPCAddr   string `json:"jsonrpc_addr"`
-	WebSocketAddr string `json:"websocket_addr"`
-	GRPCAddr      string `json:"grpc_addr"`
-	EnableCORS    bool   `json:"enable_cors"`
-	RateLimit     int    `json:"rate_limit"`
-	EnableMetrics bool   `json:"enable_metrics"`
+	// REST API configuration
+	EnableAPI bool   `json:"enable_api"` // Whether to enable the API server
+	RESTAddr  string `json:"rest_addr"`  // REST API address (e.g., ":8080")
+	EnableTLS bool   `json:"enable_tls"` // Enable HTTPS/TLS
+	CertFile  string `json:"cert_file"`  // TLS certificate file path
+	KeyFile   string `json:"key_file"`   // TLS private key file path
+
+	// API settings
+	EnableCORS    bool `json:"enable_cors"`
+	RateLimit     int  `json:"rate_limit"`
+	EnableMetrics bool `json:"enable_metrics"`
 }
 
 func Load() (*Config, error) {
@@ -304,13 +309,27 @@ func Load() (*Config, error) {
 		},
 
 		API: APIConfig{
-			JSONRPCAddr:   ":8545",
-			WebSocketAddr: ":8546",
-			GRPCAddr:      ":9090",
+			EnableAPI:     true,                 // Enable API by default
+			RESTAddr:      ":8080",              // HTTP development port
+			EnableTLS:     false,                // HTTP for development
+			CertFile:      "./certs/server.crt", // Path for when TLS is enabled
+			KeyFile:       "./certs/server.key", // Path for when TLS is enabled
 			EnableCORS:    true,
-			RateLimit:     1000, // 1000 requests per minute
+			RateLimit:     1000,
 			EnableMetrics: true,
 		},
+
+		// For production, you'd change to:
+		// API: APIConfig{
+		//     EnableAPI:     true,
+		//     RESTAddr:      ":8443",                   // HTTPS production port
+		//     EnableTLS:     true,                      // HTTPS for production
+		//     CertFile:      "/etc/ssl/certs/domain.crt",
+		//     KeyFile:       "/etc/ssl/private/domain.key",
+		//     EnableCORS:    true,
+		//     RateLimit:     1000,
+		//     EnableMetrics: true,
+		// },
 
 		P2P: P2PConfig{
 			Enabled:        true,

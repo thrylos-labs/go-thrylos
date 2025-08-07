@@ -1,4 +1,11 @@
 run thrylos: go build -o bin/thrylos ./cmd/thrylos && ./bin/thrylos
+
+# Start node 1 with API server on port 8080
+go build -o bin/thrylos ./cmd/thrylos && ./bin/thrylos --node=1 --api-port=8080
+
+# Or disable API server
+go build -o bin/thrylos ./cmd/thrylos && ./bin/thrylos --node=1 --api=false
+
 TO DO 
 
 🎯 Next Steps for Production:
@@ -8,8 +15,6 @@ Make sure the database is used correctly
 .THR - Wallet usernames
 Multi-node Testing - Start multiple nodes with different ports
 Wallet Integration - External wallets can submit transactions
-Remove internal testing - Use an external wallet instead to test transactions
-TPS & block time to finality - to test
 .env.dev & .env.prod - need to be created or not? 
 Ask Claude to act as an Audit person to audit the blockchain for vulnabilities 
 
