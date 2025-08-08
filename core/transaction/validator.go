@@ -3,7 +3,7 @@
 
 // ✅ Transaction creation with proper ID and hash generation
 // ✅ Blake2b hash calculation for transaction integrity
-// ✅ MLDSA44 signature integration for signing and verification
+// ✅ Ed25519 signature integration for signing and verification
 // ✅ Comprehensive validation - structure, hash, shard, and business logic
 // ✅ Address format validation using tl1 bech 32 format
 // ✅ Business logic validation - balance checks, minimum amounts, nonce validation
@@ -166,7 +166,7 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) string {
 	return fmt.Sprintf("%x", hashBytes)
 }
 
-// SignTransaction signs a transaction with MLDSA44
+// SignTransaction signs a transaction with Ed25519
 func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.PrivateKey) error {
 	if tx == nil {
 		return fmt.Errorf("transaction cannot be nil")
@@ -179,7 +179,7 @@ func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.Priv
 	// Calculate the hash to sign using crypto/hash
 	hashToSign := hash.HashData([]byte(tx.Hash))
 
-	// Sign with MLDSA44
+	// Sign with Ed25519
 	signature := privateKey.Sign(hashToSign)
 	if signature == nil {
 		return fmt.Errorf("failed to sign transaction")

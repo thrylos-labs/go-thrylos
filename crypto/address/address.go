@@ -2,11 +2,11 @@ package address
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"fmt"
 	"strings"
 
 	"github.com/btcsuite/btcutil/bech32"
-	mldsa "github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 )
@@ -20,19 +20,18 @@ const (
 // Address represents an 8-byte Thrylos address
 type Address [AddressByteLength]byte
 
-// New creates an Address from a public key using Blake2b hash
-func New(pubKey *mldsa.PublicKey) (*Address, error) {
-	if pubKey == nil {
-		return nil, fmt.Errorf("public key cannot be nil")
+// New creates an Address from an Ed25519 public key using Blake2b hash
+func New(pubKey ed25519.PublicKey) (*Address, error) {
+	if pubKey == nil || len(pubKey) == 0 {
+		return nil, fmt.Errorf("public key cannot be nil or empty")
 	}
 
-	pubKeyBytes := pubKey.Bytes()
-	if len(pubKeyBytes) == 0 {
-		return nil, fmt.Errorf("public key bytes cannot be empty")
+	if len(pubKey) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid Ed25519 public key size: got %d, want %d", len(pubKey), ed25519.PublicKeySize)
 	}
 
 	// Hash the public key with Blake2b-256
-	hashBytes := hash.NewHash(pubKeyBytes)
+	hashBytes := hash.NewHash(pubKey)
 
 	// Take the first 8 bytes of the hash (more secure than taking last bytes)
 	var address Address
@@ -120,8 +119,8 @@ func IsValid(addr string) bool {
 	return Validate(addr) == nil
 }
 
-// ConvertToAddress creates a tl1 address string from public key
-func ConvertToAddress(pubKey *mldsa.PublicKey) (string, error) {
+// ConvertToAddress creates a tl1 address string from Ed25519 public key
+func ConvertToAddress(pubKey ed25519.PublicKey) (string, error) {
 	addr, err := New(pubKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to create address: %v", err)
@@ -310,8 +309,8 @@ func (a *Address) Normalize() string {
 
 // Utility functions for compatibility
 
-// GenerateAddress generates an address from public key (wrapper function)
-func GenerateAddress(pubKey *mldsa.PublicKey) (string, error) {
+// GenerateAddress generates an address from Ed25519 public key (wrapper function)
+func GenerateAddress(pubKey ed25519.PublicKey) (string, error) {
 	addr, err := New(pubKey)
 	if err != nil {
 		return "", err
@@ -360,6 +359,7 @@ func AddressMetrics() map[string]interface{} {
 		"case_sensitive":       false,  // Bech32 is case-insensitive
 		"collision_resistance": "2^64", // 8 bytes = 64 bits
 		"example":              "tl1rn5evt8jyynf7ldr5fk",
+		"crypto_scheme":        "Ed25519", // Updated for Ed25519
 	}
 }
 

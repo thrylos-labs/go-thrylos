@@ -324,7 +324,7 @@ func (bc *Creator) SignBlock(block *core.Block, privateKey crypto.PrivateKey) er
 	// Create hash to sign using crypto/hash
 	hashToSign := hash.HashData([]byte(block.Hash))
 
-	// Sign with MLDSA44
+	// Sign
 	signature := privateKey.Sign(hashToSign)
 	if signature == nil {
 		return fmt.Errorf("failed to sign block")

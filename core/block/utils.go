@@ -193,7 +193,7 @@ func SignBlock(block *core.Block, privateKey crypto.PrivateKey) error {
 	hashBytes.Write([]byte(block.Hash))
 	hashToSign := hashBytes.Sum(nil)
 
-	// Sign with MLDSA44
+	// Sign
 	signature := privateKey.Sign(hashToSign)
 	if signature == nil {
 		return fmt.Errorf("failed to sign block")

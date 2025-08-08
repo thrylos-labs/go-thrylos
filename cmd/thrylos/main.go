@@ -1,8 +1,9 @@
-// File: cmd/thrylos/main.go - Fixed version with shared genesis
+// File: cmd/thrylos/main.go
 package main
 
 import (
-	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"flag"
 	"fmt"
@@ -14,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
@@ -22,49 +22,49 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
-// getNodeSpecificPrivateKey generates a deterministic private key for each node
+// getNodeSpecificPrivateKey generates a deterministic Ed25519 private key for each node
 func getNodeSpecificPrivateKey(nodeID int) (crypto.PrivateKey, error) {
 	// Different seed for each node
-	seed := fmt.Sprintf("thrylos-development-node-key-%d-2024", nodeID)
+	seedStr := fmt.Sprintf("thrylos-development-node-key-%d-2024", nodeID)
 
-	// Hash the seed to get proper random bytes
-	hash := sha256.Sum256([]byte(seed))
+	// Hash the seed to get proper random bytes for Ed25519 seed (32 bytes)
+	hash := sha256.Sum256([]byte(seedStr))
 
-	// Create a deterministic reader from the hash
-	reader := bytes.NewReader(hash[:])
+	// Ed25519 uses a 32-byte seed
+	seed := hash[:]
 
-	// Generate MLDSA key with deterministic seed
-	_, mldsaKey, err := mldsa44.GenerateKey(reader)
+	// Generate Ed25519 key from deterministic seed
+	ed25519PrivKey := ed25519.NewKeyFromSeed(seed)
+
+	// Return the private key using your existing constructor
+	return crypto.NewPrivateKeyFromEd25519(ed25519PrivKey), nil
+}
+
+// Alternative approach using direct key generation if deterministic isn't needed
+func getNodeSpecificPrivateKeyRandom(nodeID int) (crypto.PrivateKey, error) {
+	// Generate a random Ed25519 key pair
+	_, ed25519PrivKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate deterministic key: %v", err)
+		return nil, fmt.Errorf("failed to generate Ed25519 key: %v", err)
 	}
 
 	// Return the private key using your existing constructor
-	return crypto.NewPrivateKeyFromMLDSA(mldsaKey), nil
+	return crypto.NewPrivateKeyFromEd25519(ed25519PrivKey), nil
 }
 
-// Alternative approach using raw bytes if the above doesn't work:
+// getNodeSpecificPrivateKeyFromBytes creates private key from raw bytes
 func getNodeSpecificPrivateKeyFromBytes(nodeID int) (crypto.PrivateKey, error) {
-	// Create a node-specific 32-byte seed
+	// Create a node-specific seed
 	seedStr := fmt.Sprintf("thrylos-dev-node-key-%d", nodeID)
-	seed := make([]byte, 32)
-	copy(seed, []byte(seedStr))
 
-	// Hash it to ensure proper distribution
-	hash := sha256.Sum256(seed)
+	// Hash to get 32 bytes for Ed25519 seed
+	hash := sha256.Sum256([]byte(seedStr))
 
-	// Extend to MLDSA private key size (4864 bytes)
-	keyBytes := make([]byte, mldsa44.PrivateKeySize)
+	// Create Ed25519 private key from seed
+	ed25519PrivKey := ed25519.NewKeyFromSeed(hash[:])
 
-	// Fill the key bytes using repeated hashing
-	for i := 0; i < len(keyBytes); {
-		hash = sha256.Sum256(hash[:])
-		copied := copy(keyBytes[i:], hash[:])
-		i += copied
-	}
-
-	// Create private key from bytes
-	return crypto.NewPrivateKeyFromBytes(keyBytes)
+	// Convert to your private key interface using the raw bytes
+	return crypto.NewPrivateKeyFromBytes(ed25519PrivKey)
 }
 
 // createAllValidators generates all validator info for shared genesis
@@ -78,6 +78,7 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 		// Generate private key for this node
 		privateKey, err := getNodeSpecificPrivateKey(nodeID)
 		if err != nil {
+			// Fallback to bytes method
 			privateKey, err = getNodeSpecificPrivateKeyFromBytes(nodeID)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("failed to generate key for node %d: %v", nodeID, err)
@@ -132,7 +133,7 @@ func main() {
 		*dataDir = fmt.Sprintf("./data-node%d", *nodeID)
 	}
 
-	fmt.Printf("🚀 Starting Thrylos Node %d on port %d...\n", *nodeID, *port)
+	fmt.Printf("🚀 Starting Thrylos Node %d on port %d (Ed25519)...\n", *nodeID, *port)
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -162,8 +163,14 @@ func main() {
 	nodePrivateKey := allPrivateKeys[*nodeID-1] // Arrays are 0-indexed
 	nodeAddress := allAddresses[*nodeID-1]
 
-	fmt.Printf("🔑 Node %d address: %s\n", *nodeID, nodeAddress)
+	fmt.Printf("🔑 Node %d Ed25519 address: %s\n", *nodeID, nodeAddress)
 	fmt.Printf("👥 All validator addresses: %v\n", allAddresses)
+
+	// Debug: Print key sizes for Ed25519
+	pubKeyBytes := nodePrivateKey.PublicKey().Bytes()
+	privKeyBytes := nodePrivateKey.Bytes()
+	fmt.Printf("🔐 Ed25519 Key Sizes - PubKey: %d bytes, PrivKey: %d bytes\n",
+		len(pubKeyBytes), len(privKeyBytes))
 
 	// Parse bootstrap peers
 	var bootstrapPeers []string
@@ -211,14 +218,14 @@ func main() {
 		log.Fatalf("Failed to start node: %v", err)
 	}
 
-	fmt.Printf("✅ Node %d started successfully!\n", *nodeID)
+	fmt.Printf("✅ Node %d started successfully with Ed25519!\n", *nodeID)
 	fmt.Printf("🏛️  Node %d knows about %d validators in genesis\n", *nodeID, len(allValidators))
 
 	// Add basic event handlers for monitoring
 	thrylosNode.AddEventHandler("block_produced", func(data interface{}) {
 		if block, ok := data.(*core.Block); ok {
 			if len(block.Transactions) > 0 {
-				fmt.Printf("📦 Node %d - Block #%d: %d transactions, gas: %d\n",
+				fmt.Printf("📦 Node %d - Block #%d: %d transactions, gas: %d (Ed25519)\n",
 					*nodeID, block.Header.Index, len(block.Transactions), block.Header.GasUsed)
 			}
 		}
@@ -241,7 +248,7 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
-	fmt.Printf("🎉 Thrylos Node %d running! Press Ctrl+C to stop.\n", *nodeID)
+	fmt.Printf("🎉 Thrylos Node %d running with Ed25519! Press Ctrl+C to stop.\n", *nodeID)
 	fmt.Println("📊 Node status will be printed every 30 seconds...")
 	fmt.Println("🧪 Run TPS tests with: go test ./node -v -run=TestTPS")
 
@@ -284,7 +291,7 @@ func parsePortFromAddr(addr string) int {
 func printNodeStatus(n *node.Node, nodeID int) {
 	status := n.GetNodeStatus()
 
-	fmt.Printf("\n📊 === NODE %d STATUS ===\n", nodeID)
+	fmt.Printf("\n📊 === NODE %d STATUS (Ed25519) ===\n", nodeID)
 	fmt.Printf("Running: %v\n", status["running"])
 	fmt.Printf("Address: %s\n", status["node_address"])
 	fmt.Printf("Shard: %d/%d\n", status["shard_id"], status["total_shards"])
@@ -324,5 +331,6 @@ func printNodeStatus(n *node.Node, nodeID int) {
 		fmt.Printf("P2P: disabled or error\n")
 	}
 
+	fmt.Printf("Crypto Scheme: Ed25519\n")
 	fmt.Println("===================\n")
 }

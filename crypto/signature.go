@@ -1,12 +1,12 @@
-// signature.go (Revised to match interfaces.go)
+// signature.go
 package crypto
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 
-	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -14,21 +14,21 @@ type signature struct {
 	sig []byte
 }
 
-const MLDSASignatureSize = mldsa44.SignatureSize
+const Ed25519SignatureSize = ed25519.SignatureSize
 
 var _ Signature = (*signature)(nil) // Interface assertion
 
 // NewSignature constructor matches provided code, returns interface
 func NewSignature(sigBytes []byte) Signature {
-	if len(sigBytes) != mldsa44.SignatureSize {
+	if len(sigBytes) != ed25519.SignatureSize {
 		// How to handle error if constructor must return Signature?
 		// Option 1: Return nil interface (caller must check)
 		// Option 2: Panic (less idiomatic)
 		// Let's return nil interface for now.
-		fmt.Printf("Error: NewSignature received invalid size %d, expected %d\n", len(sigBytes), mldsa44.SignatureSize) // Log error
+		fmt.Printf("Error: NewSignature received invalid size %d, expected %d\n", len(sigBytes), ed25519.SignatureSize) // Log error
 		return nil
 	}
-	s := make([]byte, mldsa44.SignatureSize)
+	s := make([]byte, ed25519.SignatureSize)
 	copy(s, sigBytes)
 	return &signature{sig: s}
 }
@@ -39,10 +39,10 @@ func SignatureFromBytes(sigBytes []byte) (Signature, error) {
 
 // NewSignatureWithError is an alternative constructor if errors are preferred
 func NewSignatureWithError(sigBytes []byte) (Signature, error) {
-	if len(sigBytes) != mldsa44.SignatureSize {
-		return nil, fmt.Errorf("invalid signature length: got %d, want %d", len(sigBytes), mldsa44.SignatureSize)
+	if len(sigBytes) != ed25519.SignatureSize {
+		return nil, fmt.Errorf("invalid signature length: got %d, want %d", len(sigBytes), ed25519.SignatureSize)
 	}
-	s := make([]byte, mldsa44.SignatureSize)
+	s := make([]byte, ed25519.SignatureSize)
 	copy(s, sigBytes)
 	return &signature{sig: s}, nil
 }
@@ -74,29 +74,31 @@ func (s *signature) Verify(pubKey *PublicKey, data []byte) error {
 	}
 
 	// 4. Type assert the dereferenced interface value
-	mldsaPubKey, ok := pubKeyInt.(*publicKey)
+	ed25519PubKey, ok := pubKeyInt.(*publicKey)
 	if !ok {
 		return fmt.Errorf("invalid public key type: expected *crypto.publicKey, got %T", pubKeyInt)
 	}
-	if mldsaPubKey.pubKey == nil {
+	if ed25519PubKey.pubKey == nil {
 		return errors.New("underlying public key is nil")
 	}
 
 	sigBytes := s.Bytes() // Use Bytes() method
-	if len(sigBytes) != mldsa44.SignatureSize {
-		return fmt.Errorf("invalid signature size: got %d, want %d", len(sigBytes), mldsa44.SignatureSize)
+	if len(sigBytes) != ed25519.SignatureSize {
+		return fmt.Errorf("invalid signature size: got %d, want %d", len(sigBytes), ed25519.SignatureSize)
 	}
 
-	ctx := []byte(nil) // Assume nil context
-	isValid := mldsa44.Verify(mldsaPubKey.pubKey, data, ctx, sigBytes)
+	// Ed25519 verification
+	isValid := ed25519.Verify(ed25519PubKey.pubKey, data, sigBytes)
 
 	if !isValid {
-		return errors.New("invalid signature: mldsa44 verification failed")
+		return errors.New("invalid signature: ed25519 verification failed")
 	}
 	return nil // Success
 }
 
 // VerifyWithSalt takes a pointer to a PublicKey interface value. Returns nil error on success.
+// Note: Ed25519 doesn't use salt/context in the same way as ML-DSA44, but we maintain
+// the interface for compatibility. The salt parameter is ignored for Ed25519.
 func (s *signature) VerifyWithSalt(pubKey *PublicKey, data, salt []byte) error {
 	// 1. Check interface pointer
 	if pubKey == nil {
@@ -113,24 +115,25 @@ func (s *signature) VerifyWithSalt(pubKey *PublicKey, data, salt []byte) error {
 	}
 
 	// 4. Type assert the dereferenced interface value
-	mldsaPubKey, ok := pubKeyInt.(*publicKey)
+	ed25519PubKey, ok := pubKeyInt.(*publicKey)
 	if !ok {
 		return fmt.Errorf("invalid public key type: expected *crypto.publicKey, got %T", pubKeyInt)
 	}
-	if mldsaPubKey.pubKey == nil {
+	if ed25519PubKey.pubKey == nil {
 		return errors.New("underlying public key is nil")
 	}
 
 	sigBytes := s.Bytes() // Use Bytes() method
-	if len(sigBytes) != mldsa44.SignatureSize {
-		return fmt.Errorf("invalid signature size: got %d, want %d", len(sigBytes), mldsa44.SignatureSize)
+	if len(sigBytes) != ed25519.SignatureSize {
+		return fmt.Errorf("invalid signature size: got %d, want %d", len(sigBytes), ed25519.SignatureSize)
 	}
 
-	// Use provided salt as context
-	isValid := mldsa44.Verify(mldsaPubKey.pubKey, data, salt, sigBytes)
+	// Ed25519 verification (salt is ignored as Ed25519 doesn't use context)
+	// If you need to incorporate salt, you could hash data+salt before verification
+	isValid := ed25519.Verify(ed25519PubKey.pubKey, data, sigBytes)
 
 	if !isValid {
-		return errors.New("invalid signature: mldsa44 verification with salt failed")
+		return errors.New("invalid signature: ed25519 verification failed")
 	}
 	return nil // Success
 }
@@ -159,8 +162,8 @@ func (s *signature) Unmarshal(data []byte) error {
 	if len(sigData) == 0 {
 		return errors.New("unmarshaled signature data is empty")
 	}
-	if len(sigData) != mldsa44.SignatureSize {
-		return fmt.Errorf("invalid signature size after cbor unmarshal: got %d, want %d", len(sigData), mldsa44.SignatureSize)
+	if len(sigData) != ed25519.SignatureSize {
+		return fmt.Errorf("invalid signature size after cbor unmarshal: got %d, want %d", len(sigData), ed25519.SignatureSize)
 	}
 	s.sig = sigData // Assign the unmarshaled data
 	return nil

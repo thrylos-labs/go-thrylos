@@ -2,12 +2,6 @@
 
 package vm
 
-// import (
-// 	"fmt"
-
-// 	"github.com/thrylos-labs/go-thrylos/core/state"
-// )
-
 // // Contract interface - all smart contracts implement this
 // type Contract interface {
 // 	Execute(ctx *ContractContext) (*ContractResult, error)

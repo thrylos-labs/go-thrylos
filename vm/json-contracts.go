@@ -2,13 +2,7 @@
 
 package vm
 
-// import (
-// 	"encoding/json"
-// 	"fmt"
-
-// 	"github.com/thrylos-labs/go-thrylos/core/state"
-// 	// For Lua scripting
-// )
+// For Lua scripting
 
 // // Option 1: JSON Contract Interpreter
 // type JSONContractInterpreter struct {

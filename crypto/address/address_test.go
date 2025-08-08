@@ -1,22 +1,22 @@
 package address
 
 import (
-	"math/rand"
+	"crypto/ed25519"
+	"crypto/rand"
 	"strings"
 	"testing"
 
-	mldsa "github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNew(t *testing.T) {
-	seed := rand.New(rand.NewSource(1234))
-	pk, _, err := mldsa.GenerateKey(seed)
+	// Generate Ed25519 key pair
+	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("Failed to generate keys: %v", err)
 	}
 
-	address, err := New(pk)
+	address, err := New(pubKey)
 	require.NoError(t, err)
 	require.NotNil(t, address)
 
@@ -28,12 +28,8 @@ func TestNew(t *testing.T) {
 	// Test that it's valid bech32
 	require.NoError(t, Validate(addrStr), "First address should be valid")
 
-	// Test deterministic generation - same seed should produce same address
-	seed2 := rand.New(rand.NewSource(1234))
-	pk2, _, err := mldsa.GenerateKey(seed2)
-	require.NoError(t, err)
-
-	address2, err := New(pk2)
+	// Test deterministic generation - same key should produce same address
+	address2, err := New(pubKey)
 	require.NoError(t, err)
 
 	addrStr2 := address2.String()
@@ -42,14 +38,31 @@ func TestNew(t *testing.T) {
 	require.NoError(t, Validate(addrStr2), "Second address should be valid")
 
 	// Then compare them
-	require.Equal(t, addrStr, addrStr2, "Same seed should produce same address")
+	require.Equal(t, addrStr, addrStr2, "Same key should produce same address")
+}
+
+func TestNewWithNilKey(t *testing.T) {
+	// Test nil public key
+	_, err := New(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot be nil")
+
+	// Test empty public key
+	_, err = New(ed25519.PublicKey{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot be nil or empty")
+
+	// Test wrong size public key
+	wrongSize := make(ed25519.PublicKey, 16) // Should be 32 bytes
+	_, err = New(wrongSize)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid Ed25519 public key size")
 }
 
 func TestValidate(t *testing.T) {
 	// Generate a valid address for testing
-	seed := rand.New(rand.NewSource(1234))
-	pk, _, _ := mldsa.GenerateKey(seed)
-	validAddr, _ := New(pk)
+	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	validAddr, _ := New(pubKey)
 	validAddrStr := validAddr.String()
 
 	tests := []struct {
@@ -120,9 +133,8 @@ func TestValidate(t *testing.T) {
 
 func TestFromString(t *testing.T) {
 	// Generate a valid address for testing
-	seed := rand.New(rand.NewSource(1234))
-	pk, _, _ := mldsa.GenerateKey(seed)
-	validAddr, _ := New(pk)
+	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	validAddr, _ := New(pubKey)
 	validAddress := validAddr.String()
 
 	address, err := FromString(validAddress)
@@ -169,9 +181,8 @@ func TestFromBytes(t *testing.T) {
 
 func TestAddressMethods(t *testing.T) {
 	// Generate a test address
-	seed := rand.New(rand.NewSource(1234))
-	pk, _, _ := mldsa.GenerateKey(seed)
-	address, _ := New(pk)
+	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	address, _ := New(pubKey)
 	addr := address.String()
 
 	// Test String()
@@ -198,9 +209,8 @@ func TestAddressMethods(t *testing.T) {
 	require.True(t, address.Equal(address2))
 
 	// Create different address
-	seed2 := rand.New(rand.NewSource(5678))
-	pk2, _, _ := mldsa.GenerateKey(seed2)
-	differentAddr, _ := New(pk2)
+	pubKey2, _, _ := ed25519.GenerateKey(rand.Reader)
+	differentAddr, _ := New(pubKey2)
 	require.False(t, address.Equal(differentAddr))
 
 	// Test ToLower() and ToUpper()
@@ -211,9 +221,8 @@ func TestAddressMethods(t *testing.T) {
 }
 
 func TestAddressCopy(t *testing.T) {
-	seed := rand.New(rand.NewSource(1234))
-	pk, _, _ := mldsa.GenerateKey(seed)
-	original, _ := New(pk)
+	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	original, _ := New(pubKey)
 	copied := original.Copy()
 
 	require.True(t, original.Equal(copied))
@@ -225,9 +234,8 @@ func TestAddressCopy(t *testing.T) {
 }
 
 func TestAddressJSON(t *testing.T) {
-	seed := rand.New(rand.NewSource(1234))
-	pk, _, _ := mldsa.GenerateKey(seed)
-	address, _ := New(pk)
+	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	address, _ := New(pubKey)
 	addr := address.String()
 
 	// Test MarshalJSON
@@ -243,9 +251,8 @@ func TestAddressJSON(t *testing.T) {
 }
 
 func TestAddressCBOR(t *testing.T) {
-	seed := rand.New(rand.NewSource(1234))
-	pk, _, _ := mldsa.GenerateKey(seed)
-	address, _ := New(pk)
+	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	address, _ := New(pubKey)
 
 	// Test Marshal
 	data, err := address.Marshal()
@@ -260,12 +267,11 @@ func TestAddressCBOR(t *testing.T) {
 }
 
 func TestUtilityFunctions(t *testing.T) {
-	seed := rand.New(rand.NewSource(1234))
-	pk, _, err := mldsa.GenerateKey(seed)
+	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
 	// Test GenerateAddress
-	addrStr, err := GenerateAddress(pk)
+	addrStr, err := GenerateAddress(pubKey)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(addrStr, "tl1"))
 	require.Equal(t, 22, len(addrStr))
@@ -292,12 +298,11 @@ func TestNullAddress(t *testing.T) {
 }
 
 func TestConvertToAddress(t *testing.T) {
-	seed := rand.New(rand.NewSource(1234))
-	pk, _, err := mldsa.GenerateKey(seed)
+	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
 	// Test ConvertToAddress
-	addrStr, err := ConvertToAddress(pk)
+	addrStr, err := ConvertToAddress(pubKey)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(addrStr, "tl1"))
 	require.NoError(t, Validate(addrStr))
@@ -313,16 +318,16 @@ func TestAddressMetrics(t *testing.T) {
 	require.Equal(t, 22, metrics["estimated_str_length"])
 	require.Equal(t, "2^64", metrics["collision_resistance"])
 	require.Equal(t, false, metrics["case_sensitive"])
+	require.Equal(t, "Ed25519", metrics["crypto_scheme"])
 }
 
 func TestAddressLengthConsistency(t *testing.T) {
 	// Generate multiple addresses and verify consistent length
 	for i := 0; i < 10; i++ {
-		seed := rand.New(rand.NewSource(int64(i)))
-		pk, _, err := mldsa.GenerateKey(seed)
+		pubKey, _, err := ed25519.GenerateKey(rand.Reader)
 		require.NoError(t, err)
 
-		address, err := New(pk)
+		address, err := New(pubKey)
 		require.NoError(t, err)
 
 		addrStr := address.String()
@@ -333,9 +338,8 @@ func TestAddressLengthConsistency(t *testing.T) {
 }
 
 func TestBech32CaseInsensitivity(t *testing.T) {
-	seed := rand.New(rand.NewSource(1234))
-	pk, _, _ := mldsa.GenerateKey(seed)
-	address, _ := New(pk)
+	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	address, _ := New(pubKey)
 	original := address.String()
 
 	// Test that different cases are treated as equivalent
@@ -350,4 +354,84 @@ func TestBech32CaseInsensitivity(t *testing.T) {
 
 	// Should be equal when normalized
 	require.Equal(t, lowerAddr.String(), upperAddr.String())
+}
+
+func TestAddressDeterminism(t *testing.T) {
+	// Test that the same public key always produces the same address
+	// Create a fixed public key for deterministic testing
+	fixedSeed := make([]byte, ed25519.SeedSize)
+	for i := range fixedSeed {
+		fixedSeed[i] = byte(i)
+	}
+
+	privKey := ed25519.NewKeyFromSeed(fixedSeed)
+	pubKey := privKey.Public().(ed25519.PublicKey)
+
+	// Generate address multiple times
+	addr1, err := New(pubKey)
+	require.NoError(t, err)
+
+	addr2, err := New(pubKey)
+	require.NoError(t, err)
+
+	addr3, err := New(pubKey)
+	require.NoError(t, err)
+
+	// All should be identical
+	require.Equal(t, addr1.String(), addr2.String())
+	require.Equal(t, addr1.String(), addr3.String())
+	require.True(t, addr1.Equal(addr2))
+	require.True(t, addr1.Equal(addr3))
+}
+
+func TestAddressWithDifferentKeys(t *testing.T) {
+	// Test that different keys produce different addresses
+	pubKey1, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	pubKey2, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	addr1, err := New(pubKey1)
+	require.NoError(t, err)
+
+	addr2, err := New(pubKey2)
+	require.NoError(t, err)
+
+	// Should be different (extremely unlikely to be the same)
+	require.NotEqual(t, addr1.String(), addr2.String())
+	require.False(t, addr1.Equal(addr2))
+}
+
+func TestAddressRoundTrip(t *testing.T) {
+	// Test full round trip: key -> address -> string -> address -> bytes
+	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	// Key to address
+	originalAddr, err := New(pubKey)
+	require.NoError(t, err)
+
+	// Address to string
+	addrStr := originalAddr.String()
+
+	// String to address
+	parsedAddr, err := FromString(addrStr)
+	require.NoError(t, err)
+
+	// Compare addresses
+	require.True(t, originalAddr.Equal(parsedAddr))
+
+	// Address to bytes
+	originalBytes := originalAddr.Bytes()
+	parsedBytes := parsedAddr.Bytes()
+
+	// Compare bytes
+	require.Equal(t, originalBytes, parsedBytes)
+
+	// Bytes back to address
+	bytesAddr, err := FromBytes(originalBytes)
+	require.NoError(t, err)
+
+	require.True(t, originalAddr.Equal(bytesAddr))
 }
