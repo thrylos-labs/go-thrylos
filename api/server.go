@@ -116,38 +116,40 @@ func (s *Server) setupRoutes() {
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 
 	// Account endpoints
-	api.HandleFunc("/account/{address}/balance", s.getAccountBalance).Methods("GET")
-	api.HandleFunc("/account/{address}", s.getAccount).Methods("GET")
-	api.HandleFunc("/account/{address}/transactions", s.getAccountTransactions).Methods("GET")
-	api.HandleFunc("/account/{address}/delegations", s.getAccountDelegations).Methods("GET")
+	api.HandleFunc("/account/{address}/balance", s.getAccountBalance).Methods("GET", "OPTIONS")
+	api.HandleFunc("/account/{address}", s.getAccount).Methods("GET", "OPTIONS")
+	api.HandleFunc("/account/{address}/transactions", s.getAccountTransactions).Methods("GET", "OPTIONS")
+	api.HandleFunc("/account/{address}/delegations", s.getAccountDelegations).Methods("GET", "OPTIONS")
 
 	// Staking endpoints
-	api.HandleFunc("/account/{address}/stake", s.getAccountStake).Methods("GET")
-	api.HandleFunc("/account/{address}/rewards", s.getAccountRewards).Methods("GET")
+	api.HandleFunc("/account/{address}/stake", s.getAccountStake).Methods("GET", "OPTIONS")
+	api.HandleFunc("/account/{address}/rewards", s.getAccountRewards).Methods("GET", "OPTIONS")
 
-	// Development endpoints
-	api.HandleFunc("/fund", s.fundAddress).Methods("POST")
+	// Development endpoints - EXPLICITLY ADD OPTIONS
+	api.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
 
-	api.HandleFunc("/transaction/{hash}", s.getTransaction).Methods("GET")
-	api.HandleFunc("/transactions/pending", s.getPendingTransactions).Methods("GET")
-	api.HandleFunc("/block/{hash}", s.getBlockByHash).Methods("GET")
-	api.HandleFunc("/block/height/{height}", s.getBlockByHeight).Methods("GET")
-	api.HandleFunc("/block/latest", s.getLatestBlock).Methods("GET")
-	api.HandleFunc("/validator/{address}", s.getValidator).Methods("GET")
-	api.HandleFunc("/validators", s.getValidators).Methods("GET")
-	api.HandleFunc("/validators/active", s.getActiveValidators).Methods("GET")
-	api.HandleFunc("/status", s.getStatus).Methods("GET")
-	api.HandleFunc("/health", s.getHealth).Methods("GET")
-	api.HandleFunc("/estimate-gas", s.estimateGas).Methods("POST")
-	api.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST")
+	api.HandleFunc("/transaction/{hash}", s.getTransaction).Methods("GET", "OPTIONS")
+	api.HandleFunc("/transactions/pending", s.getPendingTransactions).Methods("GET", "OPTIONS")
+	api.HandleFunc("/block/{hash}", s.getBlockByHash).Methods("GET", "OPTIONS")
+	api.HandleFunc("/block/height/{height}", s.getBlockByHeight).Methods("GET", "OPTIONS")
+	api.HandleFunc("/block/latest", s.getLatestBlock).Methods("GET", "OPTIONS")
+	api.HandleFunc("/validator/{address}", s.getValidator).Methods("GET", "OPTIONS")
+	api.HandleFunc("/validators", s.getValidators).Methods("GET", "OPTIONS")
+	api.HandleFunc("/validators/active", s.getActiveValidators).Methods("GET", "OPTIONS")
+	api.HandleFunc("/status", s.getStatus).Methods("GET", "OPTIONS")
+	api.HandleFunc("/health", s.getHealth).Methods("GET", "OPTIONS")
+	api.HandleFunc("/estimate-gas", s.estimateGas).Methods("POST", "OPTIONS")
+	api.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
 
+	// Enhanced CORS configuration
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{
-			"http://localhost:3000", // React default
-			"http://localhost:5173", // Vite default
-			"http://localhost:8080", // Same origin
-			"http://127.0.0.1:5173", // Alternative localhost
-			"http://127.0.0.1:3000", // Alternative localhost
+			"http://localhost:3000",
+			"http://localhost:5173",
+			"http://localhost:8080",
+			"http://127.0.0.1:5173",
+			"http://127.0.0.1:3000",
+			"*", // Allow all origins for development - REMOVE IN PRODUCTION
 		},
 		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{
@@ -157,15 +159,31 @@ func (s *Server) setupRoutes() {
 			"Accept",
 			"Origin",
 			"X-Requested-With",
+			"Access-Control-Allow-Origin",
 		},
-		AllowCredentials: true, // Allow credentials if needed
-		Debug:            true, // Enable for development debugging
+		ExposedHeaders: []string{
+			"Content-Length",
+			"Access-Control-Allow-Origin",
+		},
+		AllowCredentials: true,
+		MaxAge:           86400, // 24 hours
+		Debug:            true,  // Enable for development debugging
 	})
 
 	// Apply CORS middleware to the entire router
 	s.router.Use(c.Handler)
 	s.router.Use(s.loggingMiddleware)
 	s.router.Use(s.jsonMiddleware)
+
+	// Add explicit OPTIONS handler for all routes
+	s.router.Methods("OPTIONS").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("OPTIONS request to: %s", r.URL.Path)
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		w.WriteHeader(http.StatusOK)
+	})
 }
 
 // Start starts the HTTP server
