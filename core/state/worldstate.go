@@ -196,8 +196,8 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 
 	ws := &WorldState{
 		config:         cfg,
-		db:             db,           // Use for blocks, transactions
-		state:          stateStorage, // Use for accounts, validators
+		db:             db,
+		state:          stateStorage,
 		accountManager: account.NewAccountManager(shardID, totalShards),
 		txPool:         transaction.NewPool(shardID, totalShards, cfg.Consensus.MaxTxPerBlock, cfg.Consensus.MinGasPrice),
 		txValidator:    transaction.NewValidator(shardID, totalShards, cfg),
@@ -1874,4 +1874,38 @@ func (ws *WorldState) UpdateValidatorWithStorage(validator *core.Validator) erro
 
 	// Persist to storage
 	return ws.state.SaveValidator(validator)
+}
+
+// Add to StakingManager in worldstate.go
+func (sm *StakingManager) ClaimRewards(delegatorAddr string) error {
+	ws := sm.worldState
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Validate address
+	if err := account.ValidateAddress(delegatorAddr); err != nil {
+		return fmt.Errorf("invalid delegator address: %v", err)
+	}
+
+	// Get delegator account
+	delegator, err := ws.accountManager.GetAccount(delegatorAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get delegator account: %v", err)
+	}
+
+	if delegator.Rewards <= 0 {
+		return fmt.Errorf("no rewards available to claim")
+	}
+
+	// Move rewards to balance
+	claimedAmount := delegator.Rewards
+	delegator.Balance += claimedAmount
+	delegator.Rewards = 0
+
+	// Update account
+	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
+		return fmt.Errorf("failed to update delegator account: %v", err)
+	}
+
+	return nil
 }

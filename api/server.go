@@ -124,6 +124,13 @@ func (s *Server) setupRoutes() {
 	// Staking endpoints
 	api.HandleFunc("/account/{address}/stake", s.getAccountStake).Methods("GET", "OPTIONS")
 	api.HandleFunc("/account/{address}/rewards", s.getAccountRewards).Methods("GET", "OPTIONS")
+	api.HandleFunc("/staking/stats", s.getStakingStats).Methods("GET", "OPTIONS")
+	api.HandleFunc("/staking/validators", s.getStakingValidators).Methods("GET", "OPTIONS")
+	api.HandleFunc("/staking/delegate", s.submitStakeTransaction).Methods("POST", "OPTIONS")
+	api.HandleFunc("/staking/undelegate", s.submitUnstakeTransaction).Methods("POST", "OPTIONS")
+	api.HandleFunc("/staking/claim", s.submitClaimTransaction).Methods("POST", "OPTIONS")
+	api.HandleFunc("/staking/delegations/{address}", s.getDelegationHistory).Methods("GET", "OPTIONS")
+	api.HandleFunc("/staking/rewards/{address}", s.getDetailedRewards).Methods("GET", "OPTIONS")
 
 	// Development endpoints - EXPLICITLY ADD OPTIONS
 	api.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
@@ -828,4 +835,401 @@ type loggingResponseWriter struct {
 func (lrw *loggingResponseWriter) WriteHeader(code int) {
 	lrw.statusCode = code
 	lrw.ResponseWriter.WriteHeader(code)
+}
+
+type StakingStatsResponse struct {
+	TotalStaked           int64   `json:"total_staked"`
+	AnnualPercentageYield float64 `json:"annual_percentage_yield"`
+	NextRewardTime        *int64  `json:"next_reward_time"`
+	UnbondingPeriod       int     `json:"unbonding_period"`
+	ActiveValidators      int     `json:"active_validators"`
+	TotalDelegators       int     `json:"total_delegators"`
+	AverageCommission     float64 `json:"average_commission"`
+}
+
+type StakingValidatorResponse struct {
+	Address        string  `json:"address"`
+	Name           string  `json:"name"`
+	Commission     float64 `json:"commission"`
+	TotalStaked    int64   `json:"totalStaked"`
+	Uptime         float64 `json:"uptime"`
+	Status         string  `json:"status"`
+	SelfStake      int64   `json:"self_stake"`
+	DelegatorCount int     `json:"delegator_count"`
+	BlocksProposed int64   `json:"blocks_proposed"`
+	BlocksMissed   int64   `json:"blocks_missed"`
+}
+
+type DelegationHistoryItem struct {
+	Validator string `json:"validator"`
+	Amount    int64  `json:"amount"`
+	Timestamp int64  `json:"timestamp"`
+	Status    string `json:"status"`
+	TxHash    string `json:"tx_hash"`
+	Action    string `json:"action"` // "delegate", "undelegate", "claim"
+}
+
+type DelegationHistoryResponse struct {
+	Address string                  `json:"address"`
+	History []DelegationHistoryItem `json:"history"`
+	Count   int                     `json:"count"`
+}
+
+// ========== ENDPOINT IMPLEMENTATIONS ==========
+
+// 1. Get staking statistics
+func (s *Server) getStakingStats(w http.ResponseWriter, r *http.Request) {
+	activeValidators := s.worldState.GetActiveValidators()
+	totalStaked := s.worldState.GetTotalStaked()
+	activeValidatorCount := len(activeValidators)
+
+	totalCommission := float64(0)
+	totalDelegators := 0
+
+	for _, validator := range activeValidators {
+		totalCommission += validator.Commission
+		totalDelegators += len(validator.Delegators)
+	}
+
+	averageCommission := float64(0)
+	if activeValidatorCount > 0 {
+		averageCommission = totalCommission / float64(activeValidatorCount)
+	}
+
+	// Base APY - you can get this from config if available
+	baseAPY := float64(8.5)
+
+	// Next reward time based on your block time
+	nextRewardTime := time.Now().Unix() + 200 // 200ms from your config
+
+	response := StakingStatsResponse{
+		TotalStaked:           totalStaked,
+		AnnualPercentageYield: baseAPY,
+		NextRewardTime:        &nextRewardTime,
+		UnbondingPeriod:       21, // Days
+		ActiveValidators:      activeValidatorCount,
+		TotalDelegators:       totalDelegators,
+		AverageCommission:     averageCommission,
+	}
+
+	s.writeJSON(w, response)
+}
+
+// 2. Get validators formatted for staking interface
+func (s *Server) getStakingValidators(w http.ResponseWriter, r *http.Request) {
+	activeValidators := s.worldState.GetActiveValidators()
+
+	var validators []StakingValidatorResponse
+	for _, validator := range activeValidators {
+		// Calculate uptime percentage
+		uptime := float64(100) // Default to 100%
+		if validator.BlocksProposed > 0 {
+			total := validator.BlocksProposed + validator.BlocksMissed
+			uptime = float64(validator.BlocksProposed) / float64(total) * 100
+		}
+
+		// Generate human-readable name
+		name := fmt.Sprintf("Validator %s", validator.Address[:12])
+
+		// Determine status
+		status := "active"
+		if validator.JailUntil > time.Now().Unix() {
+			status = "jailed"
+		} else if !validator.Active {
+			status = "inactive"
+		}
+
+		validatorResponse := StakingValidatorResponse{
+			Address:        validator.Address,
+			Name:           name,
+			Commission:     validator.Commission,
+			TotalStaked:    validator.Stake,
+			Uptime:         uptime,
+			Status:         status,
+			SelfStake:      validator.SelfStake,
+			DelegatorCount: len(validator.Delegators),
+			BlocksProposed: validator.BlocksProposed,
+			BlocksMissed:   validator.BlocksMissed,
+		}
+
+		validators = append(validators, validatorResponse)
+	}
+
+	response := map[string]interface{}{
+		"validators": validators,
+		"count":      len(validators),
+	}
+
+	s.writeJSON(w, response)
+}
+
+// 3. Submit staking/delegation transaction using your existing executor
+func (s *Server) submitStakeTransaction(w http.ResponseWriter, r *http.Request) {
+	var tx core.Transaction
+	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
+		s.writeError(w, "Invalid transaction format", http.StatusBadRequest)
+		return
+	}
+
+	// Your executor handles DELEGATE transactions
+	// Set the correct transaction type for your executor
+	tx.Type = core.TransactionType_DELEGATE
+
+	// Validate required fields
+	if tx.From == "" || tx.To == "" || tx.Amount <= 0 {
+		s.writeError(w, "Invalid staking transaction: missing required fields", http.StatusBadRequest)
+		return
+	}
+
+	// Validate signature
+	if len(tx.Signature) == 0 {
+		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
+		return
+	}
+
+	// Use your existing validation and execution system
+	if err := s.worldState.ValidateTransaction(&tx); err != nil {
+		s.writeError(w, fmt.Sprintf("Transaction validation failed: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Add to transaction pool - your executor will handle it when block is created
+	if err := s.worldState.AddTransaction(&tx); err != nil {
+		s.writeError(w, fmt.Sprintf("Failed to submit staking transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	response := map[string]interface{}{
+		"status":    "accepted",
+		"tx_hash":   tx.Hash,
+		"message":   "Delegation transaction submitted successfully",
+		"validator": tx.To,
+		"amount":    tx.Amount,
+	}
+
+	s.writeJSON(w, response)
+}
+
+// 4. Submit unstaking transaction
+func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request) {
+	var tx core.Transaction
+	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
+		s.writeError(w, "Invalid transaction format", http.StatusBadRequest)
+		return
+	}
+
+	// Set the correct transaction type for your executor
+	tx.Type = core.TransactionType_UNDELEGATE
+
+	// Validate required fields
+	if tx.From == "" || tx.To == "" || tx.Amount <= 0 {
+		s.writeError(w, "Invalid unstaking transaction: missing required fields", http.StatusBadRequest)
+		return
+	}
+
+	// Validate signature
+	if len(tx.Signature) == 0 {
+		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has enough delegated amount
+	account, err := s.worldState.GetAccount(tx.From)
+	if err != nil {
+		s.writeError(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	delegatedAmount := int64(0)
+	if account.DelegatedTo != nil {
+		if amount, exists := account.DelegatedTo[tx.To]; exists {
+			delegatedAmount = amount
+		}
+	}
+
+	if tx.Amount > delegatedAmount {
+		s.writeError(w, fmt.Sprintf("Insufficient delegation: have %d, need %d",
+			delegatedAmount, tx.Amount), http.StatusBadRequest)
+		return
+	}
+
+	// Use your existing validation and execution system
+	if err := s.worldState.ValidateTransaction(&tx); err != nil {
+		s.writeError(w, fmt.Sprintf("Transaction validation failed: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.worldState.AddTransaction(&tx); err != nil {
+		s.writeError(w, fmt.Sprintf("Failed to submit unstaking transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	response := map[string]interface{}{
+		"status":           "accepted",
+		"tx_hash":          tx.Hash,
+		"message":          "Undelegation transaction submitted successfully",
+		"validator":        tx.To,
+		"amount":           tx.Amount,
+		"unbonding_period": 0, // Your system uses liquid staking (immediate)
+	}
+
+	s.writeJSON(w, response)
+}
+
+// 5. Submit reward claiming transaction
+func (s *Server) submitClaimTransaction(w http.ResponseWriter, r *http.Request) {
+	var tx core.Transaction
+	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
+		s.writeError(w, "Invalid transaction format", http.StatusBadRequest)
+		return
+	}
+
+	// Set the correct transaction type for your executor
+	tx.Type = core.TransactionType_CLAIM_REWARDS
+
+	// For claim transactions, amount should be 0 (claims all available rewards)
+	tx.Amount = 0
+	tx.To = tx.From // Self-transaction for claiming
+
+	// Validate required fields
+	if tx.From == "" {
+		s.writeError(w, "Invalid claim transaction: missing sender", http.StatusBadRequest)
+		return
+	}
+
+	// Validate signature
+	if len(tx.Signature) == 0 {
+		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has rewards to claim
+	account, err := s.worldState.GetAccount(tx.From)
+	if err != nil {
+		s.writeError(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	if account.Rewards <= 0 {
+		s.writeError(w, "No rewards available to claim", http.StatusBadRequest)
+		return
+	}
+
+	// Use your existing validation and execution system
+	if err := s.worldState.ValidateTransaction(&tx); err != nil {
+		s.writeError(w, fmt.Sprintf("Transaction validation failed: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.worldState.AddTransaction(&tx); err != nil {
+		s.writeError(w, fmt.Sprintf("Failed to submit claim transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	response := map[string]interface{}{
+		"status":         "accepted",
+		"tx_hash":        tx.Hash,
+		"message":        "Claim transaction submitted successfully",
+		"claimed_amount": account.Rewards,
+	}
+
+	s.writeJSON(w, response)
+}
+
+// 6. Get delegation history
+func (s *Server) getDelegationHistory(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	address := vars["address"]
+
+	// Parse query parameters
+	limitStr := r.URL.Query().Get("limit")
+	limit := 50 // default limit
+	if limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 && parsedLimit <= 1000 {
+			limit = parsedLimit
+		}
+	}
+
+	// Get current delegations from account
+	var history []DelegationHistoryItem
+
+	account, err := s.worldState.GetAccount(address)
+	if err != nil {
+		// Account might not exist, return empty history
+		history = []DelegationHistoryItem{}
+	} else {
+		// Convert current delegations to history format
+		if account.DelegatedTo != nil {
+			for validator, amount := range account.DelegatedTo {
+				if len(history) >= limit {
+					break
+				}
+
+				history = append(history, DelegationHistoryItem{
+					Validator: validator,
+					Amount:    amount,
+					Timestamp: time.Now().Unix(),
+					Status:    "active",
+					TxHash:    "", // Would need transaction indexing for real tx hash
+					Action:    "delegate",
+				})
+			}
+		}
+	}
+
+	response := DelegationHistoryResponse{
+		Address: address,
+		History: history,
+		Count:   len(history),
+	}
+
+	s.writeJSON(w, response)
+}
+
+// 7. Get detailed rewards information
+func (s *Server) getDetailedRewards(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	address := vars["address"]
+
+	account, err := s.worldState.GetAccount(address)
+	if err != nil {
+		s.writeError(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	// Calculate estimated rewards based on current delegations
+	estimatedDaily := float64(0)
+	estimatedMonthly := float64(0)
+	estimatedAnnual := float64(0)
+
+	baseAPY := 8.5 / 100 // 8.5% annual yield
+
+	if account.DelegatedTo != nil {
+		for validatorAddr, stakedAmount := range account.DelegatedTo {
+			validator, err := s.worldState.GetValidator(validatorAddr)
+			if err != nil {
+				continue
+			}
+
+			// Calculate rewards considering validator commission
+			netAPY := baseAPY * (1 - validator.Commission/100)
+			annualReward := float64(stakedAmount) * netAPY
+
+			estimatedAnnual += annualReward
+			estimatedMonthly += annualReward / 12
+			estimatedDaily += annualReward / 365
+		}
+	}
+
+	response := map[string]interface{}{
+		"address":           address,
+		"current_rewards":   account.Rewards,
+		"estimated_daily":   int64(estimatedDaily),
+		"estimated_monthly": int64(estimatedMonthly),
+		"estimated_annual":  int64(estimatedAnnual),
+		"delegations":       account.DelegatedTo,
+		"staked_amount":     account.StakedAmount,
+	}
+
+	s.writeJSON(w, response)
 }
