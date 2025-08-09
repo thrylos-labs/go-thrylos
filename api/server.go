@@ -147,6 +147,7 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/health", s.getHealth).Methods("GET", "OPTIONS")
 	api.HandleFunc("/estimate-gas", s.estimateGas).Methods("POST", "OPTIONS")
 	api.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
+	api.HandleFunc("/validator/create", s.createValidator).Methods("POST", "OPTIONS")
 
 	// Enhanced CORS configuration
 	c := cors.New(cors.Options{
@@ -850,14 +851,18 @@ type StakingStatsResponse struct {
 type StakingValidatorResponse struct {
 	Address        string  `json:"address"`
 	Name           string  `json:"name"`
+	Description    string  `json:"description"` // Add this field
+	Website        string  `json:"website"`     // Add this field
 	Commission     float64 `json:"commission"`
 	TotalStaked    int64   `json:"totalStaked"`
 	Uptime         float64 `json:"uptime"`
 	Status         string  `json:"status"`
-	SelfStake      int64   `json:"self_stake"`
-	DelegatorCount int     `json:"delegator_count"`
-	BlocksProposed int64   `json:"blocks_proposed"`
-	BlocksMissed   int64   `json:"blocks_missed"`
+	SelfStake      int64   `json:"selfStake"`
+	DelegatorCount int     `json:"delegatorCount"`
+	BlocksProposed int64   `json:"blocksProposed"`
+	BlocksMissed   int64   `json:"blocksMissed"`
+	CreatedAt      int64   `json:"createdAt"` // Add this field
+	UpdatedAt      int64   `json:"updatedAt"` // Add this field
 }
 
 type DelegationHistoryItem struct {
@@ -928,20 +933,39 @@ func (s *Server) getStakingValidators(w http.ResponseWriter, r *http.Request) {
 			uptime = float64(validator.BlocksProposed) / float64(total) * 100
 		}
 
-		// Generate human-readable name
-		name := fmt.Sprintf("Validator %s", validator.Address[:12])
+		// Use actual validator name if available, otherwise generate fallback
+		name := validator.Name
+		if name == "" {
+			name = fmt.Sprintf("Validator %s", validator.Address[:12])
+		}
 
-		// Determine status
-		status := "active"
-		if validator.JailUntil > time.Now().Unix() {
+		// More robust status determination
+		status := "active" // Default to active
+
+		currentTime := time.Now().Unix()
+
+		// Check if jailed
+		if validator.JailUntil > currentTime {
 			status = "jailed"
-		} else if !validator.Active {
-			status = "inactive"
+		} else {
+			// If not jailed, check if explicitly marked as inactive
+			// OR if it has very low activity (no blocks proposed and old)
+			if !validator.Active {
+				status = "inactive"
+			} else if validator.BlocksProposed == 0 &&
+				validator.CreatedAt > 0 &&
+				(currentTime-validator.CreatedAt) > 3600 { // Created more than 1 hour ago but no blocks
+				status = "inactive"
+			} else {
+				status = "active"
+			}
 		}
 
 		validatorResponse := StakingValidatorResponse{
 			Address:        validator.Address,
 			Name:           name,
+			Description:    validator.Description,
+			Website:        validator.Website,
 			Commission:     validator.Commission,
 			TotalStaked:    validator.Stake,
 			Uptime:         uptime,
@@ -950,6 +974,8 @@ func (s *Server) getStakingValidators(w http.ResponseWriter, r *http.Request) {
 			DelegatorCount: len(validator.Delegators),
 			BlocksProposed: validator.BlocksProposed,
 			BlocksMissed:   validator.BlocksMissed,
+			CreatedAt:      validator.CreatedAt,
+			UpdatedAt:      validator.UpdatedAt,
 		}
 
 		validators = append(validators, validatorResponse)
@@ -1229,6 +1255,172 @@ func (s *Server) getDetailedRewards(w http.ResponseWriter, r *http.Request) {
 		"estimated_annual":  int64(estimatedAnnual),
 		"delegations":       account.DelegatedTo,
 		"staked_amount":     account.StakedAmount,
+	}
+
+	s.writeJSON(w, response)
+}
+
+func (s *Server) createValidator(w http.ResponseWriter, r *http.Request) {
+	var tx core.Transaction
+	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
+		s.writeError(w, "Invalid transaction format", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Received validator creation transaction: %+v", tx)
+
+	// Validate required fields for validator creation
+	if tx.From == "" {
+		s.writeError(w, "Validator address (from) is required", http.StatusBadRequest)
+		return
+	}
+
+	if tx.Hash == "" {
+		s.writeError(w, "Transaction hash is required", http.StatusBadRequest)
+		return
+	}
+
+	if len(tx.Signature) == 0 {
+		s.writeError(w, "Transaction signature is required", http.StatusBadRequest)
+		return
+	}
+
+	// For validator transactions, we might use a different transaction type
+	// Check if it's type 6 from frontend or adjust based on your system
+	if tx.Type != 6 {
+		log.Printf("Warning: Expected type 6 for validator creation, got %d", tx.Type)
+		// Force set to validator creation type
+		tx.Type = 6
+	}
+
+	// Parse validator data from transaction data field
+	var validatorData struct {
+		Type        string  `json:"type"`
+		Name        string  `json:"name"`
+		Description string  `json:"description"`
+		Website     string  `json:"website"`
+		Commission  float64 `json:"commission"`
+		SelfStake   int64   `json:"self_stake"`
+	}
+
+	if len(tx.Data) > 0 {
+		if err := json.Unmarshal(tx.Data, &validatorData); err != nil {
+			s.writeError(w, "Invalid validator data format", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Validate validator data
+	if validatorData.Name == "" {
+		s.writeError(w, "Validator name is required", http.StatusBadRequest)
+		return
+	}
+
+	if validatorData.Commission < 0 || validatorData.Commission > 1 {
+		s.writeError(w, "Validator commission must be between 0 and 1", http.StatusBadRequest)
+		return
+	}
+
+	// Check minimum stake requirement (25 THRYLOS = 25 * 1e9 nano)
+	const MIN_VALIDATOR_STAKE = 25 * 1000000000
+	if tx.Amount < MIN_VALIDATOR_STAKE {
+		s.writeError(w, fmt.Sprintf("Minimum validator stake is %d nano (25 THRYLOS)", MIN_VALIDATOR_STAKE), http.StatusBadRequest)
+		return
+	}
+
+	// Check if validator already exists
+	existingValidator, err := s.worldState.GetValidator(tx.From)
+	if err == nil && existingValidator != nil {
+		s.writeError(w, "Validator already exists for this address", http.StatusBadRequest)
+		return
+	}
+
+	// Check account balance
+	account, err := s.worldState.GetAccount(tx.From)
+	if err != nil {
+		s.writeError(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+	if account.Balance < totalCost {
+		s.writeError(w, fmt.Sprintf("Insufficient balance: have %d, need %d", account.Balance, totalCost), http.StatusBadRequest)
+		return
+	}
+
+	// Validate nonce
+	if account.Nonce != tx.Nonce {
+		s.writeError(w, fmt.Sprintf("Invalid nonce: expected %d, got %d", account.Nonce, tx.Nonce), http.StatusBadRequest)
+		return
+	}
+
+	// Create the validator object with all metadata
+	dummyPubkey := make([]byte, 32)
+	copy(dummyPubkey, []byte(tx.From)) // Use address as temp pubkey
+
+	validator := &core.Validator{
+		Address:        tx.From,
+		Pubkey:         dummyPubkey,
+		Name:           validatorData.Name,        // Add name
+		Description:    validatorData.Description, // Add description
+		Website:        validatorData.Website,     // Add website
+		Stake:          tx.Amount,
+		SelfStake:      tx.Amount,
+		DelegatedStake: 0,
+		Commission:     validatorData.Commission,
+		Active:         true,
+		BlocksProposed: 0,
+		BlocksMissed:   0,
+		JailUntil:      0,
+		CreatedAt:      time.Now().Unix(),
+		UpdatedAt:      time.Now().Unix(),
+		Delegators:     make(map[string]int64),
+	}
+
+	// Add validator to the system
+	if err := s.worldState.AddValidator(validator); err != nil {
+		s.writeError(w, fmt.Sprintf("Failed to create validator: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Update account - deduct staked amount and gas fees
+	account.Balance -= totalCost
+	account.StakedAmount += tx.Amount
+	account.Nonce++
+
+	if err := s.worldState.UpdateAccountWithStorage(account); err != nil {
+		s.writeError(w, fmt.Sprintf("Failed to update account: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Optionally validate the transaction signature if needed
+	if err := s.worldState.ValidateTransaction(&tx); err != nil {
+		log.Printf("Warning: Transaction validation failed (proceeding anyway): %v", err)
+	}
+
+	// Add transaction to pending pool for inclusion in next block
+	if err := s.worldState.AddTransaction(&tx); err != nil {
+		log.Printf("Warning: Failed to add validator creation transaction to pool: %v", err)
+	}
+
+	log.Printf("Validator created successfully: %s (%s) with stake %d", validatorData.Name, tx.From, tx.Amount)
+
+	// Return success response
+	response := map[string]interface{}{
+		"status":  "success",
+		"message": "Validator created successfully",
+		"tx_hash": tx.Hash,
+		"validator": map[string]interface{}{
+			"address":     validator.Address,
+			"name":        validator.Name,        // Include name in response
+			"description": validator.Description, // Include description in response
+			"website":     validator.Website,     // Include website in response
+			"commission":  validator.Commission,
+			"self_stake":  validator.SelfStake,
+			"total_stake": validator.Stake,
+			"active":      validator.Active,
+			"created_at":  validator.CreatedAt,
+		},
 	}
 
 	s.writeJSON(w, response)

@@ -567,17 +567,20 @@ type Validator struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Address        string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
 	Pubkey         []byte                 `protobuf:"bytes,2,opt,name=pubkey,proto3" json:"pubkey,omitempty"`
-	Stake          int64                  `protobuf:"varint,3,opt,name=stake,proto3" json:"stake,omitempty"`
-	SelfStake      int64                  `protobuf:"varint,4,opt,name=self_stake,json=selfStake,proto3" json:"self_stake,omitempty"`
-	DelegatedStake int64                  `protobuf:"varint,5,opt,name=delegated_stake,json=delegatedStake,proto3" json:"delegated_stake,omitempty"`
-	Delegators     map[string]int64       `protobuf:"bytes,6,rep,name=delegators,proto3" json:"delegators,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"` // delegator address -> amount
-	Commission     float64                `protobuf:"fixed64,7,opt,name=commission,proto3" json:"commission,omitempty"`                                                                          // commission rate (0.0 to 1.0)
-	Active         bool                   `protobuf:"varint,8,opt,name=active,proto3" json:"active,omitempty"`
-	BlocksProposed int64                  `protobuf:"varint,9,opt,name=blocks_proposed,json=blocksProposed,proto3" json:"blocks_proposed,omitempty"`
-	BlocksMissed   int64                  `protobuf:"varint,10,opt,name=blocks_missed,json=blocksMissed,proto3" json:"blocks_missed,omitempty"`
-	JailUntil      int64                  `protobuf:"varint,11,opt,name=jail_until,json=jailUntil,proto3" json:"jail_until,omitempty"` // Unix timestamp, 0 means not jailed
-	CreatedAt      int64                  `protobuf:"varint,12,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // When validator was created
-	UpdatedAt      int64                  `protobuf:"varint,13,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // Last update timestamp
+	Name           string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`               // Add validator name
+	Description    string                 `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"` // Add validator description
+	Website        string                 `protobuf:"bytes,5,opt,name=website,proto3" json:"website,omitempty"`         // Add validator website
+	Stake          int64                  `protobuf:"varint,6,opt,name=stake,proto3" json:"stake,omitempty"`            // Updated field numbers
+	SelfStake      int64                  `protobuf:"varint,7,opt,name=self_stake,json=selfStake,proto3" json:"self_stake,omitempty"`
+	DelegatedStake int64                  `protobuf:"varint,8,opt,name=delegated_stake,json=delegatedStake,proto3" json:"delegated_stake,omitempty"`
+	Delegators     map[string]int64       `protobuf:"bytes,9,rep,name=delegators,proto3" json:"delegators,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"` // delegator address -> amount
+	Commission     float64                `protobuf:"fixed64,10,opt,name=commission,proto3" json:"commission,omitempty"`                                                                         // commission rate (0.0 to 1.0)
+	Active         bool                   `protobuf:"varint,11,opt,name=active,proto3" json:"active,omitempty"`
+	BlocksProposed int64                  `protobuf:"varint,12,opt,name=blocks_proposed,json=blocksProposed,proto3" json:"blocks_proposed,omitempty"`
+	BlocksMissed   int64                  `protobuf:"varint,13,opt,name=blocks_missed,json=blocksMissed,proto3" json:"blocks_missed,omitempty"`
+	JailUntil      int64                  `protobuf:"varint,14,opt,name=jail_until,json=jailUntil,proto3" json:"jail_until,omitempty"` // Unix timestamp, 0 means not jailed
+	CreatedAt      int64                  `protobuf:"varint,15,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // When validator was created
+	UpdatedAt      int64                  `protobuf:"varint,16,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // Last update timestamp
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -624,6 +627,27 @@ func (x *Validator) GetPubkey() []byte {
 		return x.Pubkey
 	}
 	return nil
+}
+
+func (x *Validator) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Validator) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *Validator) GetWebsite() string {
+	if x != nil {
+		return x.Website
+	}
+	return ""
 }
 
 func (x *Validator) GetStake() int64 {
@@ -816,30 +840,33 @@ const file_proto_account_proto_rawDesc = "" +
 	"\n" +
 	"total_fees\x18\v \x01(\x03R\ttotalFees\x12\x1f\n" +
 	"\vmerkle_root\x18\f \x01(\tR\n" +
-	"merkleRoot\"\x86\x04\n" +
+	"merkleRoot\"\xd6\x04\n" +
 	"\tValidator\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x16\n" +
-	"\x06pubkey\x18\x02 \x01(\fR\x06pubkey\x12\x14\n" +
-	"\x05stake\x18\x03 \x01(\x03R\x05stake\x12\x1d\n" +
+	"\x06pubkey\x18\x02 \x01(\fR\x06pubkey\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x04 \x01(\tR\vdescription\x12\x18\n" +
+	"\awebsite\x18\x05 \x01(\tR\awebsite\x12\x14\n" +
+	"\x05stake\x18\x06 \x01(\x03R\x05stake\x12\x1d\n" +
 	"\n" +
-	"self_stake\x18\x04 \x01(\x03R\tselfStake\x12'\n" +
-	"\x0fdelegated_stake\x18\x05 \x01(\x03R\x0edelegatedStake\x12G\n" +
+	"self_stake\x18\a \x01(\x03R\tselfStake\x12'\n" +
+	"\x0fdelegated_stake\x18\b \x01(\x03R\x0edelegatedStake\x12G\n" +
 	"\n" +
-	"delegators\x18\x06 \x03(\v2'.thrylos.core.Validator.DelegatorsEntryR\n" +
+	"delegators\x18\t \x03(\v2'.thrylos.core.Validator.DelegatorsEntryR\n" +
 	"delegators\x12\x1e\n" +
 	"\n" +
-	"commission\x18\a \x01(\x01R\n" +
+	"commission\x18\n" +
+	" \x01(\x01R\n" +
 	"commission\x12\x16\n" +
-	"\x06active\x18\b \x01(\bR\x06active\x12'\n" +
-	"\x0fblocks_proposed\x18\t \x01(\x03R\x0eblocksProposed\x12#\n" +
-	"\rblocks_missed\x18\n" +
-	" \x01(\x03R\fblocksMissed\x12\x1d\n" +
+	"\x06active\x18\v \x01(\bR\x06active\x12'\n" +
+	"\x0fblocks_proposed\x18\f \x01(\x03R\x0eblocksProposed\x12#\n" +
+	"\rblocks_missed\x18\r \x01(\x03R\fblocksMissed\x12\x1d\n" +
 	"\n" +
-	"jail_until\x18\v \x01(\x03R\tjailUntil\x12\x1d\n" +
+	"jail_until\x18\x0e \x01(\x03R\tjailUntil\x12\x1d\n" +
 	"\n" +
-	"created_at\x18\f \x01(\x03R\tcreatedAt\x12\x1d\n" +
+	"created_at\x18\x0f \x01(\x03R\tcreatedAt\x12\x1d\n" +
 	"\n" +
-	"updated_at\x18\r \x01(\x03R\tupdatedAt\x1a=\n" +
+	"updated_at\x18\x10 \x01(\x03R\tupdatedAt\x1a=\n" +
 	"\x0fDelegatorsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\x8d\x01\n" +

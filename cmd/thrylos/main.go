@@ -3,7 +3,6 @@ package main
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"flag"
 	"fmt"
@@ -40,18 +39,6 @@ func getNodeSpecificPrivateKey(nodeID int) (crypto.PrivateKey, error) {
 	return crypto.NewPrivateKeyFromEd25519(ed25519PrivKey), nil
 }
 
-// Alternative approach using direct key generation if deterministic isn't needed
-func getNodeSpecificPrivateKeyRandom(nodeID int) (crypto.PrivateKey, error) {
-	// Generate a random Ed25519 key pair
-	_, ed25519PrivKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate Ed25519 key: %v", err)
-	}
-
-	// Return the private key using your existing constructor
-	return crypto.NewPrivateKeyFromEd25519(ed25519PrivKey), nil
-}
-
 // getNodeSpecificPrivateKeyFromBytes creates private key from raw bytes
 func getNodeSpecificPrivateKeyFromBytes(nodeID int) (crypto.PrivateKey, error) {
 	// Create a node-specific seed
@@ -68,10 +55,38 @@ func getNodeSpecificPrivateKeyFromBytes(nodeID int) (crypto.PrivateKey, error) {
 }
 
 // createAllValidators generates all validator info for shared genesis
+// createAllValidators generates all validator info for shared genesis
 func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.PrivateKey, []string, error) {
 	validators := make([]*core.Validator, 0)
 	privateKeys := make([]crypto.PrivateKey, 0)
 	addresses := make([]string, 0)
+
+	// Define validator metadata for each node
+	validatorMetadata := map[int]struct {
+		Name        string
+		Description string
+		Website     string
+		Commission  float64
+	}{
+		1: {
+			Name:        "Iron Peak",
+			Description: "Standing strong as the unshakeable foundation of Thrylos",
+			Website:     "https://thrylos.org",
+			Commission:  0.05, // 5%
+		},
+		2: {
+			Name:        "Storm Rider",
+			Description: "Harnessing the power of digital storms to drive the network forward",
+			Website:     "https://thrylos.org",
+			Commission:  0.08, // 8%
+		},
+		3: {
+			Name:        "Crystal Weaver",
+			Description: "Weaving perfect crystal lattices of trust and verification",
+			Website:     "https://thrylos.org",
+			Commission:  0.10, // 10%
+		},
+	}
 
 	// Create validators for nodes 1, 2, and 3
 	for nodeID := 1; nodeID <= 3; nodeID++ {
@@ -91,14 +106,20 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 			return nil, nil, nil, fmt.Errorf("failed to generate address for node %d: %v", nodeID, err)
 		}
 
-		// Create validator
+		// Get metadata for this validator
+		metadata := validatorMetadata[nodeID]
+
+		// Create validator with proper metadata
 		validator := &core.Validator{
 			Address:        address,
 			Pubkey:         privateKey.PublicKey().Bytes(),
+			Name:           metadata.Name,        // Add name
+			Description:    metadata.Description, // Add description
+			Website:        metadata.Website,     // Add website
 			Stake:          cfg.Staking.MinValidatorStake,
 			SelfStake:      cfg.Staking.MinValidatorStake,
 			DelegatedStake: 0,
-			Commission:     0.1,
+			Commission:     metadata.Commission, // Use custom commission
 			Active:         true,
 			Delegators:     make(map[string]int64),
 			CreatedAt:      time.Now().Unix(),
@@ -108,6 +129,10 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 		validators = append(validators, validator)
 		privateKeys = append(privateKeys, privateKey)
 		addresses = append(addresses, address)
+
+		// Log validator creation with name
+		fmt.Printf("🏛️  Created genesis validator: %s (%s) with %.1f%% commission\n",
+			metadata.Name, address, metadata.Commission*100)
 	}
 
 	return validators, privateKeys, addresses, nil

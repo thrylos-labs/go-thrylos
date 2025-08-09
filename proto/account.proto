@@ -66,17 +66,20 @@ message BlockHeader {
 message Validator {
   string address = 1;
   bytes pubkey = 2;
-  int64 stake = 3;
-  int64 self_stake = 4;
-  int64 delegated_stake = 5;
-  map<string, int64> delegators = 6; // delegator address -> amount
-  double commission = 7; // commission rate (0.0 to 1.0)
-  bool active = 8;
-  int64 blocks_proposed = 9;
-  int64 blocks_missed = 10;
-  int64 jail_until = 11; // Unix timestamp, 0 means not jailed
-  int64 created_at = 12; // When validator was created
-  int64 updated_at = 13; // Last update timestamp
+  string name = 3; // Add validator name
+  string description = 4; // Add validator description
+  string website = 5; // Add validator website
+  int64 stake = 6; // Updated field numbers
+  int64 self_stake = 7;
+  int64 delegated_stake = 8;
+  map<string, int64> delegators = 9; // delegator address -> amount
+  double commission = 10; // commission rate (0.0 to 1.0)
+  bool active = 11;
+  int64 blocks_proposed = 12;
+  int64 blocks_missed = 13;
+  int64 jail_until = 14; // Unix timestamp, 0 means not jailed
+  int64 created_at = 15; // When validator was created
+  int64 updated_at = 16; // Last update timestamp
 }
 
 // You might also want to add validator-related transaction types
