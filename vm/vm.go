@@ -709,26 +709,6 @@ func (vm *ThrylosVM) executeClaimRewards(op *VMOperation) (*ExecutionResult, err
 	}, nil
 }
 
-// Custom contract execution (simplified scripting)
-func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, error) {
-	contractGas := int64(200000)
-	vm.gasUsed += contractGas
-
-	// Simple script execution (you could expand this with RISC-V or WASM)
-	// For now, just return success for demonstration
-	return &ExecutionResult{
-		Success: true,
-		GasUsed: vm.gasUsed,
-		Events: []Event{{
-			Type: "contract_executed",
-			Data: map[string]interface{}{
-				"contract": string(op.Data),
-				"from":     op.From,
-			},
-		}},
-	}, nil
-}
-
 // Integration with transaction executor
 
 func (vm *ThrylosVM) ExecuteVMTransaction(tx *core.Transaction) (*ExecutionResult, error) {
@@ -1211,4 +1191,197 @@ func CreateCrossShardTransferOperation(from, to string, amount, gas int64) *VMOp
 		Amount: amount,
 		Gas:    gas,
 	}
+}
+
+// Updated custom contract execution with RISC-V integration
+
+// RISC-V Custom Contract execution for Thrylos VM
+func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, error) {
+	baseGas := int64(200000)
+	vm.gasUsed += baseGas
+
+	// Validate custom contract parameters
+	if err := vm.validateCustomContract(op); err != nil {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   err.Error(),
+		}, nil
+	}
+
+	// Check if we have contract bytecode
+	if len(op.Data) == 0 {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   "no contract bytecode provided",
+		}, nil
+	}
+
+	// Create state snapshot for rollback capability
+	snapshot := vm.worldState.CreateSnapshot()
+
+	// Calculate available gas for contract execution
+	availableGas := op.Gas - vm.gasUsed
+	if availableGas <= 0 {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   "insufficient gas for contract execution",
+		}, nil
+	}
+
+	// Create RISC-V engine
+	riscvEngine := NewRISCVEngine()
+	defer riscvEngine.Reset()
+
+	// Set up contract API for blockchain interactions
+	contractGasUsed := int64(0)
+	api := &ContractAPI{
+		vm:       vm,
+		caller:   op.From,
+		gasUsed:  &contractGasUsed,
+		maxGas:   availableGas,
+		callLog:  make([]APICall, 0),
+		snapshot: snapshot,
+	}
+
+	// Provide blockchain API to RISC-V contract
+	riscvEngine.SetAPI(api)
+
+	// Load contract bytecode into RISC-V engine
+	if err := riscvEngine.Load(op.Data); err != nil {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("failed to load contract bytecode: %v", err),
+		}, nil
+	}
+
+	// Execute RISC-V contract with gas limit
+	result, err := riscvEngine.Execute(availableGas)
+	if err != nil {
+		// Rollback state on execution error
+		vm.worldState.RestoreFromSnapshot(snapshot)
+
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("RISC-V contract execution failed: %v", err),
+		}, nil
+	}
+
+	// Add contract gas usage to total VM gas
+	vm.gasUsed += result.GasUsed
+
+	// Check if contract execution was successful
+	if !result.Success {
+		// Rollback state on contract failure
+		vm.worldState.RestoreFromSnapshot(snapshot)
+
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("contract execution failed: %s", result.Error),
+		}, nil
+	}
+
+	// Convert API calls and contract events to VM events
+	events := vm.convertContractEvents(api.callLog, result, op.From)
+
+	return &ExecutionResult{
+		Success:    true,
+		GasUsed:    vm.gasUsed,
+		ReturnData: result.ReturnData,
+		Events:     events,
+	}, nil
+}
+
+// Helper method to convert contract API calls to VM events
+func (vm *ThrylosVM) convertContractEvents(apiCalls []APICall, result *RISCVResult, caller string) []Event {
+	events := make([]Event, 0)
+
+	// Add main contract execution event
+	events = append(events, Event{
+		Type: "custom_contract_executed",
+		Data: map[string]interface{}{
+			"caller":      caller,
+			"gas_used":    result.GasUsed,
+			"success":     result.Success,
+			"return_data": string(result.ReturnData),
+			"api_calls":   len(apiCalls),
+		},
+	})
+
+	// Convert API calls to events
+	for _, call := range apiCalls {
+		switch call.Function {
+		case "emit_event":
+			// Extract custom events emitted by contract
+			if eventName, ok := call.Parameters["event_name"].(string); ok {
+				if eventData, ok := call.Parameters["data"].(map[string]interface{}); ok {
+					events = append(events, Event{
+						Type: eventName,
+						Data: eventData,
+					})
+				}
+			}
+
+		case "transfer":
+			// Add transfer events from contract
+			events = append(events, Event{
+				Type: "contract_transfer",
+				Data: map[string]interface{}{
+					"from":    caller,
+					"to":      call.Parameters["to"],
+					"amount":  call.Parameters["amount"],
+					"success": call.Result,
+				},
+			})
+
+		case "get_balance", "get_token_balance":
+			// Add balance query events for debugging/monitoring
+			events = append(events, Event{
+				Type: "contract_balance_query",
+				Data: map[string]interface{}{
+					"address": call.Parameters["address"],
+					"balance": call.Result,
+					"type":    call.Function,
+				},
+			})
+		}
+	}
+
+	return events
+}
+
+// Validation method for custom contracts
+func (vm *ThrylosVM) validateCustomContract(op *VMOperation) error {
+	// Check bytecode size limits (1MB max)
+	maxBytecodeSize := int64(1024 * 1024)
+	if int64(len(op.Data)) > maxBytecodeSize {
+		return fmt.Errorf("contract bytecode too large: %d bytes (max %d)",
+			len(op.Data), maxBytecodeSize)
+	}
+
+	// Check minimum gas requirement
+	minGas := int64(250000) // Higher minimum for RISC-V execution
+	if op.Gas < minGas {
+		return fmt.Errorf("insufficient gas for contract execution: %d (min %d)",
+			op.Gas, minGas)
+	}
+
+	// Validate caller has sufficient balance for gas costs
+	balance, err := vm.worldState.GetBalance(op.From)
+	if err != nil {
+		return fmt.Errorf("failed to get caller balance: %v", err)
+	}
+
+	estimatedCost := op.Gas * vm.gasPrice
+	if balance < estimatedCost {
+		return fmt.Errorf("insufficient balance for gas costs: have %d, need %d",
+			balance, estimatedCost)
+	}
+
+	return nil
 }
