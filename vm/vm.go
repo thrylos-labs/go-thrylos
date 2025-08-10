@@ -245,6 +245,32 @@ func (vm *ThrylosVM) executeTransfer(op *VMOperation) (*ExecutionResult, error) 
 	}, nil
 }
 
+// GetGasPrice returns the current gas price
+func (vm *ThrylosVM) GetGasPrice() int64 {
+	return vm.gasPrice
+}
+
+// GetGasLimit returns the current gas limit
+func (vm *ThrylosVM) GetGasLimit() int64 {
+	return vm.gasLimit
+}
+
+// SafeExecute wraps Execute with panic recovery (you already have this, but ensure it's exported)
+func (vm *ThrylosVM) SafeExecute(op *VMOperation) (result *ExecutionResult, err error) {
+	defer func() {
+		if r := vm.RecoverFromPanic(); r != nil {
+			result = &ExecutionResult{
+				Success: false,
+				Error:   fmt.Sprintf("VM panic: %v", r),
+				GasUsed: vm.gasUsed,
+			}
+			err = fmt.Errorf("VM execution panic: %v", r)
+		}
+	}()
+
+	return vm.Execute(op)
+}
+
 func (vm *ThrylosVM) executeStake(op *VMOperation) (*ExecutionResult, error) {
 	stakeGas := int64(50000) // Staking operation cost
 	vm.gasUsed += stakeGas
@@ -1108,22 +1134,6 @@ func (vm *ThrylosVM) RecoverFromPanic() interface{} {
 		return r
 	}
 	return nil
-}
-
-// SafeExecute wraps Execute with panic recovery
-func (vm *ThrylosVM) SafeExecute(op *VMOperation) (result *ExecutionResult, err error) {
-	defer func() {
-		if r := vm.RecoverFromPanic(); r != nil {
-			result = &ExecutionResult{
-				Success: false,
-				Error:   fmt.Sprintf("VM panic: %v", r),
-				GasUsed: vm.gasUsed,
-			}
-			err = fmt.Errorf("VM execution panic: %v", r)
-		}
-	}()
-
-	return vm.Execute(op)
 }
 
 // Utility methods for operation creation

@@ -60,7 +60,7 @@ func NewAPIManagerWithConfig(worldState *state.WorldState, config *APIManagerCon
 	}
 
 	return &APIManager{
-		server:     NewServerWithConfig(worldState, serverConfig),
+		server:     NewServerWithServerConfig(worldState, serverConfig), // Use the new function
 		worldState: worldState,
 		ctx:        ctx,
 		cancel:     cancel,
