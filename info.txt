@@ -9,13 +9,16 @@ go build -o bin/thrylos ./cmd/thrylos && ./bin/thrylos --node=1 --api=false
 TO DO 
 
 🎯 Next Steps for Production:
+Move the staking and validator create to just use the VM instead
+Decentralised Storage Network could be an option
+Anti rug pull added to custom smart contracts and operations 
+Validator data isn't updating correctlt
+When sending a transactions, the gas says N/A on the front end
 Consensus.proto - Use for the consensus
 Make sure the database is used correctly 
 
 .THR - Wallet usernames
-Multi-node Testing - Start multiple nodes with different ports
-Wallet Integration - External wallets can submit transactions
-.env.dev & .env.prod - need to be created or not? 
+
 Ask Claude to act as an Audit person to audit the blockchain for vulnabilities 
 
 
