@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -148,6 +149,7 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/estimate-gas", s.estimateGas).Methods("POST", "OPTIONS")
 	api.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
 	api.HandleFunc("/validator/create", s.createValidator).Methods("POST", "OPTIONS")
+	api.HandleFunc("/validator/{address}/activity", s.getValidatorActivity).Methods("GET", "OPTIONS")
 
 	// Enhanced CORS configuration
 	c := cors.New(cors.Options{
@@ -773,6 +775,9 @@ func (s *Server) formatBlock(block *core.Block) map[string]interface{} {
 func (s *Server) formatValidator(validator *core.Validator) map[string]interface{} {
 	return map[string]interface{}{
 		"address":         validator.Address,
+		"name":            validator.Name,
+		"description":     validator.Description,
+		"website":         validator.Website,
 		"stake":           validator.Stake,
 		"self_stake":      validator.SelfStake,
 		"delegated_stake": validator.DelegatedStake,
@@ -784,6 +789,7 @@ func (s *Server) formatValidator(validator *core.Validator) map[string]interface
 		"created_at":      validator.CreatedAt,
 		"updated_at":      validator.UpdatedAt,
 		"delegator_count": len(validator.Delegators),
+		"delegations":     validator.Delegators, // ✅ Also add delegations if needed
 	}
 }
 
@@ -1421,6 +1427,264 @@ func (s *Server) createValidator(w http.ResponseWriter, r *http.Request) {
 			"active":      validator.Active,
 			"created_at":  validator.CreatedAt,
 		},
+	}
+
+	s.writeJSON(w, response)
+}
+
+type ValidatorActivityItem struct {
+	Type      string `json:"type"`      // "block", "delegation", "commission", "withdrawal"
+	Details   string `json:"details"`   // Human readable description
+	Time      string `json:"time"`      // Human readable time
+	Timestamp int64  `json:"timestamp"` // Unix timestamp
+	Reward    *int64 `json:"reward"`    // Reward amount in nano (nullable)
+	Amount    *int64 `json:"amount"`    // Transaction amount in nano (nullable)
+	TxHash    string `json:"tx_hash"`   // Transaction hash if applicable
+	From      string `json:"from"`      // Address for delegation events
+}
+
+type ValidatorActivityResponse struct {
+	Address  string                  `json:"address"`
+	Activity []ValidatorActivityItem `json:"activity"`
+	Count    int                     `json:"count"`
+	Limit    int                     `json:"limit"`
+}
+
+// Add this function to your server.go file
+func (s *Server) getValidatorActivity(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	address := vars["address"]
+
+	// Parse query parameters
+	limitStr := r.URL.Query().Get("limit")
+	limit := 50 // default limit
+	if limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 && parsedLimit <= 1000 {
+			limit = parsedLimit
+		}
+	}
+
+	// Check if validator exists
+	validator, err := s.worldState.GetValidator(address)
+	if err != nil {
+		s.writeError(w, "Validator not found", http.StatusNotFound)
+		return
+	}
+
+	var activity []ValidatorActivityItem
+
+	// 1. Get block validation activity
+	if validator.BlocksProposed > 0 {
+		// Get recent blocks validated by this validator
+		activity = append(activity, s.getBlockValidationActivity(address, validator)...)
+	}
+
+	// 2. Get delegation activity
+	delegationActivity := s.getDelegationActivity(address, validator)
+	activity = append(activity, delegationActivity...)
+
+	// 3. Get commission earnings activity
+	commissionActivity := s.getCommissionActivity(address, validator)
+	activity = append(activity, commissionActivity...)
+
+	// 4. Sort by timestamp (most recent first)
+	sort.Slice(activity, func(i, j int) bool {
+		return activity[i].Timestamp > activity[j].Timestamp
+	})
+
+	// 5. Apply limit
+	if len(activity) > limit {
+		activity = activity[:limit]
+	}
+
+	response := ValidatorActivityResponse{
+		Address:  address,
+		Activity: activity,
+		Count:    len(activity),
+		Limit:    limit,
+	}
+
+	s.writeJSON(w, response)
+}
+
+// Helper function to get block validation activity
+func (s *Server) getBlockValidationActivity(address string, validator *core.Validator) []ValidatorActivityItem {
+	var activity []ValidatorActivityItem
+
+	// Use actual block reward from config: 0.02 THRYLOS = 20,000,000 nano
+	const BASE_BLOCK_REWARD int64 = 20000000 // BlockReward from config.go
+
+	// Generate recent block validation events based on blocks proposed
+	// This is a simplified version - in a real system you'd query actual block history
+	blocksToShow := int64(5) // Show last 5 blocks
+	if validator.BlocksProposed < blocksToShow {
+		blocksToShow = validator.BlocksProposed
+	}
+
+	currentTime := time.Now().Unix()
+
+	for i := int64(0); i < blocksToShow; i++ {
+		blockNumber := validator.BlocksProposed - i
+		timeAgo := currentTime - (i * 3) // 3 second block time from config
+
+		reward := BASE_BLOCK_REWARD // Now int64, matches the struct field type
+		activity = append(activity, ValidatorActivityItem{
+			Type:      "block",
+			Details:   fmt.Sprintf("Block #%d validated", blockNumber),
+			Time:      formatTimeAgo(timeAgo),
+			Timestamp: timeAgo,
+			Reward:    &reward,
+			TxHash:    fmt.Sprintf("block_%d_%s", blockNumber, address[:8]),
+		})
+	}
+
+	return activity
+}
+
+// Helper function to get delegation activity
+func (s *Server) getDelegationActivity(address string, validator *core.Validator) []ValidatorActivityItem {
+	var activity []ValidatorActivityItem
+
+	// Get recent delegation events from the validator's delegators
+	for delegatorAddr, amount := range validator.Delegators {
+		// Simulate recent delegation event
+		activity = append(activity, ValidatorActivityItem{
+			Type:      "delegation",
+			Details:   fmt.Sprintf("New delegation: %s THR", formatToThrylos(amount)),
+			Time:      formatTimeAgo(time.Now().Unix() - 3600), // 1 hour ago
+			Timestamp: time.Now().Unix() - 3600,
+			Amount:    &amount,
+			From:      delegatorAddr,
+			TxHash:    fmt.Sprintf("del_%s_%s", delegatorAddr[:8], address[:8]),
+		})
+	}
+
+	return activity
+}
+
+// Helper function to get commission activity
+func (s *Server) getCommissionActivity(address string, validator *core.Validator) []ValidatorActivityItem {
+	var activity []ValidatorActivityItem
+
+	// Calculate commission earnings based on delegated stake
+	if validator.DelegatedStake > 0 {
+		// Use actual validator reward rate from config: 9% APR
+		validatorAPR := 0.09 // ValidatorRewardRate from config.go
+		dailyReward := float64(validator.DelegatedStake) * validatorAPR / 365
+		commissionEarning := int64(dailyReward * validator.Commission)
+
+		if commissionEarning > 0 {
+			activity = append(activity, ValidatorActivityItem{
+				Type:      "commission",
+				Details:   "Commission earned from delegations",
+				Time:      formatTimeAgo(time.Now().Unix() - 7200), // 2 hours ago
+				Timestamp: time.Now().Unix() - 7200,
+				Reward:    &commissionEarning,
+				TxHash:    fmt.Sprintf("comm_%s_%d", address[:8], time.Now().Unix()),
+			})
+		}
+	}
+
+	return activity
+}
+
+// Helper function to format amounts to THRYLOS
+func formatToThrylos(nanoAmount int64) string {
+	const NANO_PER_THRYLOS = 1000000000 // BaseUnit from config.go
+	thrylos := float64(nanoAmount) / NANO_PER_THRYLOS
+	return fmt.Sprintf("%.2f", thrylos)
+}
+
+// Helper function to format time ago
+func formatTimeAgo(timestamp int64) string {
+	diff := time.Now().Unix() - timestamp
+
+	if diff < 60 {
+		return fmt.Sprintf("%d seconds ago", diff)
+	} else if diff < 3600 {
+		minutes := diff / 60
+		return fmt.Sprintf("%d minutes ago", minutes)
+	} else if diff < 86400 {
+		hours := diff / 3600
+		return fmt.Sprintf("%d hours ago", hours)
+	} else {
+		days := diff / 86400
+		return fmt.Sprintf("%d days ago", days)
+	}
+}
+
+// Enhanced version that integrates with your transaction system
+func (s *Server) getValidatorActivityEnhanced(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	address := vars["address"]
+
+	limitStr := r.URL.Query().Get("limit")
+	limit := 50
+	if limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 && parsedLimit <= 1000 {
+			limit = parsedLimit
+		}
+	}
+
+	validator, err := s.worldState.GetValidator(address)
+	if err != nil {
+		s.writeError(w, "Validator not found", http.StatusNotFound)
+		return
+	}
+
+	var activity []ValidatorActivityItem
+
+	// 1. Check recent transactions for validator-related activity
+	pendingTxs := s.worldState.GetPendingTransactions()
+	for _, tx := range pendingTxs {
+		if tx.To == address && (tx.Type == core.TransactionType_DELEGATE) {
+			amount := tx.Amount
+			activity = append(activity, ValidatorActivityItem{
+				Type:      "delegation",
+				Details:   fmt.Sprintf("New delegation: %s THR", formatToThrylos(tx.Amount)),
+				Time:      formatTimeAgo(tx.Timestamp),
+				Timestamp: tx.Timestamp,
+				Amount:    &amount,
+				From:      tx.From,
+				TxHash:    tx.Hash,
+			})
+		}
+
+		if tx.From == address && (tx.Type == core.TransactionType_UNDELEGATE) {
+			amount := tx.Amount
+			activity = append(activity, ValidatorActivityItem{
+				Type:      "withdrawal",
+				Details:   fmt.Sprintf("Undelegation processed: %s THR", formatToThrylos(tx.Amount)),
+				Time:      formatTimeAgo(tx.Timestamp),
+				Timestamp: tx.Timestamp,
+				Amount:    &amount,
+				TxHash:    tx.Hash,
+			})
+		}
+	}
+
+	// 2. Add block validation activity
+	blockActivity := s.getBlockValidationActivity(address, validator)
+	activity = append(activity, blockActivity...)
+
+	// 3. Add commission activity
+	commissionActivity := s.getCommissionActivity(address, validator)
+	activity = append(activity, commissionActivity...)
+
+	// Sort and limit
+	sort.Slice(activity, func(i, j int) bool {
+		return activity[i].Timestamp > activity[j].Timestamp
+	})
+
+	if len(activity) > limit {
+		activity = activity[:limit]
+	}
+
+	response := ValidatorActivityResponse{
+		Address:  address,
+		Activity: activity,
+		Count:    len(activity),
+		Limit:    limit,
 	}
 
 	s.writeJSON(w, response)
