@@ -10,6 +10,7 @@ package state
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -65,6 +66,25 @@ type WorldState struct {
 
 	// Synchronization
 	mu sync.RWMutex
+
+	assets        map[string]*AssetToken      // assetID -> asset
+	assetBalances map[string]map[string]int64 // assetID -> (address -> balance)
+	assetRegistry map[string]string           // assetID -> cr
+}
+
+type AssetToken struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	AssetType        string `json:"asset_type"`     // "supply_chain", "carbon_credit", etc.
+	RealWorldRef     string `json:"real_world_ref"` // Required reference to physical asset
+	MaxDecimals      int32  `json:"max_decimals"`   // Capped at 4
+	TotalSupply      int64  `json:"total_supply"`
+	Creator          string `json:"creator"`
+	Transferable     bool   `json:"transferable"`      // Some assets shouldn't be tradeable
+	RequiresApproval bool   `json:"requires_approval"` // KYC/compliance gating
+	ExpirationDate   *int64 `json:"expiration_date"`   // Optional expiration
+	RegulatoryInfo   string `json:"regulatory_info"`   // Compliance metadata
+	CreatedAt        int64  `json:"created_at"`
 }
 
 // InitializeFromConfig initializes the world state with config-driven genesis data
@@ -209,6 +229,9 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 		totalSupply:    cfg.Economics.GenesisSupply,
 		totalStaked:    0,
 		lastTimestamp:  time.Now().Unix(),
+		assets:         make(map[string]*AssetToken),
+		assetBalances:  make(map[string]map[string]int64),
+		assetRegistry:  make(map[string]string),
 	}
 
 	// Try to load existing state from storage
@@ -867,6 +890,10 @@ func (ws *WorldState) ValidateStateConsistency() error {
 
 	if ws.stateRoot != originalRoot {
 		return fmt.Errorf("state root mismatch: stored=%s, calculated=%s", originalRoot, ws.stateRoot)
+	}
+	// Validate asset consistency (ADD THIS)
+	if err := ws.ValidateAssetConsistency(); err != nil {
+		return fmt.Errorf("asset state validation failed: %v", err)
 	}
 
 	return nil
@@ -1743,6 +1770,11 @@ func (ws *WorldState) SaveState() error {
 		}
 	}
 
+	// Save assets (ADD THIS)
+	if err := ws.SaveAssetsToStorage(); err != nil {
+		return fmt.Errorf("failed to save assets: %v", err)
+	}
+
 	return nil
 }
 
@@ -1814,6 +1846,12 @@ func (ws *WorldState) LoadState() error {
 	ws.totalStaked = totalStaked
 
 	fmt.Printf("✅ LoadState: State loaded successfully\n")
+	// Load assets (ADD THIS)
+	if err := ws.LoadAssetsFromStorage(); err != nil {
+		fmt.Printf("🔍 LoadState: Warning - could not load assets: %v\n", err)
+		// Don't fail - assets might not exist yet
+	}
+
 	return nil
 }
 
@@ -1905,6 +1943,650 @@ func (sm *StakingManager) ClaimRewards(delegatorAddr string) error {
 	// Update account
 	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
 		return fmt.Errorf("failed to update delegator account: %v", err)
+	}
+
+	return nil
+}
+
+// StoreAsset stores an asset token in the world state
+func (ws *WorldState) StoreAsset(asset *AssetToken) error {
+	if asset == nil {
+		return fmt.Errorf("asset cannot be nil")
+	}
+
+	if asset.ID == "" {
+		return fmt.Errorf("asset ID cannot be empty")
+	}
+
+	// Initialize maps if needed
+	if ws.assets == nil {
+		ws.assets = make(map[string]*AssetToken)
+	}
+	if ws.assetBalances == nil {
+		ws.assetBalances = make(map[string]map[string]int64)
+	}
+	if ws.assetRegistry == nil {
+		ws.assetRegistry = make(map[string]string)
+	}
+
+	// Check if asset already exists
+	if _, exists := ws.assets[asset.ID]; exists {
+		return fmt.Errorf("asset %s already exists", asset.ID)
+	}
+
+	// Store asset
+	ws.assets[asset.ID] = asset
+	ws.assetBalances[asset.ID] = make(map[string]int64)
+	ws.assetRegistry[asset.ID] = asset.Creator
+
+	// Persist to storage
+	assetData, err := json.Marshal(asset)
+	if err != nil {
+		return fmt.Errorf("failed to marshal asset: %v", err)
+	}
+
+	// Save to state storage with key prefix
+	key := fmt.Sprintf("asset:%s", asset.ID)
+	if err := ws.state.SaveRawData(key, assetData); err != nil {
+		return fmt.Errorf("failed to save asset to storage: %v", err)
+	}
+
+	// Save asset registry entry
+	registryKey := fmt.Sprintf("asset_registry:%s", asset.ID)
+	if err := ws.state.SaveRawData(registryKey, []byte(asset.Creator)); err != nil {
+		return fmt.Errorf("failed to save asset registry: %v", err)
+	}
+
+	return nil
+}
+
+// GetAsset retrieves an asset by ID
+func (ws *WorldState) GetAsset(assetID string) (*AssetToken, error) {
+	if assetID == "" {
+		return nil, fmt.Errorf("asset ID cannot be empty")
+	}
+
+	// Check memory first
+	if ws.assets != nil {
+		if asset, exists := ws.assets[assetID]; exists {
+			return asset, nil
+		}
+	}
+
+	// Load from storage
+	key := fmt.Sprintf("asset:%s", assetID)
+	assetData, err := ws.state.GetRawData(key)
+	if err != nil {
+		return nil, fmt.Errorf("asset %s not found: %v", assetID, err)
+	}
+
+	var asset AssetToken
+	if err := json.Unmarshal(assetData, &asset); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal asset: %v", err)
+	}
+
+	// Cache in memory
+	if ws.assets == nil {
+		ws.assets = make(map[string]*AssetToken)
+	}
+	ws.assets[assetID] = &asset
+
+	return &asset, nil
+}
+
+// DeleteAsset removes an asset from the world state
+func (ws *WorldState) DeleteAsset(assetID string) error {
+	if assetID == "" {
+		return fmt.Errorf("asset ID cannot be empty")
+	}
+
+	// Remove from memory
+	if ws.assets != nil {
+		delete(ws.assets, assetID)
+	}
+	if ws.assetBalances != nil {
+		delete(ws.assetBalances, assetID)
+	}
+	if ws.assetRegistry != nil {
+		delete(ws.assetRegistry, assetID)
+	}
+
+	// Remove from storage
+	key := fmt.Sprintf("asset:%s", assetID)
+	if err := ws.state.DeleteRawData(key); err != nil {
+		return fmt.Errorf("failed to delete asset from storage: %v", err)
+	}
+
+	// Remove registry entry
+	registryKey := fmt.Sprintf("asset_registry:%s", assetID)
+	if err := ws.state.DeleteRawData(registryKey); err != nil {
+		return fmt.Errorf("failed to delete asset registry: %v", err)
+	}
+
+	return nil
+}
+
+// SetAssetBalance sets the balance of an asset for an address
+func (ws *WorldState) SetAssetBalance(assetID, address string, balance int64) error {
+	if assetID == "" {
+		return fmt.Errorf("asset ID cannot be empty")
+	}
+	if address == "" {
+		return fmt.Errorf("address cannot be empty")
+	}
+	if balance < 0 {
+		return fmt.Errorf("balance cannot be negative")
+	}
+
+	// Validate address format
+	if err := account.ValidateAddress(address); err != nil {
+		return fmt.Errorf("invalid address: %v", err)
+	}
+
+	// Check asset exists
+	if _, err := ws.GetAsset(assetID); err != nil {
+		return fmt.Errorf("asset does not exist: %v", err)
+	}
+
+	// Initialize maps if needed
+	if ws.assetBalances == nil {
+		ws.assetBalances = make(map[string]map[string]int64)
+	}
+	if ws.assetBalances[assetID] == nil {
+		ws.assetBalances[assetID] = make(map[string]int64)
+	}
+
+	// Set balance
+	if balance == 0 {
+		delete(ws.assetBalances[assetID], address)
+	} else {
+		ws.assetBalances[assetID][address] = balance
+	}
+
+	// Persist to storage
+	balanceKey := fmt.Sprintf("asset_balance:%s:%s", assetID, address)
+	if balance == 0 {
+		// Remove balance entry
+		if err := ws.state.DeleteRawData(balanceKey); err != nil {
+			return fmt.Errorf("failed to delete asset balance: %v", err)
+		}
+	} else {
+		balanceData := make([]byte, 8)
+		binary.BigEndian.PutUint64(balanceData, uint64(balance))
+		if err := ws.state.SaveRawData(balanceKey, balanceData); err != nil {
+			return fmt.Errorf("failed to save asset balance: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// GetAssetBalance gets the balance of an asset for an address
+func (ws *WorldState) GetAssetBalance(assetID, address string) (int64, error) {
+	if assetID == "" {
+		return 0, fmt.Errorf("asset ID cannot be empty")
+	}
+	if address == "" {
+		return 0, fmt.Errorf("address cannot be empty")
+	}
+
+	// Validate address format
+	if err := account.ValidateAddress(address); err != nil {
+		return 0, fmt.Errorf("invalid address: %v", err)
+	}
+
+	// Check memory first
+	if ws.assetBalances != nil {
+		if balances, exists := ws.assetBalances[assetID]; exists {
+			if balance, exists := balances[address]; exists {
+				return balance, nil
+			}
+		}
+	}
+
+	// Load from storage
+	balanceKey := fmt.Sprintf("asset_balance:%s:%s", assetID, address)
+	balanceData, err := ws.state.GetRawData(balanceKey)
+	if err != nil {
+		// No balance found = 0 balance
+		return 0, nil
+	}
+
+	if len(balanceData) != 8 {
+		return 0, fmt.Errorf("invalid balance data length")
+	}
+
+	balance := int64(binary.BigEndian.Uint64(balanceData))
+
+	// Cache in memory
+	if ws.assetBalances == nil {
+		ws.assetBalances = make(map[string]map[string]int64)
+	}
+	if ws.assetBalances[assetID] == nil {
+		ws.assetBalances[assetID] = make(map[string]int64)
+	}
+	ws.assetBalances[assetID][address] = balance
+
+	return balance, nil
+}
+
+// TransferAssetBalance transfers asset tokens between addresses
+func (ws *WorldState) TransferAssetBalance(assetID, from, to string, amount int64) error {
+	if amount <= 0 {
+		return fmt.Errorf("transfer amount must be positive")
+	}
+
+	// Get current balances
+	fromBalance, err := ws.GetAssetBalance(assetID, from)
+	if err != nil {
+		return fmt.Errorf("failed to get sender balance: %v", err)
+	}
+
+	if fromBalance < amount {
+		return fmt.Errorf("insufficient balance: have %d, need %d", fromBalance, amount)
+	}
+
+	toBalance, err := ws.GetAssetBalance(assetID, to)
+	if err != nil {
+		return fmt.Errorf("failed to get recipient balance: %v", err)
+	}
+
+	// Check for overflow
+	if toBalance > 0 && toBalance > (9223372036854775807-amount) {
+		return fmt.Errorf("transfer would cause balance overflow")
+	}
+
+	// Perform transfer
+	if err := ws.SetAssetBalance(assetID, from, fromBalance-amount); err != nil {
+		return fmt.Errorf("failed to update sender balance: %v", err)
+	}
+
+	if err := ws.SetAssetBalance(assetID, to, toBalance+amount); err != nil {
+		// Rollback sender balance on failure
+		ws.SetAssetBalance(assetID, from, fromBalance)
+		return fmt.Errorf("failed to update recipient balance: %v", err)
+	}
+
+	return nil
+}
+
+// AddAssetToRegistry adds an asset to the registry for tracking
+func (ws *WorldState) AddAssetToRegistry(assetID, creator, assetType string) error {
+	if assetID == "" {
+		return fmt.Errorf("asset ID cannot be empty")
+	}
+	if creator == "" {
+		return fmt.Errorf("creator cannot be empty")
+	}
+
+	// Validate creator address
+	if err := account.ValidateAddress(creator); err != nil {
+		return fmt.Errorf("invalid creator address: %v", err)
+	}
+
+	// Initialize registry if needed
+	if ws.assetRegistry == nil {
+		ws.assetRegistry = make(map[string]string)
+	}
+
+	// Add to registry
+	ws.assetRegistry[assetID] = creator
+
+	// Persist to storage
+	registryKey := fmt.Sprintf("asset_registry:%s", assetID)
+	registryData := fmt.Sprintf("%s:%s", creator, assetType)
+	if err := ws.state.SaveRawData(registryKey, []byte(registryData)); err != nil {
+		return fmt.Errorf("failed to save asset registry: %v", err)
+	}
+
+	return nil
+}
+
+// GetAssetsByCreator returns all assets created by an address
+func (ws *WorldState) GetAssetsByCreator(creator string) ([]*AssetToken, error) {
+	if creator == "" {
+		return nil, fmt.Errorf("creator address cannot be empty")
+	}
+
+	// Validate address format
+	if err := account.ValidateAddress(creator); err != nil {
+		return nil, fmt.Errorf("invalid creator address: %v", err)
+	}
+
+	var assets []*AssetToken
+
+	// Check registry for assets by this creator
+	if ws.assetRegistry != nil {
+		for assetID, assetCreator := range ws.assetRegistry {
+			if assetCreator == creator {
+				asset, err := ws.GetAsset(assetID)
+				if err == nil {
+					assets = append(assets, asset)
+				}
+			}
+		}
+	}
+
+	// Also scan storage for assets (in case registry is incomplete)
+	// This is a more expensive operation but ensures completeness
+	allAssets, err := ws.GetAllAssets()
+	if err != nil {
+		return assets, nil // Return what we found from registry
+	}
+
+	assetMap := make(map[string]bool)
+	for _, asset := range assets {
+		assetMap[asset.ID] = true
+	}
+
+	for _, asset := range allAssets {
+		if asset.Creator == creator && !assetMap[asset.ID] {
+			assets = append(assets, asset)
+		}
+	}
+
+	return assets, nil
+}
+
+// GetAllAssets returns all assets in the system
+func (ws *WorldState) GetAllAssets() ([]*AssetToken, error) {
+	var assets []*AssetToken
+
+	// Get all assets from storage
+	// This requires implementing a method to scan storage with prefix
+	// For now, return from memory cache
+	if ws.assets != nil {
+		for _, asset := range ws.assets {
+			assets = append(assets, asset)
+		}
+	}
+
+	return assets, nil
+}
+
+// ValidateAssetOperation validates if an asset operation is allowed
+func (ws *WorldState) ValidateAssetOperation(assetID, operation, address string) error {
+	asset, err := ws.GetAsset(assetID)
+	if err != nil {
+		return fmt.Errorf("asset not found: %v", err)
+	}
+
+	// Check expiration
+	if asset.ExpirationDate != nil && *asset.ExpirationDate <= time.Now().Unix() {
+		return fmt.Errorf("asset %s has expired", assetID)
+	}
+
+	switch operation {
+	case "transfer":
+		if !asset.Transferable {
+			return fmt.Errorf("asset %s is not transferable", assetID)
+		}
+
+	case "mint":
+		// Only creator can mint (in this implementation)
+		if address != asset.Creator {
+			return fmt.Errorf("only asset creator can mint tokens")
+		}
+
+	case "burn":
+		// Only token holder or creator can burn
+		balance, err := ws.GetAssetBalance(assetID, address)
+		if err != nil {
+			return fmt.Errorf("failed to check balance: %v", err)
+		}
+		if balance == 0 && address != asset.Creator {
+			return fmt.Errorf("no balance to burn")
+		}
+
+	default:
+		return fmt.Errorf("unknown operation: %s", operation)
+	}
+
+	return nil
+}
+
+// GetAssetInfo returns comprehensive information about an asset
+func (ws *WorldState) GetAssetInfo(assetID string) (map[string]interface{}, error) {
+	asset, err := ws.GetAsset(assetID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Calculate total supply in circulation
+	circulatingSupply := int64(0)
+	if ws.assetBalances != nil && ws.assetBalances[assetID] != nil {
+		for _, balance := range ws.assetBalances[assetID] {
+			circulatingSupply += balance
+		}
+	}
+
+	// Count holders
+	holderCount := 0
+	if ws.assetBalances != nil && ws.assetBalances[assetID] != nil {
+		for _, balance := range ws.assetBalances[assetID] {
+			if balance > 0 {
+				holderCount++
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"id":                 asset.ID,
+		"name":               asset.Name,
+		"asset_type":         asset.AssetType,
+		"real_world_ref":     asset.RealWorldRef,
+		"max_decimals":       asset.MaxDecimals,
+		"total_supply":       asset.TotalSupply,
+		"circulating_supply": circulatingSupply,
+		"creator":            asset.Creator,
+		"transferable":       asset.Transferable,
+		"requires_approval":  asset.RequiresApproval,
+		"expiration_date":    asset.ExpirationDate,
+		"regulatory_info":    asset.RegulatoryInfo,
+		"created_at":         asset.CreatedAt,
+		"holder_count":       holderCount,
+		"expired":            asset.ExpirationDate != nil && *asset.ExpirationDate <= time.Now().Unix(),
+	}, nil
+}
+
+// GetAssetHolders returns all holders of an asset
+func (ws *WorldState) GetAssetHolders(assetID string) (map[string]int64, error) {
+	// Check asset exists
+	if _, err := ws.GetAsset(assetID); err != nil {
+		return nil, err
+	}
+
+	holders := make(map[string]int64)
+
+	// Get from memory first
+	if ws.assetBalances != nil && ws.assetBalances[assetID] != nil {
+		for address, balance := range ws.assetBalances[assetID] {
+			if balance > 0 {
+				holders[address] = balance
+			}
+		}
+	}
+
+	return holders, nil
+}
+
+// UpdateAsset updates an existing asset (limited fields)
+func (ws *WorldState) UpdateAsset(asset *AssetToken) error {
+	if asset == nil {
+		return fmt.Errorf("asset cannot be nil")
+	}
+
+	// Check asset exists
+	existing, err := ws.GetAsset(asset.ID)
+	if err != nil {
+		return fmt.Errorf("asset not found: %v", err)
+	}
+
+	// Only allow updating certain fields
+	updated := *existing
+	updated.RegulatoryInfo = asset.RegulatoryInfo // Allow regulatory updates
+	// Don't allow changing: ID, Creator, TotalSupply, AssetType, etc.
+
+	// Store updated asset
+	if ws.assets == nil {
+		ws.assets = make(map[string]*AssetToken)
+	}
+	ws.assets[asset.ID] = &updated
+
+	// Persist to storage
+	assetData, err := json.Marshal(&updated)
+	if err != nil {
+		return fmt.Errorf("failed to marshal asset: %v", err)
+	}
+
+	key := fmt.Sprintf("asset:%s", asset.ID)
+	if err := ws.state.SaveRawData(key, assetData); err != nil {
+		return fmt.Errorf("failed to save asset to storage: %v", err)
+	}
+
+	return nil
+}
+
+// InitializeAssetMaps initializes asset-related maps (call in NewWorldState)
+func (ws *WorldState) InitializeAssetMaps() {
+	if ws.assets == nil {
+		ws.assets = make(map[string]*AssetToken)
+	}
+	if ws.assetBalances == nil {
+		ws.assetBalances = make(map[string]map[string]int64)
+	}
+	if ws.assetRegistry == nil {
+		ws.assetRegistry = make(map[string]string)
+	}
+}
+
+// LoadAssetsFromStorage loads all assets from storage (call in LoadState)
+func (ws *WorldState) LoadAssetsFromStorage() error {
+	ws.InitializeAssetMaps()
+
+	// Load all assets (this requires implementing storage prefix scanning)
+	// For now, this is a placeholder that would need storage support
+
+	// In a full implementation, you'd scan storage with prefix "asset:"
+	// and load all asset data into memory maps
+
+	return nil
+}
+
+// SaveAssetsToStorage saves all assets to storage (call in SaveState)
+func (ws *WorldState) SaveAssetsToStorage() error {
+	// Assets are saved individually when created/updated
+	// This method could be used for batch operations or consistency checks
+
+	if ws.assets == nil {
+		return nil
+	}
+
+	for assetID, asset := range ws.assets {
+		assetData, err := json.Marshal(asset)
+		if err != nil {
+			return fmt.Errorf("failed to marshal asset %s: %v", assetID, err)
+		}
+
+		key := fmt.Sprintf("asset:%s", assetID)
+		if err := ws.state.SaveRawData(key, assetData); err != nil {
+			return fmt.Errorf("failed to save asset %s: %v", assetID, err)
+		}
+	}
+
+	return nil
+}
+
+// GetAssetStatistics returns system-wide asset statistics
+func (ws *WorldState) GetAssetStatistics() map[string]interface{} {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	stats := map[string]interface{}{
+		"total_assets":  0,
+		"asset_types":   make(map[string]int),
+		"total_holders": 0,
+		"total_supply":  int64(0),
+	}
+
+	if ws.assets == nil {
+		return stats
+	}
+
+	assetTypes := make(map[string]int)
+	totalHolders := 0
+	totalSupply := int64(0)
+
+	for _, asset := range ws.assets {
+		assetTypes[asset.AssetType]++
+		totalSupply += asset.TotalSupply
+
+		// Count holders for this asset
+		if ws.assetBalances != nil && ws.assetBalances[asset.ID] != nil {
+			for _, balance := range ws.assetBalances[asset.ID] {
+				if balance > 0 {
+					totalHolders++
+				}
+			}
+		}
+	}
+
+	stats["total_assets"] = len(ws.assets)
+	stats["asset_types"] = assetTypes
+	stats["total_holders"] = totalHolders
+	stats["total_supply"] = totalSupply
+
+	return stats
+}
+
+// ValidateAssetConsistency validates asset state consistency
+func (ws *WorldState) ValidateAssetConsistency() error {
+	if ws.assets == nil {
+		return nil // No assets to validate
+	}
+
+	for assetID, asset := range ws.assets {
+		// Validate asset structure
+		if asset.ID != assetID {
+			return fmt.Errorf("asset ID mismatch: key=%s, asset.ID=%s", assetID, asset.ID)
+		}
+
+		if asset.TotalSupply < 0 {
+			return fmt.Errorf("asset %s has negative total supply: %d", assetID, asset.TotalSupply)
+		}
+
+		// Validate asset balances don't exceed total supply
+		if ws.assetBalances != nil && ws.assetBalances[assetID] != nil {
+			circulatingSupply := int64(0)
+			for address, balance := range ws.assetBalances[assetID] {
+				if balance < 0 {
+					return fmt.Errorf("asset %s has negative balance for address %s: %d",
+						assetID, address, balance)
+				}
+				circulatingSupply += balance
+
+				// Validate address format
+				if err := account.ValidateAddress(address); err != nil {
+					return fmt.Errorf("asset %s has invalid holder address %s: %v",
+						assetID, address, err)
+				}
+			}
+
+			if circulatingSupply > asset.TotalSupply {
+				return fmt.Errorf("asset %s circulating supply (%d) exceeds total supply (%d)",
+					assetID, circulatingSupply, asset.TotalSupply)
+			}
+		}
+
+		// Validate creator address
+		if err := account.ValidateAddress(asset.Creator); err != nil {
+			return fmt.Errorf("asset %s has invalid creator address: %v", assetID, err)
+		}
+
+		// Validate expiration date
+		if asset.ExpirationDate != nil && *asset.ExpirationDate <= asset.CreatedAt {
+			return fmt.Errorf("asset %s has expiration date before creation date", assetID)
+		}
 	}
 
 	return nil

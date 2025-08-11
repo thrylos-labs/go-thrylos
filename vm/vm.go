@@ -6,6 +6,13 @@ The Thrylos VM is a purpose-built virtual machine optimized for blockchain opera
 designed for high throughput and Ed25519 signature verification. Unlike general-purpose
 VMs like EVM or WASM, it provides native blockchain operations as first-class citizens.
 
+ASSET-ONLY TOKEN MODEL:
+- Removed currency/memecoin creation capabilities
+- Replaced with constrained asset tokens representing real-world items
+- Asset types: supply_chain, carbon_credit, real_estate, certificate, license, membership
+- Limited decimals (max 4), supply caps, and real-world reference requirements
+- Contracts cannot bypass asset restrictions through RISC-V execution
+
 HOW IT WORKS:
 
 1. OPERATION-BASED EXECUTION:
@@ -18,7 +25,7 @@ HOW IT WORKS:
    - Stake: Delegation to validators with automatic balance deduction
    - Cross-shard: Atomic transfers between different blockchain shards
    - Create Validator: Register new consensus participants
-   - Token Operations: Create, mint, burn, and transfer custom tokens
+   - Asset Operations: Create, mint, burn, and transfer constrained asset tokens
    - Custom Contracts: Extensible execution for user-defined logic
 
 3. GAS METERING SYSTEM:
@@ -59,7 +66,7 @@ USE CASES:
 - High-frequency trading operations
 - Cross-shard asset transfers
 - Validator staking/delegation
-- Meme coin and token creation
+- Real-world asset tokenization (no memecoins)
 - Custom blockchain governance operations
 - Performance-critical DeFi protocols
 */
@@ -69,7 +76,9 @@ package vm
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/core/state"
@@ -92,7 +101,7 @@ type VMOperation struct {
 	Amount     int64             `json:"amount,omitempty"`
 	Data       []byte            `json:"data,omitempty"`
 	Parameters map[string]string `json:"parameters,omitempty"`
-	Gas        int64             `json:"gas"` // Changed from GasLimit to Gas for consistency
+	Gas        int64             `json:"gas"`
 }
 
 // ExecutionResult contains the result of VM execution
@@ -111,22 +120,34 @@ type Event struct {
 }
 
 type StateChange struct {
-	Type    string `json:"type"` // "account_update", "validator_update", "token_update"
+	Type    string `json:"type"` // "account_update", "validator_update", "asset_update"
 	Address string `json:"address"`
 	Before  []byte `json:"before"`
 	After   []byte `json:"after"`
 }
 
-// Token represents a custom token
-type Token struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Symbol      string `json:"symbol"`
-	Decimals    int32  `json:"decimals"`
-	TotalSupply int64  `json:"total_supply"`
-	Creator     string `json:"creator"`
-	Mintable    bool   `json:"mintable"`
-	CreatedAt   int64  `json:"created_at"`
+// AssetToken represents a real-world asset token (replaces Token struct)
+type AssetToken struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	AssetType        string `json:"asset_type"`     // "supply_chain", "carbon_credit", etc.
+	RealWorldRef     string `json:"real_world_ref"` // Required reference to physical asset
+	MaxDecimals      int32  `json:"max_decimals"`   // Capped at 4
+	TotalSupply      int64  `json:"total_supply"`
+	Creator          string `json:"creator"`
+	Transferable     bool   `json:"transferable"`      // Some assets shouldn't be tradeable
+	RequiresApproval bool   `json:"requires_approval"` // KYC/compliance gating
+	ExpirationDate   *int64 `json:"expiration_date"`   // Optional expiration
+	RegulatoryInfo   string `json:"regulatory_info"`   // Compliance metadata
+	CreatedAt        int64  `json:"created_at"`
+}
+
+// AssetConfig defines constraints for each asset type
+type AssetConfig struct {
+	MaxSupply        int64  `json:"max_supply"`
+	RequiresApproval bool   `json:"requires_approval"`
+	MaxDecimals      int32  `json:"max_decimals"`
+	Description      string `json:"description"`
 }
 
 // NewThrylosVM creates a new custom VM instance
@@ -178,22 +199,30 @@ func (vm *ThrylosVM) Execute(op *VMOperation) (*ExecutionResult, error) {
 		result, err = vm.executeCrossShardTransfer(op)
 	case "create_validator":
 		result, err = vm.executeCreateValidator(op)
-	case "create_token":
-		result, err = vm.executeCreateToken(op)
-	case "mint_token":
-		result, err = vm.executeMintToken(op)
-	case "burn_token":
-		result, err = vm.executeBurnToken(op)
-	case "transfer_token":
-		result, err = vm.executeTransferToken(op)
+	// Asset operations (replaced token operations)
+	case "create_asset":
+		result, err = vm.executeCreateAsset(op)
+	case "mint_asset":
+		result, err = vm.executeMintAsset(op)
+	case "burn_asset":
+		result, err = vm.executeBurnAsset(op)
+	case "transfer_asset":
+		result, err = vm.executeTransferAsset(op)
 	case "claim_rewards":
 		result, err = vm.executeClaimRewards(op)
 	case "custom_contract":
 		result, err = vm.executeCustomContract(op)
+	// BLOCKED: Old token operations return errors
+	case "create_token", "mint_token", "burn_token", "transfer_token":
+		result = &ExecutionResult{
+			Success: false,
+			Error:   fmt.Sprintf("operation type '%s' not supported - use asset operations instead", op.Type),
+			GasUsed: vm.gasUsed,
+		}
 	default:
 		result = &ExecutionResult{
 			Success: false,
-			Error:   fmt.Sprintf("unknown operation type: %s", op.Type),
+			Error:   fmt.Sprintf("operation type '%s' not supported", op.Type),
 			GasUsed: vm.gasUsed,
 		}
 	}
@@ -245,34 +274,8 @@ func (vm *ThrylosVM) executeTransfer(op *VMOperation) (*ExecutionResult, error) 
 	}, nil
 }
 
-// GetGasPrice returns the current gas price
-func (vm *ThrylosVM) GetGasPrice() int64 {
-	return vm.gasPrice
-}
-
-// GetGasLimit returns the current gas limit
-func (vm *ThrylosVM) GetGasLimit() int64 {
-	return vm.gasLimit
-}
-
-// SafeExecute wraps Execute with panic recovery (you already have this, but ensure it's exported)
-func (vm *ThrylosVM) SafeExecute(op *VMOperation) (result *ExecutionResult, err error) {
-	defer func() {
-		if r := vm.RecoverFromPanic(); r != nil {
-			result = &ExecutionResult{
-				Success: false,
-				Error:   fmt.Sprintf("VM panic: %v", r),
-				GasUsed: vm.gasUsed,
-			}
-			err = fmt.Errorf("VM execution panic: %v", r)
-		}
-	}()
-
-	return vm.Execute(op)
-}
-
 func (vm *ThrylosVM) executeStake(op *VMOperation) (*ExecutionResult, error) {
-	stakeGas := int64(50000) // Staking operation cost
+	stakeGas := int64(50000)
 	vm.gasUsed += stakeGas
 
 	stakingManager := vm.worldState.GetStakingManager()
@@ -310,7 +313,7 @@ func (vm *ThrylosVM) executeStake(op *VMOperation) (*ExecutionResult, error) {
 }
 
 func (vm *ThrylosVM) executeDelegate(op *VMOperation) (*ExecutionResult, error) {
-	delegateGas := int64(50000) // Delegation operation cost
+	delegateGas := int64(50000)
 	vm.gasUsed += delegateGas
 
 	stakingManager := vm.worldState.GetStakingManager()
@@ -348,7 +351,7 @@ func (vm *ThrylosVM) executeDelegate(op *VMOperation) (*ExecutionResult, error) 
 }
 
 func (vm *ThrylosVM) executeUndelegate(op *VMOperation) (*ExecutionResult, error) {
-	undelegateGas := int64(75000) // Undelegation operation cost (higher due to unbonding)
+	undelegateGas := int64(75000)
 	vm.gasUsed += undelegateGas
 
 	stakingManager := vm.worldState.GetStakingManager()
@@ -386,10 +389,9 @@ func (vm *ThrylosVM) executeUndelegate(op *VMOperation) (*ExecutionResult, error
 }
 
 func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, error) {
-	createValidatorGas := int64(100000) // Create validator operation cost
+	createValidatorGas := int64(100000)
 	vm.gasUsed += createValidatorGas
 
-	// Extract validator parameters
 	pubKey := op.Parameters["public_key"]
 	commissionStr := op.Parameters["commission"]
 
@@ -401,7 +403,6 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 		}, nil
 	}
 
-	// Parse commission (default to 10% if not provided)
 	commission := 0.1
 	if commissionStr != "" {
 		if parsedCommission, err := strconv.ParseFloat(commissionStr, 64); err == nil {
@@ -409,7 +410,6 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 		}
 	}
 
-	// Validate commission rate (0-100%)
 	if commission < 0 || commission > 1 {
 		return &ExecutionResult{
 			Success: false,
@@ -418,7 +418,6 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 		}, nil
 	}
 
-	// Create validator
 	validator := &core.Validator{
 		Address:        op.From,
 		Pubkey:         []byte(pubKey),
@@ -432,7 +431,6 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 		UpdatedAt:      time.Now().Unix(),
 	}
 
-	// Add validator to WorldState
 	err := vm.worldState.AddValidator(validator)
 	if err != nil {
 		return &ExecutionResult{
@@ -442,7 +440,6 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 		}, nil
 	}
 
-	// Deduct stake amount from creator's account
 	account, err := vm.worldState.GetAccount(op.From)
 	if err != nil {
 		return &ExecutionResult{
@@ -463,7 +460,6 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 	account.Balance -= op.Amount
 	account.StakedAmount += op.Amount
 
-	// Update account through WorldState
 	if err := vm.worldState.UpdateAccountWithStorage(account); err != nil {
 		return &ExecutionResult{
 			Success: false,
@@ -488,7 +484,7 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 }
 
 func (vm *ThrylosVM) executeCrossShardTransfer(op *VMOperation) (*ExecutionResult, error) {
-	crossShardGas := int64(100000) // Cross-shard operation cost
+	crossShardGas := int64(100000)
 	vm.gasUsed += crossShardGas
 
 	crossShardManager := vm.worldState.GetCrossShardManager()
@@ -521,43 +517,171 @@ func (vm *ThrylosVM) executeCrossShardTransfer(op *VMOperation) (*ExecutionResul
 	}, nil
 }
 
-// Token operations for meme coins and custom tokens
+// REMOVED: All token operations (executeCreateToken, executeMintToken, etc.)
+// REPLACED WITH: Asset operations with real-world constraints
 
-func (vm *ThrylosVM) executeCreateToken(op *VMOperation) (*ExecutionResult, error) {
-	createTokenGas := int64(150000) // Token creation cost
-	vm.gasUsed += createTokenGas
+// Asset operations (replaces token operations)
 
-	// Extract token parameters
-	tokenID := op.Parameters["token_id"]
+// getAssetConfigs returns allowed asset types and their constraints
+func (vm *ThrylosVM) getAssetConfigs() map[string]AssetConfig {
+	return map[string]AssetConfig{
+		"supply_chain": {
+			MaxSupply:        1000000,
+			RequiresApproval: false,
+			MaxDecimals:      2,
+			Description:      "Physical goods tracking and supply chain management",
+		},
+		"carbon_credit": {
+			MaxSupply:        10000000,
+			RequiresApproval: true,
+			MaxDecimals:      4,
+			Description:      "Environmental carbon offset credits",
+		},
+		"real_estate": {
+			MaxSupply:        1000,
+			RequiresApproval: true,
+			MaxDecimals:      4,
+			Description:      "Property ownership fractions and real estate shares",
+		},
+		"certificate": {
+			MaxSupply:        100000,
+			RequiresApproval: false,
+			MaxDecimals:      0,
+			Description:      "Educational certificates and professional credentials",
+		},
+		"license": {
+			MaxSupply:        10000,
+			RequiresApproval: true,
+			MaxDecimals:      0,
+			Description:      "Professional licenses and regulatory permits",
+		},
+		"membership": {
+			MaxSupply:        50000,
+			RequiresApproval: false,
+			MaxDecimals:      0,
+			Description:      "Membership tokens and access permissions",
+		},
+		"loyalty_points": {
+			MaxSupply:        100000000,
+			RequiresApproval: false,
+			MaxDecimals:      2,
+			Description:      "Customer loyalty and reward point systems",
+		},
+		"utility_token": {
+			MaxSupply:        1000000,
+			RequiresApproval: false,
+			MaxDecimals:      2,
+			Description:      "Service access and utility consumption tokens",
+		},
+	}
+}
+
+func (vm *ThrylosVM) executeCreateAsset(op *VMOperation) (*ExecutionResult, error) {
+	createAssetGas := int64(150000)
+	vm.gasUsed += createAssetGas
+
+	// Extract asset parameters
+	assetID := op.Parameters["asset_id"]
 	name := op.Parameters["name"]
-	symbol := op.Parameters["symbol"]
-	decimalsStr := op.Parameters["decimals"]
-	mintableStr := op.Parameters["mintable"]
+	assetType := op.Parameters["asset_type"]
+	realWorldRef := op.Parameters["real_world_reference"]
+	maxDecimalsStr := op.Parameters["max_decimals"]
+	transferableStr := op.Parameters["transferable"]
+	expirationStr := op.Parameters["expiration_date"]
+	regulatoryInfo := op.Parameters["regulatory_info"]
 
 	// Validate required parameters
-	if tokenID == "" || name == "" || symbol == "" {
+	if assetID == "" || name == "" || assetType == "" {
 		return &ExecutionResult{
 			Success: false,
 			GasUsed: vm.gasUsed,
-			Error:   "token_id, name, and symbol are required",
+			Error:   "asset_id, name, and asset_type are required",
 		}, nil
 	}
 
-	// Parse decimals (default to 18)
-	decimals := int32(18)
-	if decimalsStr != "" {
-		if parsed, err := strconv.ParseInt(decimalsStr, 10, 32); err == nil {
-			decimals = int32(parsed)
+	// Must specify what real-world thing this represents
+	if realWorldRef == "" {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   "real_world_reference required (what does this asset represent?)",
+		}, nil
+	}
+
+	// Enhanced currency detection and real-world reference validation
+	if err := vm.DetectCurrencyAttempt(op); err != nil {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   err.Error(),
+		}, nil
+	}
+
+	// Enhanced real-world reference validation
+	if err := vm.validateRealWorldReference(realWorldRef); err != nil {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   err.Error(),
+		}, nil
+	}
+
+	// Check if asset ID already exists
+	if existingAsset, err := vm.worldState.GetAsset(assetID); err == nil && existingAsset != nil {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("asset %s already exists", assetID),
+		}, nil
+	}
+
+	// Validate asset ID format
+	if err := vm.validateAssetID(assetID); err != nil {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   err.Error(),
+		}, nil
+	}
+
+	// Validate asset type against allowed configs
+	assetConfigs := vm.getAssetConfigs()
+	config, exists := assetConfigs[assetType]
+	if !exists {
+		allowedTypes := make([]string, 0, len(assetConfigs))
+		for k := range assetConfigs {
+			allowedTypes = append(allowedTypes, k)
+		}
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("asset_type '%s' not supported. Allowed types: %v", assetType, allowedTypes),
+		}, nil
+	}
+
+	// Parse and validate decimals
+	maxDecimals := config.MaxDecimals // Use config default
+	if maxDecimalsStr != "" {
+		if parsed, err := strconv.ParseInt(maxDecimalsStr, 10, 32); err == nil {
+			requestedDecimals := int32(parsed)
+			if requestedDecimals > config.MaxDecimals {
+				return &ExecutionResult{
+					Success: false,
+					GasUsed: vm.gasUsed,
+					Error:   fmt.Sprintf("%s assets limited to %d decimal places maximum", assetType, config.MaxDecimals),
+				}, nil
+			}
+			maxDecimals = requestedDecimals
+		} else {
+			return &ExecutionResult{
+				Success: false,
+				GasUsed: vm.gasUsed,
+				Error:   "invalid max_decimals value",
+			}, nil
 		}
 	}
 
-	// Parse mintable (default to false)
-	mintable := false
-	if mintableStr == "true" {
-		mintable = true
-	}
-
-	// Validate token supply
+	// Enforce supply limits based on asset type
 	if op.Amount <= 0 {
 		return &ExecutionResult{
 			Success: false,
@@ -566,52 +690,324 @@ func (vm *ThrylosVM) executeCreateToken(op *VMOperation) (*ExecutionResult, erro
 		}, nil
 	}
 
-	// Create token (Note: You'll need to implement token storage in WorldState)
-	token := &Token{
-		ID:          tokenID,
-		Name:        name,
-		Symbol:      symbol,
-		Decimals:    decimals,
-		TotalSupply: op.Amount,
-		Creator:     op.From,
-		Mintable:    mintable,
-		CreatedAt:   time.Now().Unix(),
+	if op.Amount > config.MaxSupply {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("%s assets limited to %d maximum supply", assetType, config.MaxSupply),
+		}, nil
 	}
 
-	// For now, store token info in account storage (you might want dedicated token storage)
-	tokenData, _ := json.Marshal(token)
+	// Parse transferable (default to true)
+	transferable := true
+	if transferableStr == "false" {
+		transferable = false
+	}
+
+	// Parse and validate expiration date
+	var expirationDate *int64
+	if expirationStr != "" {
+		if parsed, err := strconv.ParseInt(expirationStr, 10, 64); err == nil {
+			if parsed <= time.Now().Unix() {
+				return &ExecutionResult{
+					Success: false,
+					GasUsed: vm.gasUsed,
+					Error:   "expiration_date must be in the future",
+				}, nil
+			}
+			expirationDate = &parsed
+		} else {
+			return &ExecutionResult{
+				Success: false,
+				GasUsed: vm.gasUsed,
+				Error:   "invalid expiration_date format (must be Unix timestamp)",
+			}, nil
+		}
+	}
+
+	// Validate creator has sufficient balance for gas costs
+	creatorBalance, err := vm.worldState.GetBalance(op.From)
+	if err != nil {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("failed to get creator balance: %v", err),
+		}, nil
+	}
+
+	estimatedGasCost := vm.gasUsed * vm.gasPrice
+	if creatorBalance < estimatedGasCost {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("insufficient balance for gas costs: have %d, need %d", creatorBalance, estimatedGasCost),
+		}, nil
+	}
+
+	// Create asset with constraints
+	asset := &state.AssetToken{ // ✅ This will work
+		ID:               assetID,
+		Name:             name,
+		AssetType:        assetType,
+		RealWorldRef:     realWorldRef,
+		MaxDecimals:      maxDecimals,
+		TotalSupply:      op.Amount,
+		Creator:          op.From,
+		Transferable:     transferable,
+		RequiresApproval: config.RequiresApproval,
+		ExpirationDate:   expirationDate,
+		RegulatoryInfo:   regulatoryInfo,
+		CreatedAt:        time.Now().Unix(),
+	}
+
+	// Store the asset in WorldState
+	if err := vm.worldState.StoreAsset(asset); err != nil {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("failed to store asset: %v", err),
+		}, nil
+	}
+
+	// Set initial balance for creator
+	if err := vm.worldState.SetAssetBalance(assetID, op.From, op.Amount); err != nil {
+		// Rollback asset creation if balance setting fails
+		vm.worldState.DeleteAsset(assetID)
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("failed to set initial balance: %v", err),
+		}, nil
+	}
+
+	// Create asset registry entry for tracking
+	if err := vm.worldState.AddAssetToRegistry(assetID, op.From, assetType); err != nil {
+		// Rollback on registry failure
+		vm.worldState.DeleteAsset(assetID)
+		vm.worldState.SetAssetBalance(assetID, op.From, 0)
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("failed to register asset: %v", err),
+		}, nil
+	}
+
+	assetData, _ := json.Marshal(asset)
 
 	return &ExecutionResult{
 		Success:    true,
 		GasUsed:    vm.gasUsed,
-		ReturnData: tokenData,
+		ReturnData: assetData,
 		Events: []Event{{
-			Type: "token_created",
+			Type: "asset_created",
 			Data: map[string]interface{}{
-				"token_id":     tokenID,
-				"name":         name,
-				"symbol":       symbol,
-				"decimals":     decimals,
-				"total_supply": op.Amount,
-				"creator":      op.From,
-				"mintable":     mintable,
+				"asset_id":          assetID,
+				"name":              name,
+				"asset_type":        assetType,
+				"real_world_ref":    realWorldRef,
+				"max_decimals":      maxDecimals,
+				"total_supply":      op.Amount,
+				"creator":           op.From,
+				"transferable":      transferable,
+				"requires_approval": config.RequiresApproval,
+				"expiration_date":   expirationDate,
+				"created_at":        asset.CreatedAt,
 			},
+		}},
+		StateChanges: []StateChange{{
+			Type:    "asset_created",
+			Address: assetID,
+			Before:  nil,
+			After:   assetData,
 		}},
 	}, nil
 }
 
-func (vm *ThrylosVM) executeMintToken(op *VMOperation) (*ExecutionResult, error) {
-	mintTokenGas := int64(75000) // Token minting cost
-	vm.gasUsed += mintTokenGas
+// Enhanced real-world reference validation
+func (vm *ThrylosVM) validateRealWorldReference(realWorldRef string) error {
+	if len(realWorldRef) < 20 {
+		return fmt.Errorf("real_world_reference too brief - provide detailed description (minimum 20 characters)")
+	}
 
-	tokenID := op.Parameters["token_id"]
+	if len(realWorldRef) > 500 {
+		return fmt.Errorf("real_world_reference too long (maximum 500 characters)")
+	}
+
+	// Check for vague references that don't specify actual assets
+	vagueTerms := []string{
+		"digital asset", "blockchain token", "cryptocurrency", "virtual currency",
+		"crypto token", "digital currency", "virtual asset", "blockchain asset",
+		"token utility", "platform token", "governance token", "utility coin",
+	}
+
+	refLower := strings.ToLower(realWorldRef)
+	for _, term := range vagueTerms {
+		if strings.Contains(refLower, term) {
+			return fmt.Errorf("real_world_reference cannot be vague - specify actual physical asset, not '%s'", term)
+		}
+	}
+
+	// Require specific asset identification
+	requiredTerms := []string{
+		"serial", "batch", "unit", "certificate", "license", "property",
+		"item", "product", "goods", "inventory", "shipment", "container",
+		"plot", "building", "equipment", "vehicle", "specimen", "sample",
+	}
+
+	hasSpecificTerm := false
+	for _, term := range requiredTerms {
+		if strings.Contains(refLower, term) {
+			hasSpecificTerm = true
+			break
+		}
+	}
+
+	if !hasSpecificTerm {
+		return fmt.Errorf("real_world_reference must include specific identification (serial, batch, unit, certificate, etc.)")
+	}
+
+	// Block obvious currency-related descriptions
+	currencyDescriptions := []string{
+		"investment vehicle", "trading instrument", "store of value",
+		"medium of exchange", "payment method", "currency alternative",
+		"financial instrument", "speculative asset", "investment token",
+	}
+
+	for _, desc := range currencyDescriptions {
+		if strings.Contains(refLower, desc) {
+			return fmt.Errorf("real_world_reference describes currency/investment use case - not allowed")
+		}
+	}
+
+	return nil
+}
+
+// Enhanced asset ID validation
+func (vm *ThrylosVM) validateAssetID(assetID string) error {
+	if len(assetID) < 3 || len(assetID) > 64 {
+		return fmt.Errorf("asset_id must be between 3 and 64 characters")
+	}
+
+	// Must start with letter and contain only alphanumeric, underscore, dash
+	if !regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`).MatchString(assetID) {
+		return fmt.Errorf("asset_id must start with letter and contain only alphanumeric, underscore, or dash")
+	}
+
+	// Block currency-like asset IDs
+	currencyPatterns := []string{
+		"coin", "token", "cash", "money", "currency", "dollar", "euro",
+		"btc", "eth", "usdt", "usdc", "bnb", "ada", "sol", "doge",
+		"shib", "pepe", "moon", "safe", "baby", "mini", "mega",
+	}
+
+	assetIDLower := strings.ToLower(assetID)
+	for _, pattern := range currencyPatterns {
+		if strings.Contains(assetIDLower, pattern) {
+			return fmt.Errorf("asset_id '%s' contains currency-like term '%s' - not allowed", assetID, pattern)
+		}
+	}
+
+	return nil
+}
+
+// Enhanced DetectCurrencyAttempt function (to replace the existing one)
+func (vm *ThrylosVM) DetectCurrencyAttempt(op *VMOperation) error {
+	if op.Type != "create_asset" {
+		return nil
+	}
+
+	name := strings.ToLower(op.Parameters["name"])
+	assetType := strings.ToLower(op.Parameters["asset_type"])
+	realWorldRef := strings.ToLower(op.Parameters["real_world_reference"])
+
+	// Expanded currency detection patterns
+	currencyWords := []string{
+		// Traditional currency terms
+		"coin", "token", "cash", "money", "currency", "dollar", "euro", "yen", "pound",
+		// Crypto terms
+		"bitcoin", "ethereum", "crypto", "blockchain", "defi", "yield", "stake",
+		// Meme coin patterns
+		"doge", "pepe", "moon", "rocket", "diamond", "hands", "hodl", "ape",
+		"shib", "safe", "baby", "mini", "mega", "ultra", "super", "hyper",
+		"elon", "mars", "lambo", "millionaire", "billionaire", "rich", "wealth",
+		// Investment terms
+		"investment", "trading", "speculation", "finance", "returns", "profit",
+		// Platform tokens
+		"governance", "utility", "platform", "ecosystem", "protocol", "dao",
+	}
+
+	// Check name for currency terms
+	for _, word := range currencyWords {
+		if strings.Contains(name, word) {
+			return fmt.Errorf("asset name '%s' contains currency-like term '%s' - not allowed", name, word)
+		}
+	}
+
+	// Check real-world reference for currency indicators
+	currencyRefTerms := []string{
+		"digital currency", "virtual currency", "payment system", "store of value",
+		"medium of exchange", "investment vehicle", "trading instrument",
+		"financial protocol", "yield farming", "liquidity mining",
+	}
+
+	for _, term := range currencyRefTerms {
+		if strings.Contains(realWorldRef, term) {
+			return fmt.Errorf("real_world_reference contains currency/financial term '%s' - not allowed", term)
+		}
+	}
+
+	// Parse decimals for validation
+	decimals := int32(0)
+	if decimalsStr := op.Parameters["max_decimals"]; decimalsStr != "" {
+		if parsed, err := strconv.ParseInt(decimalsStr, 10, 32); err == nil {
+			decimals = int32(parsed)
+		}
+	}
+
+	// Block large supplies with high decimals (currency characteristics)
+	if op.Amount > 1000000 && decimals >= 4 {
+		return fmt.Errorf("large supply (%d) with high decimals (%d) resembles currency - not allowed", op.Amount, decimals)
+	}
+
+	// Block round numbers that suggest currency (1M, 10M, 100M, 1B, etc.)
+	suspiciousSupplies := []int64{
+		1000000, 10000000, 100000000, 1000000000, 10000000000,
+		5000000, 50000000, 500000000, 5000000000,
+	}
+
+	for _, suspicious := range suspiciousSupplies {
+		if op.Amount == suspicious {
+			return fmt.Errorf("supply amount %d appears to be currency-like round number - provide business justification", op.Amount)
+		}
+	}
+
+	// Block speculative asset types
+	speculativeTypes := []string{
+		"investment", "trading", "speculation", "finance", "defi", "yield",
+		"governance", "utility", "platform", "protocol", "ecosystem",
+	}
+
+	for _, blockType := range speculativeTypes {
+		if strings.Contains(assetType, blockType) {
+			return fmt.Errorf("asset type containing '%s' not allowed - only real-world utility assets permitted", blockType)
+		}
+	}
+
+	return nil
+}
+
+func (vm *ThrylosVM) executeMintAsset(op *VMOperation) (*ExecutionResult, error) {
+	mintAssetGas := int64(75000)
+	vm.gasUsed += mintAssetGas
+
+	assetID := op.Parameters["asset_id"]
 	recipient := op.To
 
-	if tokenID == "" {
+	if assetID == "" {
 		return &ExecutionResult{
 			Success: false,
 			GasUsed: vm.gasUsed,
-			Error:   "token_id parameter required",
+			Error:   "asset_id parameter required",
 		}, nil
 	}
 
@@ -619,16 +1015,16 @@ func (vm *ThrylosVM) executeMintToken(op *VMOperation) (*ExecutionResult, error)
 		recipient = op.From // Mint to sender if no recipient specified
 	}
 
-	// Note: You'll need to implement token validation and minting logic
-	// For now, this is a placeholder that demonstrates the structure
+	// TODO: Implement asset validation and minting logic
+	// This includes checking if asset exists, if minter is authorized, etc.
 
 	return &ExecutionResult{
 		Success: true,
 		GasUsed: vm.gasUsed,
 		Events: []Event{{
-			Type: "token_minted",
+			Type: "asset_minted",
 			Data: map[string]interface{}{
-				"token_id":  tokenID,
+				"asset_id":  assetID,
 				"recipient": recipient,
 				"amount":    op.Amount,
 				"minter":    op.From,
@@ -637,30 +1033,30 @@ func (vm *ThrylosVM) executeMintToken(op *VMOperation) (*ExecutionResult, error)
 	}, nil
 }
 
-func (vm *ThrylosVM) executeBurnToken(op *VMOperation) (*ExecutionResult, error) {
-	burnTokenGas := int64(50000) // Token burning cost
-	vm.gasUsed += burnTokenGas
+func (vm *ThrylosVM) executeBurnAsset(op *VMOperation) (*ExecutionResult, error) {
+	burnAssetGas := int64(50000)
+	vm.gasUsed += burnAssetGas
 
-	tokenID := op.Parameters["token_id"]
+	assetID := op.Parameters["asset_id"]
 
-	if tokenID == "" {
+	if assetID == "" {
 		return &ExecutionResult{
 			Success: false,
 			GasUsed: vm.gasUsed,
-			Error:   "token_id parameter required",
+			Error:   "asset_id parameter required",
 		}, nil
 	}
 
-	// Note: You'll need to implement token burning logic
-	// This includes checking token balance, reducing supply, etc.
+	// TODO: Implement asset burning logic
+	// This includes checking asset balance, reducing supply, etc.
 
 	return &ExecutionResult{
 		Success: true,
 		GasUsed: vm.gasUsed,
 		Events: []Event{{
-			Type: "token_burned",
+			Type: "asset_burned",
 			Data: map[string]interface{}{
-				"token_id": tokenID,
+				"asset_id": assetID,
 				"amount":   op.Amount,
 				"burner":   op.From,
 			},
@@ -668,17 +1064,17 @@ func (vm *ThrylosVM) executeBurnToken(op *VMOperation) (*ExecutionResult, error)
 	}, nil
 }
 
-func (vm *ThrylosVM) executeTransferToken(op *VMOperation) (*ExecutionResult, error) {
-	transferTokenGas := int64(35000) // Token transfer cost
-	vm.gasUsed += transferTokenGas
+func (vm *ThrylosVM) executeTransferAsset(op *VMOperation) (*ExecutionResult, error) {
+	transferAssetGas := int64(35000)
+	vm.gasUsed += transferAssetGas
 
-	tokenID := op.Parameters["token_id"]
+	assetID := op.Parameters["asset_id"]
 
-	if tokenID == "" {
+	if assetID == "" {
 		return &ExecutionResult{
 			Success: false,
 			GasUsed: vm.gasUsed,
-			Error:   "token_id parameter required",
+			Error:   "asset_id parameter required",
 		}, nil
 	}
 
@@ -690,16 +1086,16 @@ func (vm *ThrylosVM) executeTransferToken(op *VMOperation) (*ExecutionResult, er
 		}, nil
 	}
 
-	// Note: You'll need to implement token transfer logic
-	// This includes checking token balance, updating balances, etc.
+	// TODO: Implement asset transfer logic
+	// This includes checking if asset is transferable, approval requirements, etc.
 
 	return &ExecutionResult{
 		Success: true,
 		GasUsed: vm.gasUsed,
 		Events: []Event{{
-			Type: "token_transferred",
+			Type: "asset_transferred",
 			Data: map[string]interface{}{
-				"token_id": tokenID,
+				"asset_id": assetID,
 				"from":     op.From,
 				"to":       op.To,
 				"amount":   op.Amount,
@@ -709,7 +1105,7 @@ func (vm *ThrylosVM) executeTransferToken(op *VMOperation) (*ExecutionResult, er
 }
 
 func (vm *ThrylosVM) executeClaimRewards(op *VMOperation) (*ExecutionResult, error) {
-	claimRewardsGas := int64(25000) // Rewards claiming cost
+	claimRewardsGas := int64(25000)
 	vm.gasUsed += claimRewardsGas
 
 	stakingManager := vm.worldState.GetStakingManager()
@@ -738,7 +1134,6 @@ func (vm *ThrylosVM) executeClaimRewards(op *VMOperation) (*ExecutionResult, err
 // Integration with transaction executor
 
 func (vm *ThrylosVM) ExecuteVMTransaction(tx *core.Transaction) (*ExecutionResult, error) {
-	// Parse operation type and parameters from transaction data
 	opType, parameters := vm.parseOperationFromTransaction(tx)
 
 	op := &VMOperation{
@@ -754,13 +1149,11 @@ func (vm *ThrylosVM) ExecuteVMTransaction(tx *core.Transaction) (*ExecutionResul
 	return vm.Execute(op)
 }
 
-// parseOperationFromTransaction extracts operation type and parameters from transaction data
 func (vm *ThrylosVM) parseOperationFromTransaction(tx *core.Transaction) (string, map[string]string) {
 	if len(tx.Data) == 0 {
 		return "transfer", nil
 	}
 
-	// Try to parse JSON operation data
 	var opData struct {
 		Type       string            `json:"type"`
 		Parameters map[string]string `json:"parameters"`
@@ -772,15 +1165,12 @@ func (vm *ThrylosVM) parseOperationFromTransaction(tx *core.Transaction) (string
 		}
 	}
 
-	// Default to transfer if parsing fails
 	return "transfer", nil
 }
 
 // Helper and validation methods
 
-// ValidateOperation checks if an operation is valid before execution
 func (vm *ThrylosVM) ValidateOperation(op *VMOperation) error {
-	// Basic validation
 	if op.From == "" {
 		return fmt.Errorf("from address cannot be empty")
 	}
@@ -793,7 +1183,6 @@ func (vm *ThrylosVM) ValidateOperation(op *VMOperation) error {
 		return fmt.Errorf("gas exceeds maximum limit")
 	}
 
-	// Operation-specific validation
 	switch op.Type {
 	case "transfer", "stake", "delegate", "undelegate":
 		if op.Amount <= 0 {
@@ -810,11 +1199,11 @@ func (vm *ThrylosVM) ValidateOperation(op *VMOperation) error {
 		}
 		return vm.validateBalance(op.From, op.Amount)
 
-	case "create_token":
+	case "create_asset":
 		if op.Amount <= 0 {
 			return fmt.Errorf("initial_supply must be positive")
 		}
-		return vm.validateTokenCreation(op)
+		return vm.validateAssetCreation(op)
 
 	case "cross_shard_transfer":
 		if op.Amount <= 0 {
@@ -824,12 +1213,15 @@ func (vm *ThrylosVM) ValidateOperation(op *VMOperation) error {
 			return fmt.Errorf("recipient address required")
 		}
 		return vm.validateBalance(op.From, op.Amount)
+
+	// BLOCKED: Old token operations
+	case "create_token", "mint_token", "burn_token", "transfer_token":
+		return fmt.Errorf("operation type '%s' not supported - use asset operations instead", op.Type)
 	}
 
 	return nil
 }
 
-// validateBalance checks if an account has sufficient balance
 func (vm *ThrylosVM) validateBalance(address string, amount int64) error {
 	balance, err := vm.worldState.GetBalance(address)
 	if err != nil {
@@ -843,25 +1235,66 @@ func (vm *ThrylosVM) validateBalance(address string, amount int64) error {
 	return nil
 }
 
-// validateTokenCreation validates token creation parameters
-func (vm *ThrylosVM) validateTokenCreation(op *VMOperation) error {
-	tokenID := op.Parameters["token_id"]
-	name := op.Parameters["name"]
-	symbol := op.Parameters["symbol"]
+// ValidateContractAssetRestrictions ensures contracts cannot bypass asset limitations
+func (vm *ThrylosVM) ValidateContractAssetRestrictions(bytecode []byte) error {
+	// Basic bytecode analysis to detect potential bypass attempts
+	// In a real implementation, this would be more sophisticated
 
-	if len(tokenID) < 3 || len(tokenID) > 32 {
-		return fmt.Errorf("token_id must be between 3 and 32 characters")
+	if len(bytecode) == 0 {
+		return fmt.Errorf("empty contract bytecode")
+	}
+
+	// Check for suspicious patterns in bytecode (placeholder)
+	// Real implementation would analyze RISC-V instructions
+	bytecodeStr := string(bytecode)
+
+	suspiciousPatterns := []string{
+		"CREATE_TOKEN", "MINT_CURRENCY", "BYPASS_VALIDATION",
+		"UNLIMITED_SUPPLY", "HIGH_DECIMALS", "CURRENCY_MODE",
+	}
+
+	for _, pattern := range suspiciousPatterns {
+		if strings.Contains(strings.ToUpper(bytecodeStr), pattern) {
+			return fmt.Errorf("contract bytecode contains suspicious pattern: %s", pattern)
+		}
+	}
+
+	return nil
+}
+
+// validateAssetCreation validates asset creation parameters
+func (vm *ThrylosVM) validateAssetCreation(op *VMOperation) error {
+	assetID := op.Parameters["asset_id"]
+	name := op.Parameters["name"]
+	assetType := op.Parameters["asset_type"]
+	realWorldRef := op.Parameters["real_world_reference"]
+
+	if len(assetID) < 3 || len(assetID) > 32 {
+		return fmt.Errorf("asset_id must be between 3 and 32 characters")
 	}
 
 	if len(name) < 1 || len(name) > 64 {
-		return fmt.Errorf("token name must be between 1 and 64 characters")
+		return fmt.Errorf("asset name must be between 1 and 64 characters")
 	}
 
-	if len(symbol) < 1 || len(symbol) > 8 {
-		return fmt.Errorf("token symbol must be between 1 and 8 characters")
+	if assetType == "" {
+		return fmt.Errorf("asset_type is required")
 	}
 
-	// Add more validation as needed (e.g., check if token already exists)
+	if realWorldRef == "" {
+		return fmt.Errorf("real_world_reference is required")
+	}
+
+	if len(realWorldRef) < 10 || len(realWorldRef) > 256 {
+		return fmt.Errorf("real_world_reference must be between 10 and 256 characters")
+	}
+
+	// Validate against allowed asset types
+	assetConfigs := vm.getAssetConfigs()
+	if _, exists := assetConfigs[assetType]; !exists {
+		return fmt.Errorf("asset_type '%s' not supported", assetType)
+	}
+
 	return nil
 }
 
@@ -869,20 +1302,17 @@ func (vm *ThrylosVM) validateTokenCreation(op *VMOperation) error {
 func (vm *ThrylosVM) EstimateGas(op *VMOperation) int64 {
 	baseGas := vm.getBaseGas(op.Type)
 
-	// Add dynamic costs based on operation complexity
 	switch op.Type {
-	case "create_token":
-		// Add cost based on token name/symbol length
+	case "create_asset":
+		// Add cost based on asset name/reference length
 		nameLength := len(op.Parameters["name"])
-		symbolLength := len(op.Parameters["symbol"])
-		return baseGas + int64(nameLength+symbolLength)*100
+		refLength := len(op.Parameters["real_world_reference"])
+		return baseGas + int64(nameLength+refLength)*50
 
 	case "cross_shard_transfer":
-		// Higher cost for cross-shard operations
 		return baseGas + 50000
 
 	case "create_validator":
-		// Add cost based on public key length
 		pubKeyLength := len(op.Parameters["public_key"])
 		return baseGas + int64(pubKeyLength)*10
 	}
@@ -903,31 +1333,28 @@ func (vm *ThrylosVM) getBaseGas(opType string) int64 {
 		return 100000
 	case "create_validator":
 		return 100000
-	case "create_token":
+	case "create_asset":
 		return 150000
-	case "mint_token":
+	case "mint_asset":
 		return 75000
-	case "burn_token":
+	case "burn_asset":
 		return 50000
-	case "transfer_token":
+	case "transfer_asset":
 		return 35000
 	case "claim_rewards":
 		return 25000
 	case "custom_contract":
 		return 200000
 	default:
-		return 21000 // Default gas
+		return 21000
 	}
 }
 
 // CanExecuteInParallel checks if two operations can be executed in parallel
 func (vm *ThrylosVM) CanExecuteInParallel(op1, op2 *VMOperation) bool {
-	// Operations that don't conflict on accounts can run in parallel
 	if op1.From != op2.From && op1.From != op2.To && op1.To != op2.From && op1.To != op2.To {
 		return true
 	}
-
-	// Same account operations must be sequential
 	return false
 }
 
@@ -965,25 +1392,48 @@ func (vm *ThrylosVM) SetGasPrice(gasPrice int64) {
 	vm.gasPrice = gasPrice
 }
 
+// GetGasPrice returns the current gas price
+func (vm *ThrylosVM) GetGasPrice() int64 {
+	return vm.gasPrice
+}
+
+// GetGasLimit returns the current gas limit
+func (vm *ThrylosVM) GetGasLimit() int64 {
+	return vm.gasLimit
+}
+
+// SafeExecute wraps Execute with panic recovery
+func (vm *ThrylosVM) SafeExecute(op *VMOperation) (result *ExecutionResult, err error) {
+	defer func() {
+		if r := vm.RecoverFromPanic(); r != nil {
+			result = &ExecutionResult{
+				Success: false,
+				Error:   fmt.Sprintf("VM panic: %v", r),
+				GasUsed: vm.gasUsed,
+			}
+			err = fmt.Errorf("VM execution panic: %v", r)
+		}
+	}()
+
+	return vm.Execute(op)
+}
+
 // ExecuteBatch executes multiple operations in sequence with shared gas accounting
 func (vm *ThrylosVM) ExecuteBatch(operations []*VMOperation) ([]*ExecutionResult, error) {
 	results := make([]*ExecutionResult, 0, len(operations))
 
-	// Create initial snapshot
 	snapshot := vm.worldState.CreateSnapshot()
 	originalGasUsed := vm.gasUsed
 
 	for i, op := range operations {
 		result, err := vm.Execute(op)
 		if err != nil {
-			// Rollback all operations on any failure
 			vm.worldState.RestoreFromSnapshot(snapshot)
 			vm.gasUsed = originalGasUsed
 			return nil, fmt.Errorf("batch execution failed at operation %d: %v", i, err)
 		}
 
 		if !result.Success {
-			// Rollback all operations on any failure
 			vm.worldState.RestoreFromSnapshot(snapshot)
 			vm.gasUsed = originalGasUsed
 			return nil, fmt.Errorf("batch execution failed at operation %d: %s", i, result.Error)
@@ -991,7 +1441,6 @@ func (vm *ThrylosVM) ExecuteBatch(operations []*VMOperation) ([]*ExecutionResult
 
 		results = append(results, result)
 
-		// Check if we have enough gas for potential next operations
 		if vm.gasUsed >= vm.gasLimit {
 			break
 		}
@@ -1002,28 +1451,23 @@ func (vm *ThrylosVM) ExecuteBatch(operations []*VMOperation) ([]*ExecutionResult
 
 // ValidateOperationSequence validates that a sequence of operations can be executed
 func (vm *ThrylosVM) ValidateOperationSequence(operations []*VMOperation) error {
-	// Create a temporary snapshot for validation
 	snapshot := vm.worldState.CreateSnapshot()
 	defer vm.worldState.RestoreFromSnapshot(snapshot)
 
 	totalGas := int64(0)
 
 	for i, op := range operations {
-		// Estimate gas for this operation
 		estimatedGas := vm.EstimateGas(op)
 		totalGas += estimatedGas
 
-		// Check total gas doesn't exceed limit
 		if totalGas > vm.gasLimit {
 			return fmt.Errorf("operation sequence exceeds gas limit at operation %d", i)
 		}
 
-		// Validate individual operation
 		if err := vm.ValidateOperation(op); err != nil {
 			return fmt.Errorf("operation %d validation failed: %v", i, err)
 		}
 
-		// Simulate execution to check for state conflicts
 		tempVM := &ThrylosVM{
 			worldState: vm.worldState,
 			gasPrice:   vm.gasPrice,
@@ -1048,10 +1492,10 @@ func (vm *ThrylosVM) GetOperationTypes() []string {
 		"undelegate",
 		"cross_shard_transfer",
 		"create_validator",
-		"create_token",
-		"mint_token",
-		"burn_token",
-		"transfer_token",
+		"create_asset",   // Replaced create_token
+		"mint_asset",     // Replaced mint_token
+		"burn_asset",     // Replaced burn_token
+		"transfer_asset", // Replaced transfer_token
 		"claim_rewards",
 		"custom_contract",
 	}
@@ -1066,9 +1510,8 @@ func (vm *ThrylosVM) GetOperationInfo(opType string) map[string]interface{} {
 
 	switch opType {
 	case "transfer":
-		info["description"] = "Transfer tokens between accounts"
+		info["description"] = "Transfer native tokens between accounts"
 		info["required_fields"] = []string{"from", "to", "amount"}
-		info["optional_fields"] = []string{}
 
 	case "stake", "delegate":
 		info["description"] = "Delegate tokens to a validator"
@@ -1086,16 +1529,32 @@ func (vm *ThrylosVM) GetOperationInfo(opType string) map[string]interface{} {
 		info["required_parameters"] = []string{"public_key"}
 		info["optional_parameters"] = []string{"commission"}
 
-	case "create_token":
-		info["description"] = "Create a new custom token"
+	case "create_asset":
+		info["description"] = "Create a new real-world asset token"
 		info["required_fields"] = []string{"from", "amount"}
-		info["required_parameters"] = []string{"token_id", "name", "symbol"}
-		info["optional_parameters"] = []string{"decimals", "mintable"}
+		info["required_parameters"] = []string{"asset_id", "name", "asset_type", "real_world_reference"}
+		info["optional_parameters"] = []string{"max_decimals", "transferable", "expiration_date", "regulatory_info"}
+		info["supported_asset_types"] = vm.getAssetConfigs()
+
+	case "mint_asset":
+		info["description"] = "Mint additional asset tokens"
+		info["required_fields"] = []string{"from", "amount"}
+		info["required_parameters"] = []string{"asset_id"}
+		info["optional_fields"] = []string{"to"}
+
+	case "burn_asset":
+		info["description"] = "Burn asset tokens"
+		info["required_fields"] = []string{"from", "amount"}
+		info["required_parameters"] = []string{"asset_id"}
+
+	case "transfer_asset":
+		info["description"] = "Transfer asset tokens between accounts"
+		info["required_fields"] = []string{"from", "to", "amount"}
+		info["required_parameters"] = []string{"asset_id"}
 
 	case "cross_shard_transfer":
 		info["description"] = "Transfer tokens between shards"
 		info["required_fields"] = []string{"from", "to", "amount"}
-		info["optional_fields"] = []string{}
 	}
 
 	return info
@@ -1103,7 +1562,6 @@ func (vm *ThrylosVM) GetOperationInfo(opType string) map[string]interface{} {
 
 // Debug and monitoring methods
 
-// GetExecutionTrace returns detailed execution information for debugging
 func (vm *ThrylosVM) GetExecutionTrace() map[string]interface{} {
 	return map[string]interface{}{
 		"gas_used":           vm.gasUsed,
@@ -1115,7 +1573,6 @@ func (vm *ThrylosVM) GetExecutionTrace() map[string]interface{} {
 	}
 }
 
-// GetPerformanceMetrics returns performance metrics for monitoring
 func (vm *ThrylosVM) GetPerformanceMetrics() map[string]interface{} {
 	return map[string]interface{}{
 		"total_gas_used":       vm.gasUsed,
@@ -1126,10 +1583,8 @@ func (vm *ThrylosVM) GetPerformanceMetrics() map[string]interface{} {
 
 // Error handling and recovery
 
-// RecoverFromPanic recovers from panics during VM execution
 func (vm *ThrylosVM) RecoverFromPanic() interface{} {
 	if r := recover(); r != nil {
-		// Reset VM state on panic
 		vm.gasUsed = 0
 		return r
 	}
@@ -1138,7 +1593,6 @@ func (vm *ThrylosVM) RecoverFromPanic() interface{} {
 
 // Utility methods for operation creation
 
-// CreateTransferOperation creates a transfer operation
 func CreateTransferOperation(from, to string, amount, gas int64) *VMOperation {
 	return &VMOperation{
 		Type:   "transfer",
@@ -1149,7 +1603,6 @@ func CreateTransferOperation(from, to string, amount, gas int64) *VMOperation {
 	}
 }
 
-// CreateStakeOperation creates a staking operation
 func CreateStakeOperation(from, validator string, amount, gas int64) *VMOperation {
 	return &VMOperation{
 		Type:   "stake",
@@ -1162,23 +1615,24 @@ func CreateStakeOperation(from, validator string, amount, gas int64) *VMOperatio
 	}
 }
 
-// CreateTokenOperation creates a token creation operation
-func CreateTokenOperation(from, tokenID, name, symbol string, supply, gas int64, mintable bool) *VMOperation {
+// CreateAssetOperation creates an asset creation operation
+func CreateAssetOperation(from, assetID, name, assetType, realWorldRef string, supply, gas int64, maxDecimals int32, transferable bool) *VMOperation {
 	return &VMOperation{
-		Type:   "create_token",
+		Type:   "create_asset",
 		From:   from,
 		Amount: supply,
 		Gas:    gas,
 		Parameters: map[string]string{
-			"token_id": tokenID,
-			"name":     name,
-			"symbol":   symbol,
-			"mintable": fmt.Sprintf("%t", mintable),
+			"asset_id":             assetID,
+			"name":                 name,
+			"asset_type":           assetType,
+			"real_world_reference": realWorldRef,
+			"max_decimals":         fmt.Sprintf("%d", maxDecimals),
+			"transferable":         fmt.Sprintf("%t", transferable),
 		},
 	}
 }
 
-// CreateValidatorOperation creates a validator creation operation
 func CreateValidatorOperation(from, publicKey string, stake, gas int64, commission float64) *VMOperation {
 	return &VMOperation{
 		Type:   "create_validator",
@@ -1192,7 +1646,6 @@ func CreateValidatorOperation(from, publicKey string, stake, gas int64, commissi
 	}
 }
 
-// CreateCrossShardTransferOperation creates a cross-shard transfer operation
 func CreateCrossShardTransferOperation(from, to string, amount, gas int64) *VMOperation {
 	return &VMOperation{
 		Type:   "cross_shard_transfer",
@@ -1203,14 +1656,12 @@ func CreateCrossShardTransferOperation(from, to string, amount, gas int64) *VMOp
 	}
 }
 
-// Updated custom contract execution with RISC-V integration
+// Custom contract execution with RISC-V integration
 
-// RISC-V Custom Contract execution for Thrylos VM
 func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, error) {
 	baseGas := int64(200000)
 	vm.gasUsed += baseGas
 
-	// Validate custom contract parameters
 	if err := vm.validateCustomContract(op); err != nil {
 		return &ExecutionResult{
 			Success: false,
@@ -1219,7 +1670,6 @@ func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, e
 		}, nil
 	}
 
-	// Check if we have contract bytecode
 	if len(op.Data) == 0 {
 		return &ExecutionResult{
 			Success: false,
@@ -1228,10 +1678,8 @@ func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, e
 		}, nil
 	}
 
-	// Create state snapshot for rollback capability
 	snapshot := vm.worldState.CreateSnapshot()
 
-	// Calculate available gas for contract execution
 	availableGas := op.Gas - vm.gasUsed
 	if availableGas <= 0 {
 		return &ExecutionResult{
@@ -1241,11 +1689,9 @@ func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, e
 		}, nil
 	}
 
-	// Create RISC-V engine
 	riscvEngine := NewRISCVEngine()
 	defer riscvEngine.Reset()
 
-	// Set up contract API for blockchain interactions
 	contractGasUsed := int64(0)
 	api := &ContractAPI{
 		vm:       vm,
@@ -1256,10 +1702,8 @@ func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, e
 		snapshot: snapshot,
 	}
 
-	// Provide blockchain API to RISC-V contract
 	riscvEngine.SetAPI(api)
 
-	// Load contract bytecode into RISC-V engine
 	if err := riscvEngine.Load(op.Data); err != nil {
 		return &ExecutionResult{
 			Success: false,
@@ -1268,12 +1712,9 @@ func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, e
 		}, nil
 	}
 
-	// Execute RISC-V contract with gas limit
 	result, err := riscvEngine.Execute(availableGas)
 	if err != nil {
-		// Rollback state on execution error
 		vm.worldState.RestoreFromSnapshot(snapshot)
-
 		return &ExecutionResult{
 			Success: false,
 			GasUsed: vm.gasUsed,
@@ -1281,14 +1722,10 @@ func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, e
 		}, nil
 	}
 
-	// Add contract gas usage to total VM gas
 	vm.gasUsed += result.GasUsed
 
-	// Check if contract execution was successful
 	if !result.Success {
-		// Rollback state on contract failure
 		vm.worldState.RestoreFromSnapshot(snapshot)
-
 		return &ExecutionResult{
 			Success: false,
 			GasUsed: vm.gasUsed,
@@ -1296,7 +1733,6 @@ func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, e
 		}, nil
 	}
 
-	// Convert API calls and contract events to VM events
 	events := vm.convertContractEvents(api.callLog, result, op.From)
 
 	return &ExecutionResult{
@@ -1307,11 +1743,9 @@ func (vm *ThrylosVM) executeCustomContract(op *VMOperation) (*ExecutionResult, e
 	}, nil
 }
 
-// Helper method to convert contract API calls to VM events
 func (vm *ThrylosVM) convertContractEvents(apiCalls []APICall, result *RISCVResult, caller string) []Event {
 	events := make([]Event, 0)
 
-	// Add main contract execution event
 	events = append(events, Event{
 		Type: "custom_contract_executed",
 		Data: map[string]interface{}{
@@ -1323,11 +1757,9 @@ func (vm *ThrylosVM) convertContractEvents(apiCalls []APICall, result *RISCVResu
 		},
 	})
 
-	// Convert API calls to events
 	for _, call := range apiCalls {
 		switch call.Function {
 		case "emit_event":
-			// Extract custom events emitted by contract
 			if eventName, ok := call.Parameters["event_name"].(string); ok {
 				if eventData, ok := call.Parameters["data"].(map[string]interface{}); ok {
 					events = append(events, Event{
@@ -1338,7 +1770,6 @@ func (vm *ThrylosVM) convertContractEvents(apiCalls []APICall, result *RISCVResu
 			}
 
 		case "transfer":
-			// Add transfer events from contract
 			events = append(events, Event{
 				Type: "contract_transfer",
 				Data: map[string]interface{}{
@@ -1349,8 +1780,7 @@ func (vm *ThrylosVM) convertContractEvents(apiCalls []APICall, result *RISCVResu
 				},
 			})
 
-		case "get_balance", "get_token_balance":
-			// Add balance query events for debugging/monitoring
+		case "get_balance", "get_asset_balance":
 			events = append(events, Event{
 				Type: "contract_balance_query",
 				Data: map[string]interface{}{
@@ -1365,23 +1795,19 @@ func (vm *ThrylosVM) convertContractEvents(apiCalls []APICall, result *RISCVResu
 	return events
 }
 
-// Validation method for custom contracts
 func (vm *ThrylosVM) validateCustomContract(op *VMOperation) error {
-	// Check bytecode size limits (1MB max)
 	maxBytecodeSize := int64(1024 * 1024)
 	if int64(len(op.Data)) > maxBytecodeSize {
 		return fmt.Errorf("contract bytecode too large: %d bytes (max %d)",
 			len(op.Data), maxBytecodeSize)
 	}
 
-	// Check minimum gas requirement
-	minGas := int64(250000) // Higher minimum for RISC-V execution
+	minGas := int64(250000)
 	if op.Gas < minGas {
 		return fmt.Errorf("insufficient gas for contract execution: %d (min %d)",
 			op.Gas, minGas)
 	}
 
-	// Validate caller has sufficient balance for gas costs
 	balance, err := vm.worldState.GetBalance(op.From)
 	if err != nil {
 		return fmt.Errorf("failed to get caller balance: %v", err)

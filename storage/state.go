@@ -171,3 +171,117 @@ func (ss *StateStorage) GetAllValidators() (map[string]*core.Validator, error) {
 
 	return validators, iter.Error()
 }
+
+// Add these implementations to your StateStorage struct in storage/state.go
+
+// SaveRawData saves arbitrary data with a given key
+func (ss *StateStorage) SaveRawData(key string, data []byte) error {
+	if key == "" {
+		return fmt.Errorf("key cannot be empty")
+	}
+	if data == nil {
+		return fmt.Errorf("data cannot be nil")
+	}
+
+	// Use a prefix to avoid conflicts with other storage keys
+	prefixedKey := "raw:" + key
+	return ss.storage.Set([]byte(prefixedKey), data)
+}
+
+// GetRawData retrieves arbitrary data by key
+func (ss *StateStorage) GetRawData(key string) ([]byte, error) {
+	if key == "" {
+		return nil, fmt.Errorf("key cannot be empty")
+	}
+
+	// Use the same prefix as SaveRawData
+	prefixedKey := "raw:" + key
+	data, err := ss.storage.Get([]byte(prefixedKey))
+	if err != nil {
+		if err == ErrKeyNotFound {
+			return nil, fmt.Errorf("key not found: %s", key)
+		}
+		return nil, fmt.Errorf("failed to get raw data: %v", err)
+	}
+
+	return data, nil
+}
+
+// DeleteRawData removes data by key
+func (ss *StateStorage) DeleteRawData(key string) error {
+	if key == "" {
+		return fmt.Errorf("key cannot be empty")
+	}
+
+	// Use the same prefix as SaveRawData
+	prefixedKey := "raw:" + key
+	err := ss.storage.Delete([]byte(prefixedKey))
+	if err != nil {
+		// Don't return error if key doesn't exist - deletion is idempotent
+		if err == ErrKeyNotFound {
+			return nil
+		}
+		return fmt.Errorf("failed to delete raw data: %v", err)
+	}
+
+	return nil
+}
+
+// Optional: GetRawDataWithPrefix gets all data with a given prefix (useful for assets)
+func (ss *StateStorage) GetRawDataWithPrefix(prefix string) (map[string][]byte, error) {
+	if prefix == "" {
+		return nil, fmt.Errorf("prefix cannot be empty")
+	}
+
+	result := make(map[string][]byte)
+	prefixedKey := "raw:" + prefix
+
+	iter := ss.storage.Iterator([]byte(prefixedKey))
+	defer iter.Close()
+
+	for iter.Next() {
+		// Remove the "raw:" prefix from the key to return the original key
+		originalKey := string(iter.Key())
+		if len(originalKey) > 4 && originalKey[:4] == "raw:" {
+			originalKey = originalKey[4:] // Remove "raw:" prefix
+		}
+
+		result[originalKey] = append([]byte(nil), iter.Value()...) // Make a copy
+	}
+
+	return result, iter.Error()
+}
+
+// Optional: DeleteRawDataWithPrefix deletes all data with a given prefix
+func (ss *StateStorage) DeleteRawDataWithPrefix(prefix string) (int, error) {
+	if prefix == "" {
+		return 0, fmt.Errorf("prefix cannot be empty")
+	}
+
+	deleted := 0
+	prefixedKey := "raw:" + prefix
+
+	iter := ss.storage.Iterator([]byte(prefixedKey))
+	defer iter.Close()
+
+	// Collect keys first to avoid modifying while iterating
+	var keysToDelete [][]byte
+	for iter.Next() {
+		keysToDelete = append(keysToDelete, append([]byte(nil), iter.Key()...))
+	}
+
+	if err := iter.Error(); err != nil {
+		return 0, fmt.Errorf("iterator error: %v", err)
+	}
+
+	// Delete collected keys
+	for _, key := range keysToDelete {
+		if err := ss.storage.Delete(key); err != nil {
+			// Log error but continue with other deletions
+			continue
+		}
+		deleted++
+	}
+
+	return deleted, nil
+}
