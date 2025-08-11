@@ -4,6 +4,7 @@ bin/
 data-node*/
 logs/
 *.log
+vm/:memory
 
 # api info
 server.crt
