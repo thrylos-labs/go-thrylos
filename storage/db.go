@@ -95,7 +95,8 @@ func (db *DB) GetTransaction(hash string) (*core.Transaction, error) {
 }
 
 // Batch operations for block commits
-func (db *DB) CommitBlock(block *core.Block, accounts []*core.Account, validators []*core.Validator) error {
+// Update the method signature to include totalTransactions
+func (db *DB) CommitBlock(block *core.Block, accounts []*core.Account, validators []*core.Validator, totalTransactions int64) error {
 	return db.storage.Update(func(txn Transaction) error {
 		// Save block
 		blockData, _ := json.Marshal(block)
@@ -105,6 +106,11 @@ func (db *DB) CommitBlock(block *core.Block, accounts []*core.Account, validator
 
 		// Update height
 		if err := txn.Set(HeightKey(), []byte(fmt.Sprintf("%d", block.Header.Index))); err != nil {
+			return err
+		}
+
+		// *** ADD THIS - Save total transactions count ***
+		if err := txn.Set([]byte("total_transactions"), []byte(fmt.Sprintf("%d", totalTransactions))); err != nil {
 			return err
 		}
 

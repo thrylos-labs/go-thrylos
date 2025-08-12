@@ -37,9 +37,10 @@ type WorldState struct {
 	accountManager *account.AccountManager
 
 	// Transaction pool and services
-	txPool      *transaction.Pool
-	txValidator *transaction.Validator
-	txExecutor  *transaction.Executor
+	txPool            *transaction.Pool
+	txValidator       *transaction.Validator
+	txExecutor        *transaction.Executor
+	totalTransactions int64
 
 	// Shard configuration
 	shardID     account.ShardID
@@ -215,23 +216,24 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 	stateStorage := storage.NewStateStorage(badgerStorage)
 
 	ws := &WorldState{
-		config:         cfg,
-		db:             db,
-		state:          stateStorage,
-		accountManager: account.NewAccountManager(shardID, totalShards),
-		txPool:         transaction.NewPool(shardID, totalShards, cfg.Consensus.MaxTxPerBlock, cfg.Consensus.MinGasPrice),
-		txValidator:    transaction.NewValidator(shardID, totalShards, cfg),
-		txExecutor:     transaction.NewExecutor(shardID, totalShards),
-		shardID:        shardID,
-		totalShards:    totalShards,
-		blocks:         make([]*core.Block, 0),
-		validators:     make(map[string]*core.Validator),
-		totalSupply:    cfg.Economics.GenesisSupply,
-		totalStaked:    0,
-		lastTimestamp:  time.Now().Unix(),
-		assets:         make(map[string]*AssetToken),
-		assetBalances:  make(map[string]map[string]int64),
-		assetRegistry:  make(map[string]string),
+		config:            cfg,
+		db:                db,
+		state:             stateStorage,
+		accountManager:    account.NewAccountManager(shardID, totalShards),
+		txPool:            transaction.NewPool(shardID, totalShards, cfg.Consensus.MaxTxPerBlock, cfg.Consensus.MinGasPrice),
+		txValidator:       transaction.NewValidator(shardID, totalShards, cfg),
+		txExecutor:        transaction.NewExecutor(shardID, totalShards),
+		shardID:           shardID,
+		totalShards:       totalShards,
+		blocks:            make([]*core.Block, 0),
+		validators:        make(map[string]*core.Validator),
+		totalSupply:       cfg.Economics.GenesisSupply,
+		totalStaked:       0,
+		lastTimestamp:     time.Now().Unix(),
+		assets:            make(map[string]*AssetToken),
+		assetBalances:     make(map[string]map[string]int64),
+		assetRegistry:     make(map[string]string),
+		totalTransactions: 0, // ADD THIS
 	}
 
 	// Try to load existing state from storage
@@ -325,10 +327,6 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 		return fmt.Errorf("block validation failed: %v", err)
 	}
 
-	// Execute all transactions in the block
-	var updatedAccounts []*core.Account
-	var updatedValidators []*core.Validator
-
 	for _, tx := range block.Transactions {
 		// Use the executor instance
 		receipt, err := ws.txExecutor.ExecuteTransaction(tx, ws.accountManager)
@@ -355,6 +353,7 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 	ws.currentHash = block.Hash
 	ws.height = block.Header.Index
 	ws.lastTimestamp = block.Header.Timestamp
+	ws.totalTransactions += int64(len(block.Transactions))
 
 	// Update state root
 	if err := ws.updateStateRoot(); err != nil {
@@ -366,15 +365,18 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 
 	// Collect all accounts and validators that need to be saved
 	accounts := ws.accountManager.GetAllAccounts()
+	var updatedAccounts []*core.Account // *** KEEP THESE DECLARATIONS ***
 	for _, account := range accounts {
 		updatedAccounts = append(updatedAccounts, account)
 	}
+
+	var updatedValidators []*core.Validator // *** KEEP THIS DECLARATION ***
 	for _, validator := range ws.validators {
 		updatedValidators = append(updatedValidators, validator)
 	}
 
 	// Use atomic batch operation to save everything
-	if err := ws.db.CommitBlock(block, updatedAccounts, updatedValidators); err != nil {
+	if err := ws.db.CommitBlock(block, updatedAccounts, updatedValidators, ws.totalTransactions); err != nil {
 		return fmt.Errorf("failed to commit block to storage: %v", err)
 	}
 
@@ -619,18 +621,26 @@ func (ws *WorldState) GetStatus() map[string]interface{} {
 	accountStats := ws.accountManager.GetAccountStats()
 
 	return map[string]interface{}{
-		"shard_id":        ws.shardID,
-		"height":          ws.height,
-		"current_hash":    ws.currentHash,
-		"state_root":      ws.stateRoot,
-		"total_supply":    ws.totalSupply,
-		"total_staked":    ws.totalStaked,
-		"block_count":     len(ws.blocks),
-		"pending_txs":     poolStats.PendingCount,
-		"validator_count": len(ws.validators),
-		"last_timestamp":  ws.lastTimestamp,
-		"pool_stats":      poolStats,
-		"account_stats":   accountStats,
+		"shard_id":           ws.shardID,
+		"height":             ws.height,
+		"current_hash":       ws.currentHash,
+		"state_root":         ws.stateRoot,
+		"total_supply":       ws.totalSupply,
+		"total_staked":       ws.totalStaked,
+		"total_transactions": ws.totalTransactions,
+		"block_count":        len(ws.blocks),
+		"pending_txs":        poolStats.PendingCount,
+		"validator_count":    len(ws.validators),
+		"last_timestamp":     ws.lastTimestamp,
+		"pool_stats":         poolStats,
+		"account_stats":      accountStats,
+	}
+}
+
+func (ws *WorldState) recalculateTotalTransactions() {
+	ws.totalTransactions = 0
+	for _, block := range ws.blocks {
+		ws.totalTransactions += int64(len(block.Transactions))
 	}
 }
 
@@ -1807,6 +1817,16 @@ func (ws *WorldState) LoadState() error {
 	fmt.Printf("🔍 LoadState: Found state root: %s\n", stateRoot)
 	ws.stateRoot = stateRoot
 
+	// *** ADD THIS - Load total transactions ***
+	totalTx, err := ws.state.GetTotalTransactions()
+	if err != nil {
+		fmt.Printf("🔍 LoadState: No transaction count found (will calculate from blocks): %v\n", err)
+		ws.totalTransactions = 0 // Will be calculated later
+	} else {
+		ws.totalTransactions = totalTx
+		fmt.Printf("🔍 LoadState: Found total transactions: %d\n", totalTx)
+	}
+
 	// Load all accounts
 	accounts, err := ws.state.GetAllAccounts()
 	if err != nil {
@@ -1827,7 +1847,7 @@ func (ws *WorldState) LoadState() error {
 	}
 	ws.totalSupply = totalSupply
 
-	// Load all validators (you need GetAllValidators method in StateStorage)
+	// Load all validators
 	validators, err := ws.state.GetAllValidators()
 	if err != nil {
 		fmt.Printf("🔍 LoadState: Error loading validators: %v\n", err)
@@ -1845,12 +1865,31 @@ func (ws *WorldState) LoadState() error {
 	}
 	ws.totalStaked = totalStaked
 
-	fmt.Printf("✅ LoadState: State loaded successfully\n")
-	// Load assets (ADD THIS)
+	if err != nil {
+		fmt.Printf("🔍 LoadState: Warning - could not load blocks: %v\n", err)
+	} else {
+		// If transaction count wasn't found or is 0, calculate it from blocks
+		if ws.totalTransactions == 0 && len(ws.blocks) > 0 {
+			fmt.Printf("🔍 LoadState: Calculating transaction count from %d blocks...\n", len(ws.blocks))
+			ws.recalculateTotalTransactions()
+
+			// Save the calculated value for future loads
+			if err := ws.state.SaveTotalTransactions(ws.totalTransactions); err != nil {
+				fmt.Printf("⚠️  LoadState: Failed to save calculated transaction count: %v\n", err)
+			} else {
+				fmt.Printf("✅ LoadState: Saved calculated transaction count: %d\n", ws.totalTransactions)
+			}
+		}
+	}
+
+	// Load assets
 	if err := ws.LoadAssetsFromStorage(); err != nil {
 		fmt.Printf("🔍 LoadState: Warning - could not load assets: %v\n", err)
 		// Don't fail - assets might not exist yet
 	}
+
+	fmt.Printf("✅ LoadState: State loaded successfully - Height: %d, Accounts: %d, Validators: %d, Transactions: %d\n",
+		ws.height, len(accounts), len(validators), ws.totalTransactions)
 
 	return nil
 }

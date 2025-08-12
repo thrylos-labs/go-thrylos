@@ -21,6 +21,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 
@@ -284,4 +285,34 @@ func (ss *StateStorage) DeleteRawDataWithPrefix(prefix string) (int, error) {
 	}
 
 	return deleted, nil
+}
+
+// SaveTotalTransactions saves the total transaction count
+func (ss *StateStorage) SaveTotalTransactions(count int64) error {
+	data := make([]byte, 8)
+	binary.BigEndian.PutUint64(data, uint64(count))
+	return ss.storage.Set([]byte("total_transactions"), data)
+}
+
+// GetTotalTransactions retrieves the total transaction count
+func (ss *StateStorage) GetTotalTransactions() (int64, error) {
+	data, err := ss.storage.Get([]byte("total_transactions"))
+	if err != nil {
+		if err == ErrKeyNotFound {
+			return 0, fmt.Errorf("total transactions count not found")
+		}
+		return 0, fmt.Errorf("failed to get total transactions: %v", err)
+	}
+
+	if len(data) != 8 {
+		return 0, fmt.Errorf("invalid total transactions data length: expected 8, got %d", len(data))
+	}
+
+	count := int64(binary.BigEndian.Uint64(data))
+	return count, nil
+}
+
+// Optional: Add a key helper function at the top with your other key functions
+func TotalTransactionsKey() []byte {
+	return []byte("total_transactions")
 }
