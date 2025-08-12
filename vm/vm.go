@@ -199,6 +199,8 @@ func (vm *ThrylosVM) Execute(op *VMOperation) (*ExecutionResult, error) {
 		result, err = vm.executeCrossShardTransfer(op)
 	case "create_validator":
 		result, err = vm.executeCreateValidator(op)
+	case "unbond_validator":
+		result, err = vm.executeUnbondValidator(op)
 	// Asset operations (replaced token operations)
 	case "create_asset":
 		result, err = vm.executeCreateAsset(op)
@@ -494,12 +496,66 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 			Type: "create_validator",
 			Data: map[string]interface{}{
 				"validator":   op.From,
-				"name":        name,        // ✅ INCLUDE NAME IN EVENT
-				"description": description, // ✅ INCLUDE DESCRIPTION IN EVENT
-				"website":     website,     // ✅ INCLUDE WEBSITE IN EVENT
+				"name":        name,
+				"description": description,
+				"website":     website,
 				"public_key":  pubKey,
 				"stake":       op.Amount,
 				"commission":  commission,
+			},
+		}},
+	}, nil
+}
+
+// Add this function to your vm.go file, in the VM execution switch statement
+
+func (vm *ThrylosVM) executeUnbondValidator(op *VMOperation) (*ExecutionResult, error) {
+	unbondValidatorGas := int64(75000)
+	vm.gasUsed += unbondValidatorGas
+
+	// Get the validator
+	validator, err := vm.worldState.GetValidator(op.From)
+	if err != nil {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("validator not found: %v", err),
+		}, nil
+	}
+
+	if !validator.Active {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   "validator is already inactive",
+		}, nil
+	}
+
+	// Deactivate the validator
+	validator.Active = false
+	validator.UpdatedAt = time.Now().Unix()
+
+	err = vm.worldState.UpdateValidator(validator)
+	if err != nil {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   fmt.Sprintf("failed to update validator: %v", err),
+		}, nil
+	}
+
+	// Return staked amount to validator's account after unbonding period
+	// Note: In a real implementation, this would be handled by a scheduler
+	// For now, we'll just mark it as inactive
+
+	return &ExecutionResult{
+		Success: true,
+		GasUsed: vm.gasUsed,
+		Events: []Event{{
+			Type: "unbond_validator",
+			Data: map[string]interface{}{
+				"validator": op.From,
+				"stake":     validator.Stake,
 			},
 		}},
 	}, nil
@@ -1514,10 +1570,11 @@ func (vm *ThrylosVM) GetOperationTypes() []string {
 		"undelegate",
 		"cross_shard_transfer",
 		"create_validator",
-		"create_asset",   // Replaced create_token
-		"mint_asset",     // Replaced mint_token
-		"burn_asset",     // Replaced burn_token
-		"transfer_asset", // Replaced transfer_token
+		"create_asset",
+		"unbond_validator",
+		"mint_asset",
+		"burn_asset",
+		"transfer_asset",
 		"claim_rewards",
 		"custom_contract",
 	}

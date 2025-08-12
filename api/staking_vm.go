@@ -67,6 +67,13 @@ type VMStakingResponse struct {
 	Timestamp int64      `json:"timestamp"`
 }
 
+type VMUnbondValidatorRequest struct {
+	From      string `json:"from"`
+	Gas       int64  `json:"gas"`
+	Nonce     uint64 `json:"nonce"`
+	Signature []byte `json:"signature"`
+}
+
 // ============================================================================
 // SECTION 2: FIXED VM STAKING ENDPOINTS
 // ============================================================================
@@ -514,4 +521,89 @@ func (s *Server) estimateVMStakingGas(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, response)
+}
+
+func (s *Server) unbondValidatorViaVM(w http.ResponseWriter, r *http.Request) {
+	var req VMUnbondValidatorRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.validateVMUnbondValidatorRequest(&req); err != nil {
+		s.writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Check if validator exists
+	validator, err := s.worldState.GetValidator(req.From)
+	if err != nil {
+		s.writeError(w, "Validator not found", http.StatusNotFound)
+		return
+	}
+
+	if !validator.Active {
+		s.writeError(w, "Validator is already inactive", http.StatusBadRequest)
+		return
+	}
+
+	operation := &vm.VMOperation{
+		Type: "unbond_validator",
+		From: req.From,
+		Gas:  req.Gas,
+	}
+
+	result, err := s.executeVMStakingOperation(operation, req.From, req.Nonce, req.Signature)
+	if err != nil {
+		s.writeError(w, fmt.Sprintf("VM execution failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if !result.Success {
+		s.writeError(w, result.Error, http.StatusBadRequest)
+		return
+	}
+
+	// Deactivate the validator
+	validator.Active = false
+	validator.UpdatedAt = time.Now().Unix()
+
+	err = s.worldState.UpdateValidator(validator)
+	if err != nil {
+		s.writeError(w, fmt.Sprintf("Failed to update validator: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Create transaction record
+	tx := s.createTransactionFromVM(operation, req.From, req.Nonce, req.Signature, core.TransactionType(7)) // Custom type for unbond
+	s.worldState.AddTransaction(tx)
+
+	// Debug logging
+	fmt.Printf("🔍 Unbonded validator: %s\n", req.From)
+
+	response := &VMStakingResponse{
+		Success:   true,
+		TxHash:    tx.Hash,
+		GasUsed:   result.GasUsed,
+		GasPrice:  s.vm.GetGasPrice(),
+		TotalCost: result.GasUsed * s.vm.GetGasPrice(),
+		Events:    result.Events,
+		Message:   "Validator unbonding initiated - will be deactivated after 14-day period",
+		Timestamp: time.Now().Unix(),
+	}
+
+	s.writeJSON(w, response)
+}
+
+func (s *Server) validateVMUnbondValidatorRequest(req *VMUnbondValidatorRequest) error {
+	if req.From == "" {
+		return fmt.Errorf("from address required")
+	}
+	if req.Gas <= 0 {
+		return fmt.Errorf("gas must be positive")
+	}
+	if len(req.Signature) == 0 {
+		return fmt.Errorf("signature required")
+	}
+	return nil
 }

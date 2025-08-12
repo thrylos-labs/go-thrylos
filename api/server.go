@@ -196,6 +196,7 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/staking/vm/undelegate", s.undelegateViaVM).Methods("POST", "OPTIONS")
 	api.HandleFunc("/staking/vm/claim", s.claimRewardsViaVM).Methods("POST", "OPTIONS")
 	api.HandleFunc("/validator/vm/create", s.createValidatorViaVM).Methods("POST", "OPTIONS")
+	api.HandleFunc("/validator/vm/unbond", s.unbondValidatorViaVM).Methods("POST")
 	api.HandleFunc("/staking/vm/estimate-gas", s.estimateVMStakingGas).Methods("POST", "OPTIONS")
 
 	// Development endpoints - EXPLICITLY ADD OPTIONS
