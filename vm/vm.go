@@ -393,11 +393,25 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 	pubKey := op.Parameters["public_key"]
 	commissionStr := op.Parameters["commission"]
 
+	// ✅ EXTRACT NAME, DESCRIPTION, AND WEBSITE FROM PARAMETERS
+	name := op.Parameters["name"]
+	description := op.Parameters["description"]
+	website := op.Parameters["website"]
+
 	if pubKey == "" {
 		return &ExecutionResult{
 			Success: false,
 			GasUsed: vm.gasUsed,
 			Error:   "public_key parameter required",
+		}, nil
+	}
+
+	// ✅ VALIDATE NAME IS PROVIDED
+	if name == "" {
+		return &ExecutionResult{
+			Success: false,
+			GasUsed: vm.gasUsed,
+			Error:   "name parameter required",
 		}, nil
 	}
 
@@ -416,8 +430,12 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 		}, nil
 	}
 
+	// ✅ CREATE VALIDATOR WITH ALL FIELDS INCLUDING NAME
 	validator := &core.Validator{
 		Address:        op.From,
+		Name:           name,        // ✅ SET THE NAME FROM PARAMETERS
+		Description:    description, // ✅ SET THE DESCRIPTION FROM PARAMETERS
+		Website:        website,     // ✅ SET THE WEBSITE FROM PARAMETERS
 		Pubkey:         []byte(pubKey),
 		Stake:          op.Amount,
 		SelfStake:      op.Amount,
@@ -428,6 +446,9 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 		CreatedAt:      time.Now().Unix(),
 		UpdatedAt:      time.Now().Unix(),
 	}
+
+	// ✅ ADD DEBUG LOGGING
+	fmt.Printf("🔍 VM Creating validator with name: '%s', description: '%s', website: '%s'\n", name, description, website)
 
 	err := vm.worldState.AddValidator(validator)
 	if err != nil {
@@ -472,10 +493,13 @@ func (vm *ThrylosVM) executeCreateValidator(op *VMOperation) (*ExecutionResult, 
 		Events: []Event{{
 			Type: "create_validator",
 			Data: map[string]interface{}{
-				"validator":  op.From,
-				"public_key": pubKey,
-				"stake":      op.Amount,
-				"commission": commission,
+				"validator":   op.From,
+				"name":        name,        // ✅ INCLUDE NAME IN EVENT
+				"description": description, // ✅ INCLUDE DESCRIPTION IN EVENT
+				"website":     website,     // ✅ INCLUDE WEBSITE IN EVENT
+				"public_key":  pubKey,
+				"stake":       op.Amount,
+				"commission":  commission,
 			},
 		}},
 	}, nil
