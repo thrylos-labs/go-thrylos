@@ -437,14 +437,13 @@ type Storage interface {
 
 // Key prefixes for different data types
 const (
-	BlockPrefix       = "blk:"
-	AccountPrefix     = "acc:"
-	ValidatorPrefix   = "val:"
-	HeightPrefix      = "hgt:"
-	StateRootPrefix   = "srt:"
-	TransactionPrefix = "txn:"
-	SnapshotPrefix    = "snp:"
-	IndexPrefix       = "idx:"
+	BlockPrefix     = "blk:"
+	AccountPrefix   = "acc:"
+	ValidatorPrefix = "val:"
+	HeightPrefix    = "hgt:"
+	StateRootPrefix = "srt:"
+	SnapshotPrefix  = "snp:"
+	IndexPrefix     = "idx:"
 )
 
 // Helper functions for key construction
@@ -470,10 +469,6 @@ func HeightKey() []byte {
 
 func StateRootKey() []byte {
 	return []byte(StateRootPrefix + "current")
-}
-
-func TransactionKey(hash string) []byte {
-	return []byte(TransactionPrefix + hash)
 }
 
 func SnapshotKey(height int64) []byte {

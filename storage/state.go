@@ -311,8 +311,3 @@ func (ss *StateStorage) GetTotalTransactions() (int64, error) {
 	count := int64(binary.BigEndian.Uint64(data))
 	return count, nil
 }
-
-// Optional: Add a key helper function at the top with your other key functions
-func TotalTransactionsKey() []byte {
-	return []byte("total_transactions")
-}

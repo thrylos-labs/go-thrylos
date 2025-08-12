@@ -486,6 +486,9 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 	vars := mux.Vars(r)
 	address := vars["address"]
 
+	// Add debug logging
+	log.Printf("🔍 Getting transactions for address: %s", address)
+
 	// Parse query parameters
 	limitStr := r.URL.Query().Get("limit")
 	limit := 50 // default limit
@@ -495,17 +498,52 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// Get transactions for this account from pending transactions
 	var accountTxs []map[string]interface{}
 
-	// Check pending transactions
+	// Get confirmed transactions using efficient indexing
+	// ACCESS DB THROUGH WORLDSTATE
+	log.Printf("🔍 Fetching confirmed transactions from database index...")
+	confirmedTxs, err := s.worldState.GetTransactionsByAddress(address, limit)
+	if err != nil {
+		log.Printf("❌ Error getting transactions for address %s: %v", address, err)
+		http.Error(w, "Failed to fetch transactions", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("🔍 Found %d confirmed transactions", len(confirmedTxs))
+
+	// Convert confirmed transactions to response format
+	for _, tx := range confirmedTxs {
+		if len(accountTxs) >= limit {
+			break
+		}
+
+		txData := map[string]interface{}{
+			"hash":      tx.Id,
+			"from":      tx.From,
+			"to":        tx.To,
+			"amount":    tx.Amount,
+			"nonce":     tx.Nonce,
+			"gas":       tx.Gas,
+			"gas_price": tx.GasPrice,
+			"timestamp": tx.Timestamp,
+			"status":    "confirmed",
+		}
+		accountTxs = append(accountTxs, txData)
+	}
+
+	// Add pending transactions (still check these for real-time updates)
 	pendingTxs := s.worldState.GetPendingTransactions()
+	log.Printf("🔍 Checking %d pending transactions", len(pendingTxs))
+
 	for _, tx := range pendingTxs {
 		if len(accountTxs) >= limit {
 			break
 		}
 
 		if tx.From == address || tx.To == address {
+			log.Printf("🔍 Found pending transaction: %s", tx.Id)
+
 			txData := map[string]interface{}{
 				"hash":      tx.Id,
 				"from":      tx.From,
@@ -521,8 +559,17 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// TODO: Add confirmed transactions from blocks
-	// You can implement this by scanning recent blocks or adding transaction indexing
+	// Sort all transactions by timestamp (newest first)
+	sort.Slice(accountTxs, func(i, j int) bool {
+		timeI, okI := accountTxs[i]["timestamp"].(int64)
+		timeJ, okJ := accountTxs[j]["timestamp"].(int64)
+		if !okI || !okJ {
+			return false
+		}
+		return timeI > timeJ
+	})
+
+	log.Printf("✅ Returning %d total transactions for address %s", len(accountTxs), address)
 
 	response := map[string]interface{}{
 		"address":      address,

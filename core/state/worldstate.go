@@ -327,6 +327,7 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 		return fmt.Errorf("block validation failed: %v", err)
 	}
 
+	// Execute all transactions in the block
 	for _, tx := range block.Transactions {
 		// Use the executor instance
 		receipt, err := ws.txExecutor.ExecuteTransaction(tx, ws.accountManager)
@@ -339,9 +340,9 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 			return fmt.Errorf("transaction %s failed: %s", tx.Id, receipt.Error)
 		}
 
-		// Save transaction to storage
-		if err := ws.db.SaveTransaction(tx); err != nil {
-			return fmt.Errorf("failed to save transaction %s: %v", tx.Id, err)
+		// *** UPDATED: Save transaction with indexing ***
+		if err := ws.db.SaveTransactionWithIndex(tx); err != nil {
+			return fmt.Errorf("failed to save transaction %s with indexing: %v", tx.Id, err)
 		}
 
 		// Remove transaction from pool if it exists
@@ -365,12 +366,12 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 
 	// Collect all accounts and validators that need to be saved
 	accounts := ws.accountManager.GetAllAccounts()
-	var updatedAccounts []*core.Account // *** KEEP THESE DECLARATIONS ***
+	var updatedAccounts []*core.Account
 	for _, account := range accounts {
 		updatedAccounts = append(updatedAccounts, account)
 	}
 
-	var updatedValidators []*core.Validator // *** KEEP THIS DECLARATION ***
+	var updatedValidators []*core.Validator
 	for _, validator := range ws.validators {
 		updatedValidators = append(updatedValidators, validator)
 	}
@@ -381,6 +382,13 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 	}
 
 	return nil
+}
+
+func (ws *WorldState) GetTransactionsByAddress(address string, limit int) ([]*core.Transaction, error) {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	return ws.db.GetTransactionsByAddress(address, limit)
 }
 
 // ValidateTransaction validates a transaction using the transaction validator

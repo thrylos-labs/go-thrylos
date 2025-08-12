@@ -24,6 +24,9 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"sort"
+	"strings"
 
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
@@ -132,4 +135,137 @@ func (db *DB) CommitBlock(block *core.Block, accounts []*core.Account, validator
 
 		return nil
 	})
+}
+
+// Add these methods to your DB struct in storage/db.go
+
+// SaveTransactionWithIndex saves a transaction and creates address indexes
+func (db *DB) SaveTransactionWithIndex(tx *core.Transaction) error {
+	return db.storage.Update(func(txn Transaction) error {
+		// Save the transaction itself
+		txData, err := json.Marshal(tx)
+		if err != nil {
+			return fmt.Errorf("failed to marshal transaction: %v", err)
+		}
+
+		if err := txn.Set(TransactionKey(tx.Id), txData); err != nil {
+			return fmt.Errorf("failed to save transaction: %v", err)
+		}
+
+		// Create index entries for both sender and receiver
+		// Store just the transaction hash in the index (lightweight)
+		txHashBytes := []byte(tx.Id)
+
+		// Index for sender (from address)
+		if tx.From != "" {
+			fromKey := AddressTransactionKey(tx.From, tx.Id)
+			if err := txn.Set(fromKey, txHashBytes); err != nil {
+				return fmt.Errorf("failed to create from-address index: %v", err)
+			}
+		}
+
+		// Index for receiver (to address)
+		if tx.To != "" {
+			toKey := AddressTransactionKey(tx.To, tx.Id)
+			if err := txn.Set(toKey, txHashBytes); err != nil {
+				return fmt.Errorf("failed to create to-address index: %v", err)
+			}
+		}
+
+		return nil
+	})
+}
+
+// GetTransactionsByAddress efficiently retrieves transactions for an address using indexes
+func (db *DB) GetTransactionsByAddress(address string, limit int) ([]*core.Transaction, error) {
+	var transactions []*core.Transaction
+	seen := make(map[string]bool) // Prevent duplicates if address sends to itself
+
+	// Use the address index to find transaction hashes
+	iter := db.storage.Iterator(AddressTransactionPrefix(address))
+	defer iter.Close()
+
+	var txHashes []string
+	for iter.Next() {
+		// Extract transaction hash from the key
+		// Key format: "addr_tx:address:txhash"
+		key := string(iter.Key())
+		parts := strings.Split(key, ":")
+		if len(parts) >= 3 {
+			txHash := strings.Join(parts[2:], ":") // Handle hashes with colons
+			if !seen[txHash] {
+				txHashes = append(txHashes, txHash)
+				seen[txHash] = true
+
+				if len(txHashes) >= limit {
+					break
+				}
+			}
+		}
+	}
+
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("iterator error: %v", err)
+	}
+
+	// Now fetch the actual transactions
+	for _, txHash := range txHashes {
+		tx, err := db.GetTransaction(txHash)
+		if err != nil {
+			// Log error but continue with other transactions
+			log.Printf("Warning: could not retrieve transaction %s: %v", txHash, err)
+			continue
+		}
+		transactions = append(transactions, tx)
+	}
+
+	// Sort by timestamp (newest first)
+	sort.Slice(transactions, func(i, j int) bool {
+		return transactions[i].Timestamp > transactions[j].Timestamp
+	})
+
+	return transactions, nil
+}
+
+// GetTransactionCount returns the total number of transactions for an address
+func (db *DB) GetTransactionCount(address string) (int, error) {
+	count := 0
+	seen := make(map[string]bool)
+
+	iter := db.storage.Iterator(AddressTransactionPrefix(address))
+	defer iter.Close()
+
+	for iter.Next() {
+		// Extract transaction hash from the key
+		key := string(iter.Key())
+		parts := strings.Split(key, ":")
+		if len(parts) >= 3 {
+			txHash := strings.Join(parts[2:], ":")
+			if !seen[txHash] {
+				seen[txHash] = true
+				count++
+			}
+		}
+	}
+
+	return count, iter.Error()
+}
+
+func TransactionKey(txHash string) []byte {
+	return []byte(fmt.Sprintf("tx:%s", txHash))
+}
+
+// TransactionPrefix returns the prefix for all transactions
+func TransactionPrefix() []byte {
+	return []byte("tx:")
+}
+
+// AddressTransactionKey returns the key for indexing transactions by address
+func AddressTransactionKey(address, txHash string) []byte {
+	return []byte(fmt.Sprintf("addr_tx:%s:%s", address, txHash))
+}
+
+// AddressTransactionPrefix returns the prefix for address-based transaction index
+func AddressTransactionPrefix(address string) []byte {
+	return []byte(fmt.Sprintf("addr_tx:%s:", address))
 }
