@@ -884,26 +884,56 @@ func (s *Server) formatBlock(block *core.Block) map[string]interface{} {
 		"tx_count":     len(block.Transactions),
 	}
 }
-
 func (s *Server) formatValidator(validator *core.Validator) map[string]interface{} {
+	// Convert boolean Active to string status
+	status := "inactive"
+	if validator.Active {
+		status = "active"
+	}
+
+	// Handle jailed validators
+	if validator.JailUntil > 0 && time.Now().Unix() < validator.JailUntil {
+		status = "jailed"
+	}
+
 	return map[string]interface{}{
-		"address":         validator.Address,
-		"name":            validator.Name,
-		"description":     validator.Description,
-		"website":         validator.Website,
+		"address":        validator.Address,
+		"name":           validator.Name,
+		"description":    validator.Description,
+		"website":        validator.Website,
+		"commission":     validator.Commission,
+		"totalStaked":    validator.Stake + validator.DelegatedStake, // Combined stake
+		"uptime":         s.calculateValidatorUptime(validator),
+		"status":         status, // ✅ Fixed: string instead of boolean
+		"selfStake":      validator.SelfStake,
+		"delegatorCount": len(validator.Delegators),
+		"blocksProposed": validator.BlocksProposed,
+		"blocksMissed":   validator.BlocksMissed,
+		"createdAt":      validator.CreatedAt,
+		"updatedAt":      validator.UpdatedAt,
+		"delegations":    validator.Delegators,
+
+		// Keep the old fields for backward compatibility
+		"active":          validator.Active,
 		"stake":           validator.Stake,
 		"self_stake":      validator.SelfStake,
 		"delegated_stake": validator.DelegatedStake,
-		"commission":      validator.Commission,
-		"active":          validator.Active,
 		"blocks_proposed": validator.BlocksProposed,
 		"blocks_missed":   validator.BlocksMissed,
 		"jail_until":      validator.JailUntil,
 		"created_at":      validator.CreatedAt,
 		"updated_at":      validator.UpdatedAt,
 		"delegator_count": len(validator.Delegators),
-		"delegations":     validator.Delegators, // ✅ Also add delegations if needed
 	}
+}
+
+// Add this helper function
+func (s *Server) calculateValidatorUptime(validator *core.Validator) float64 {
+	totalBlocks := validator.BlocksProposed + validator.BlocksMissed
+	if totalBlocks == 0 {
+		return 100.0 // New validators start with 100% uptime
+	}
+	return (float64(validator.BlocksProposed) / float64(totalBlocks)) * 100.0
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, data interface{}) {

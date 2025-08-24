@@ -211,7 +211,7 @@ type APIConfig struct {
 func Load() (*Config, error) {
 	return &Config{
 		NodeID:   "thrylos-v2-node",
-		DataDir:  "./data",
+		DataDir:  "/home/thrylos/data", // Instead of "./data"
 		LogLevel: "info",
 
 		// Genesis token allocation
@@ -234,7 +234,7 @@ func Load() (*Config, error) {
 			BootstrapPeers: []string{},
 			MaxPeers:       50,
 			PingInterval:   30 * time.Second,
-			NetworkID:      "thrylos-mainnet",
+			NetworkID:      "thrylos-mainnet", // Keep this
 		},
 
 		Consensus: ConsensusConfig{
@@ -309,11 +309,11 @@ func Load() (*Config, error) {
 		},
 
 		API: APIConfig{
-			EnableAPI:     true,                 // Enable API by default
-			RESTAddr:      ":8080",              // HTTP development port
-			EnableTLS:     false,                // HTTP for development
-			CertFile:      "./certs/server.crt", // Path for when TLS is enabled
-			KeyFile:       "./certs/server.key", // Path for when TLS is enabled
+			EnableAPI:     true,
+			RESTAddr:      ":8080", // Keep this for now
+			EnableTLS:     false,   // We'll add SSL later
+			CertFile:      "/home/thrylos/certs/server.crt",
+			KeyFile:       "/home/thrylos/certs/server.key",
 			EnableCORS:    true,
 			RateLimit:     1000,
 			EnableMetrics: true,
@@ -336,7 +336,7 @@ func Load() (*Config, error) {
 			ListenPort:     9000,
 			BootstrapPeers: []string{},
 			MaxPeers:       50,
-			EnableMDNS:     true,
+			EnableMDNS:     false, // Change to false for production
 			EnableDHT:      true,
 		},
 	}, nil
