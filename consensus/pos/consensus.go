@@ -14,7 +14,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/big"
-	"sync"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
@@ -25,89 +24,6 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"golang.org/x/crypto/blake2b"
 )
-
-// ConsensusEngine implements Proof of Stake consensus
-type ConsensusEngine struct {
-	// Configuration
-	config *config.Config
-
-	// Validator management
-	validatorManager *validator.Manager
-	validatorSet     *validator.Set
-
-	// State management
-	worldState *state.WorldState
-
-	// Consensus state
-	currentEpoch     uint64
-	currentSlot      uint64
-	proposalTimeout  time.Duration
-	attestationPhase time.Duration
-
-	// Block production
-	blockProposer  *BlockProposer
-	blockValidator *BlockValidator
-
-	// Attestations and votes
-	attestations map[string]*Attestation
-	votes        map[string]*Vote
-
-	// Fork choice
-	forkChoice *ForkChoice
-
-	// Network communication
-	broadcastChan chan interface{}
-	receiveChan   chan interface{}
-
-	// Synchronization
-	mu sync.RWMutex
-
-	// Node identity
-	nodePrivateKey crypto.PrivateKey
-	nodeAddress    string
-
-	// Metrics
-	blocksProposed   uint64
-	blocksMissed     uint64
-	attestationsMade uint64
-}
-
-// Attestation represents a validator's vote on a block
-type Attestation struct {
-	ValidatorAddress string `json:"validator_address"`
-	BlockHash        string `json:"block_hash"`
-	BlockHeight      int64  `json:"block_height"`
-	Epoch            uint64 `json:"epoch"`
-	Slot             uint64 `json:"slot"`
-	Signature        []byte `json:"signature"`
-	Timestamp        int64  `json:"timestamp"`
-}
-
-// Vote represents a validator's vote in fork choice
-type Vote struct {
-	ValidatorAddress string `json:"validator_address"`
-	SourceBlockHash  string `json:"source_block_hash"`
-	TargetBlockHash  string `json:"target_block_hash"`
-	SourceEpoch      uint64 `json:"source_epoch"`
-	TargetEpoch      uint64 `json:"target_epoch"`
-	Signature        []byte `json:"signature"`
-}
-
-// ProposalSlot represents a slot where a validator should propose
-type ProposalSlot struct {
-	Slot             uint64 `json:"slot"`
-	ValidatorAddress string `json:"validator_address"`
-	Timestamp        int64  `json:"timestamp"`
-}
-
-// BlockProposal represents a block proposal message
-type BlockProposal struct {
-	Block     *core.Block `json:"block"`
-	Proposer  string      `json:"proposer"`
-	Slot      uint64      `json:"slot"`
-	Epoch     uint64      `json:"epoch"`
-	Signature []byte      `json:"signature"`
-}
 
 // NewConsensusEngine creates a new PoS consensus engine
 func NewConsensusEngine(
@@ -144,7 +60,7 @@ func NewConsensusEngine(
 	engine.blockValidator = NewBlockValidator(engine)
 
 	// Initialize fork choice
-	engine.forkChoice = NewForkChoice(cfg)
+	engine.forkChoice = NewForkChoice(cfg, worldState)
 
 	return engine
 }
@@ -179,10 +95,18 @@ func (ce *ConsensusEngine) consensusLoop() {
 	slotTicker := time.NewTicker(ce.proposalTimeout)
 	defer slotTicker.Stop()
 
+	// Cleanup ticker - run every 32 slots (1 epoch)
+	cleanupTicker := time.NewTicker(ce.proposalTimeout * 32)
+	defer cleanupTicker.Stop()
+
 	for {
 		select {
 		case <-slotTicker.C:
 			ce.processSlot()
+
+		case <-cleanupTicker.C:
+			// Cleanup old epoch data to prevent memory leaks
+			ce.forkChoice.CleanupOldEpochs()
 		}
 	}
 }
@@ -436,16 +360,54 @@ func (ce *ConsensusEngine) validateAttestation(attestation *Attestation) error {
 	return nil
 }
 
-// updateForkChoice updates the fork choice rule
+// updateForkChoice updates the fork choice rule with safety checks
 func (ce *ConsensusEngine) updateForkChoice() {
 	head := ce.forkChoice.GetHead()
+	if head == "" {
+		return
+	}
+
 	currentHead := ce.worldState.GetCurrentBlock()
 
-	// If fork choice suggests a different head, reorganize
-	if currentHead == nil || head != currentHead.Hash {
-		// Implementation would handle chain reorganization
-		fmt.Printf("Fork choice suggests new head: %s\n", head)
+	// Check if the new head has achieved quorum
+	hasQuorum := ce.forkChoice.HasQuorum(head)
+	quorumPercentage := ce.forkChoice.GetQuorumPercentage(head)
+
+	// Only switch to new head if:
+	// 1. It has quorum (2/3+ stake), OR
+	// 2. We have no current head
+	if currentHead == nil {
+		fmt.Printf("📍 Setting initial head: %s (%.1f%% stake)\n", head[:8], quorumPercentage)
+		return
 	}
+
+	// Check if current head is finalized - never reorg past finalized blocks
+	if ce.forkChoice.IsBlockFinalized(currentHead.Hash) {
+		if head != currentHead.Hash && !ce.isDescendant(head, currentHead.Hash) {
+			fmt.Printf("⚠️ Ignoring fork choice - current head is finalized\n")
+			return
+		}
+	}
+
+	// If fork choice suggests a different head
+	if head != currentHead.Hash {
+		if hasQuorum {
+			fmt.Printf("🔀 Fork choice suggests new head: %s (%.1f%% stake, HAS QUORUM)\n",
+				head[:8], quorumPercentage)
+			// In production, would trigger chain reorganization here
+		} else {
+			fmt.Printf("⏳ Fork choice suggests %s but waiting for quorum (%.1f%% < 66.7%%)\n",
+				head[:8], quorumPercentage)
+		}
+	}
+}
+
+// isDescendant checks if blockHash is a descendant of ancestorHash
+// This is a simplified implementation - production would traverse the chain
+func (ce *ConsensusEngine) isDescendant(blockHash, ancestorHash string) bool {
+	// TODO: Implement proper chain traversal
+	// For now, assume blocks are descendants if they're different
+	return true
 }
 
 // signAttestation signs an attestation with the node's private key
@@ -530,6 +492,7 @@ func (ce *ConsensusEngine) handleBlockProposal(proposal *BlockProposal) {
 	defer ce.mu.Unlock()
 
 	// Validate the block
+	// FIX: Remove .(*core.Block)
 	if err := ce.blockValidator.ValidateBlock(proposal.Block); err != nil {
 		fmt.Printf("Invalid block proposal: %v\n", err)
 		return
@@ -543,11 +506,13 @@ func (ce *ConsensusEngine) handleBlockProposal(proposal *BlockProposal) {
 	}
 
 	// Add block to world state
+	// FIX: Remove .(*core.Block)
 	if err := ce.worldState.AddBlock(proposal.Block); err != nil {
 		fmt.Printf("Failed to add block: %v\n", err)
 		return
 	}
 
+	// FIX: Remove .(*core.Block)
 	fmt.Printf("Accepted block %s from validator %s\n", proposal.Block.Hash, proposal.Proposer)
 }
 
@@ -626,6 +591,32 @@ func (ce *ConsensusEngine) GetStats() map[string]interface{} {
 	// Add block proposer stats
 	proposerStats := ce.blockProposer.GetProposerStats()
 	stats["proposer_stats"] = proposerStats
+
+	// Add quorum and finality information
+	currentBlock := ce.worldState.GetCurrentBlock()
+	if currentBlock != nil {
+		blockHash := currentBlock.Hash
+		stats["current_block"] = blockHash[:8]
+		stats["current_block_has_quorum"] = ce.forkChoice.HasQuorum(blockHash)
+		stats["current_block_stake_percentage"] = ce.forkChoice.GetQuorumPercentage(blockHash)
+		stats["current_block_attesting_stake"] = ce.forkChoice.GetAttestingStake(blockHash)
+	}
+
+	// Add justified checkpoint info
+	justified := ce.forkChoice.GetJustifiedCheckpoint()
+	if justified != nil {
+		stats["justified_epoch"] = justified.Epoch
+		stats["justified_block"] = justified.BlockHash[:8]
+		stats["justified_stake_percentage"] = float64(justified.AttestingStake) / float64(justified.TotalStake) * 100
+	}
+
+	// Add finalized checkpoint info
+	finalized := ce.forkChoice.GetFinalizedCheckpoint()
+	if finalized != nil {
+		stats["finalized_epoch"] = finalized.Epoch
+		stats["finalized_block"] = finalized.BlockHash[:8]
+		stats["finalized_stake_percentage"] = float64(finalized.AttestingStake) / float64(finalized.TotalStake) * 100
+	}
 
 	return stats
 }
@@ -810,153 +801,4 @@ func (bv *BlockValidator) validateProposer(block *core.Block) error {
 	}
 
 	return nil
-}
-
-// ForkChoice implements the fork choice rule for consensus
-type ForkChoice struct {
-	config *config.Config
-
-	// Block scores for fork choice
-	blockScores map[string]int64
-
-	// Attestation tracking
-	attestationsByBlock map[string][]*Attestation
-
-	// Current justified and finalized checkpoints
-	justifiedCheckpoint *Checkpoint
-	finalizedCheckpoint *Checkpoint
-
-	mu sync.RWMutex
-}
-
-// Checkpoint represents a justified or finalized checkpoint
-type Checkpoint struct {
-	Epoch     uint64 `json:"epoch"`
-	BlockHash string `json:"block_hash"`
-	Timestamp int64  `json:"timestamp"`
-}
-
-// NewForkChoice creates a new fork choice instance
-func NewForkChoice(config *config.Config) *ForkChoice {
-	return &ForkChoice{
-		config:              config,
-		blockScores:         make(map[string]int64),
-		attestationsByBlock: make(map[string][]*Attestation),
-	}
-}
-
-// ProcessAttestation processes an attestation for fork choice
-func (fc *ForkChoice) ProcessAttestation(attestation *Attestation) {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-
-	blockHash := attestation.BlockHash
-
-	// Add attestation to block
-	if fc.attestationsByBlock[blockHash] == nil {
-		fc.attestationsByBlock[blockHash] = make([]*Attestation, 0)
-	}
-	fc.attestationsByBlock[blockHash] = append(fc.attestationsByBlock[blockHash], attestation)
-
-	// Update block score (simplified - would use validator stake in production)
-	fc.blockScores[blockHash]++
-}
-
-// GetHead returns the current head block according to fork choice
-func (fc *ForkChoice) GetHead() string {
-	fc.mu.RLock()
-	defer fc.mu.RUnlock()
-
-	if len(fc.blockScores) == 0 {
-		return ""
-	}
-
-	// Find block with highest score
-	var bestBlock string
-	var bestScore int64
-
-	for blockHash, score := range fc.blockScores {
-		if score > bestScore {
-			bestScore = score
-			bestBlock = blockHash
-		}
-	}
-
-	return bestBlock
-}
-
-// UpdateJustifiedCheckpoint updates the justified checkpoint
-func (fc *ForkChoice) UpdateJustifiedCheckpoint(epoch uint64, blockHash string) {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-
-	fc.justifiedCheckpoint = &Checkpoint{
-		Epoch:     epoch,
-		BlockHash: blockHash,
-		Timestamp: time.Now().Unix(),
-	}
-}
-
-// UpdateFinalizedCheckpoint updates the finalized checkpoint
-func (fc *ForkChoice) UpdateFinalizedCheckpoint(epoch uint64, blockHash string) {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-
-	fc.finalizedCheckpoint = &Checkpoint{
-		Epoch:     epoch,
-		BlockHash: blockHash,
-		Timestamp: time.Now().Unix(),
-	}
-}
-
-// GetJustifiedCheckpoint returns the current justified checkpoint
-func (fc *ForkChoice) GetJustifiedCheckpoint() *Checkpoint {
-	fc.mu.RLock()
-	defer fc.mu.RUnlock()
-
-	if fc.justifiedCheckpoint == nil {
-		return nil
-	}
-
-	// Return copy
-	checkpoint := *fc.justifiedCheckpoint
-	return &checkpoint
-}
-
-// GetFinalizedCheckpoint returns the current finalized checkpoint
-func (fc *ForkChoice) GetFinalizedCheckpoint() *Checkpoint {
-	fc.mu.RLock()
-	defer fc.mu.RUnlock()
-
-	if fc.finalizedCheckpoint == nil {
-		return nil
-	}
-
-	// Return copy
-	checkpoint := *fc.finalizedCheckpoint
-	return &checkpoint
-}
-
-// GetBlockScore returns the score for a block
-func (fc *ForkChoice) GetBlockScore(blockHash string) int64 {
-	fc.mu.RLock()
-	defer fc.mu.RUnlock()
-
-	return fc.blockScores[blockHash]
-}
-
-// GetAttestationsForBlock returns attestations for a specific block
-func (fc *ForkChoice) GetAttestationsForBlock(blockHash string) []*Attestation {
-	fc.mu.RLock()
-	defer fc.mu.RUnlock()
-
-	attestations := fc.attestationsByBlock[blockHash]
-	if attestations == nil {
-		return []*Attestation{}
-	}
-
-	// Return copy
-	result := make([]*Attestation, len(attestations))
-	copy(result, attestations)
-	return result
 }

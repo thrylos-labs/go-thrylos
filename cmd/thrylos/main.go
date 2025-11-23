@@ -18,7 +18,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/node"
-	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
 // getNodeSpecificPrivateKey generates a deterministic Ed25519 private key for each node

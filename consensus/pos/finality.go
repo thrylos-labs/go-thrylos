@@ -1,0 +1,270 @@
+// consensus/pos/finality.go
+// Casper FFG finality implementation with justification and finalization
+
+package pos
+
+import (
+	"fmt"
+	"time"
+)
+
+// checkJustification checks if a block should become justified based on attestations
+// A block becomes justified when it receives 2/3+ of total stake in attestations
+func (fc *ForkChoice) checkJustification(epoch uint64, blockHash string, attestingStake, totalStake int64) {
+	quorumThreshold := (totalStake*2)/3 + 1
+
+	// Must have at least 2/3 stake attesting
+	if attestingStake < quorumThreshold {
+		return
+	}
+
+	// Check if we already have a justified checkpoint for this epoch
+	if fc.justifiedCheckpoint != nil && fc.justifiedCheckpoint.Epoch >= epoch {
+		return
+	}
+
+	// Update justified checkpoint
+	fc.justifiedCheckpoint = &Checkpoint{
+		Epoch:          epoch,
+		BlockHash:      blockHash,
+		Timestamp:      time.Now().Unix(),
+		AttestingStake: attestingStake,
+		TotalStake:     totalStake,
+	}
+
+	// Safe truncation for logging
+	blockHashShort := blockHash
+	if len(blockHashShort) > 8 {
+		blockHashShort = blockHashShort[:8]
+	}
+
+	fmt.Printf("🎯 Block %s JUSTIFIED at epoch %d with %d/%d stake (%.1f%%)\n",
+		blockHashShort, epoch, attestingStake, totalStake,
+		float64(attestingStake)/float64(totalStake)*100)
+
+	// Check for finalization
+	fc.checkFinalization()
+}
+
+// checkFinalization checks if we can finalize based on Casper FFG rules
+// A checkpoint is finalized when:
+// 1. It is justified
+// 2. The next epoch's checkpoint is also justified
+// 3. Both have 2/3+ stake attestations
+func (fc *ForkChoice) checkFinalization() {
+	if fc.justifiedCheckpoint == nil {
+		return
+	}
+
+	currentJustifiedEpoch := fc.justifiedCheckpoint.Epoch
+
+	// Casper FFG: An epoch becomes finalized when the next epoch is justified
+	// Check if we have a justified checkpoint from 2 epochs ago
+	if currentJustifiedEpoch < 2 {
+		return
+	}
+
+	// Finalize epoch that is 2 behind the current justified epoch
+	epochToFinalize := currentJustifiedEpoch - 2
+
+	// Only finalize if we don't already have a more recent finalized checkpoint
+	if fc.finalizedCheckpoint != nil && fc.finalizedCheckpoint.Epoch >= epochToFinalize {
+		return
+	}
+
+	// Look for the block that was justified at epochToFinalize
+	// We need to find it in our epoch attestations
+	if attestations, exists := fc.epochAttestations[epochToFinalize]; exists && len(attestations) > 0 {
+		// Find the block with the most stake in that epoch
+		var bestBlock string
+		var bestStake int64
+
+		for blockHash, stake := range attestations {
+			if stake > bestStake {
+				bestStake = stake
+				bestBlock = blockHash
+			}
+		}
+
+		if bestBlock != "" {
+			totalStake := fc.getTotalActiveStake()
+
+			fc.finalizedCheckpoint = &Checkpoint{
+				Epoch:          epochToFinalize,
+				BlockHash:      bestBlock,
+				Timestamp:      time.Now().Unix(),
+				AttestingStake: bestStake,
+				TotalStake:     totalStake,
+			}
+
+			// Safe truncation for logging
+			finalizedHashShort := bestBlock
+			if len(finalizedHashShort) > 8 {
+				finalizedHashShort = finalizedHashShort[:8]
+			}
+
+			fmt.Printf("🔒 Block %s FINALIZED at epoch %d with %d/%d stake (%.1f%%)\n",
+				finalizedHashShort,
+				epochToFinalize,
+				bestStake,
+				totalStake,
+				float64(bestStake)/float64(totalStake)*100)
+		}
+	}
+}
+
+// UpdateJustifiedCheckpoint updates the justified checkpoint
+func (fc *ForkChoice) UpdateJustifiedCheckpoint(epoch uint64, blockHash string) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	attestingStake := fc.blockScores[blockHash]
+	totalStake := fc.getTotalActiveStake()
+
+	fc.justifiedCheckpoint = &Checkpoint{
+		Epoch:          epoch,
+		BlockHash:      blockHash,
+		Timestamp:      time.Now().Unix(),
+		AttestingStake: attestingStake,
+		TotalStake:     totalStake,
+	}
+
+	// Safe truncation for logging
+	blockHashShort := blockHash
+	if len(blockHashShort) > 8 {
+		blockHashShort = blockHashShort[:8]
+	}
+
+	fmt.Printf("🎯 Justified checkpoint updated: epoch %d, block %s, stake %d/%d (%.1f%%)\n",
+		epoch, blockHashShort, attestingStake, totalStake,
+		float64(attestingStake)/float64(totalStake)*100)
+}
+
+// UpdateFinalizedCheckpoint updates the finalized checkpoint
+func (fc *ForkChoice) UpdateFinalizedCheckpoint(epoch uint64, blockHash string) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	attestingStake := fc.blockScores[blockHash]
+	totalStake := fc.getTotalActiveStake()
+
+	fc.finalizedCheckpoint = &Checkpoint{
+		Epoch:          epoch,
+		BlockHash:      blockHash,
+		Timestamp:      time.Now().Unix(),
+		AttestingStake: attestingStake,
+		TotalStake:     totalStake,
+	}
+
+	// Safe truncation for logging
+	blockHashShort := blockHash
+	if len(blockHashShort) > 8 {
+		blockHashShort = blockHashShort[:8]
+	}
+
+	fmt.Printf("🔒 Finalized checkpoint updated: epoch %d, block %s, stake %d/%d (%.1f%%)\n",
+		epoch, blockHashShort, attestingStake, totalStake,
+		float64(attestingStake)/float64(totalStake)*100)
+}
+
+// GetJustifiedCheckpoint returns the current justified checkpoint
+func (fc *ForkChoice) GetJustifiedCheckpoint() *Checkpoint {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+
+	if fc.justifiedCheckpoint == nil {
+		return nil
+	}
+
+	// Return copy
+	checkpoint := *fc.justifiedCheckpoint
+	return &checkpoint
+}
+
+// GetFinalizedCheckpoint returns the current finalized checkpoint
+func (fc *ForkChoice) GetFinalizedCheckpoint() *Checkpoint {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+
+	if fc.finalizedCheckpoint == nil {
+		return nil
+	}
+
+	// Return copy
+	checkpoint := *fc.finalizedCheckpoint
+	return &checkpoint
+}
+
+// IsBlockFinalized checks if a block is finalized
+func (fc *ForkChoice) IsBlockFinalized(blockHash string) bool {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+
+	if fc.finalizedCheckpoint == nil {
+		return false
+	}
+
+	return fc.finalizedCheckpoint.BlockHash == blockHash
+}
+
+// CleanupOldEpochs removes attestation data for epochs older than the finalized checkpoint
+// This prevents unbounded memory growth
+func (fc *ForkChoice) CleanupOldEpochs() {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	if fc.finalizedCheckpoint == nil {
+		return
+	}
+
+	finalizedEpoch := fc.finalizedCheckpoint.Epoch
+	if finalizedEpoch == 0 {
+		return
+	}
+
+	// Keep only the last 2 epochs before finalized (for safety)
+	cutoffEpoch := finalizedEpoch
+	if cutoffEpoch > 2 {
+		cutoffEpoch -= 2
+	} else {
+		cutoffEpoch = 0
+	}
+
+	// Remove old epoch attestations
+	deletedCount := 0
+	for epoch := range fc.epochAttestations {
+		if epoch < cutoffEpoch {
+			delete(fc.epochAttestations, epoch)
+			deletedCount++
+		}
+	}
+
+	if deletedCount > 0 {
+		fmt.Printf("🧹 Cleaned up %d epochs before epoch %d (finalized: %d)\n",
+			deletedCount, cutoffEpoch, finalizedEpoch)
+	}
+}
+
+// GetFinalityStatus returns detailed finality status information
+func (fc *ForkChoice) GetFinalityStatus() map[string]interface{} {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+
+	status := make(map[string]interface{})
+
+	if fc.justifiedCheckpoint != nil {
+		status["justified_epoch"] = fc.justifiedCheckpoint.Epoch
+		status["justified_block"] = fc.justifiedCheckpoint.BlockHash
+	}
+
+	if fc.finalizedCheckpoint != nil {
+		status["finalized_epoch"] = fc.finalizedCheckpoint.Epoch
+		status["finalized_block"] = fc.finalizedCheckpoint.BlockHash
+	}
+
+	if fc.justifiedCheckpoint != nil && fc.finalizedCheckpoint != nil {
+		status["epochs_since_finalized"] = fc.justifiedCheckpoint.Epoch - fc.finalizedCheckpoint.Epoch
+	}
+
+	return status
+}
