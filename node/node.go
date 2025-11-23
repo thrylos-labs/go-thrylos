@@ -56,7 +56,7 @@ type Node struct {
 
 	// P2P Networking
 	p2pNetwork *network.P2PNetwork
-
+	bridge     *pos.ConsensusBridge
 	// State management
 	isRunning           bool
 	lastEpoch           uint64
@@ -185,6 +185,11 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		p2pNetwork = p2pNet
 	}
 
+	var bridge *pos.ConsensusBridge
+	if p2pNetwork != nil {
+		bridge = pos.NewConsensusBridge(consensusEngine, p2pNetwork)
+	}
+
 	var syncManager *thrylosSync.SyncManager
 	if p2pNetwork != nil {
 		syncManager = thrylosSync.NewSyncManager(nodeConfig.Config, bc, worldState, p2pNetwork)
@@ -196,6 +201,7 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		worldState:        worldState,
 		blockchain:        bc,
 		p2pNetwork:        p2pNetwork,
+		bridge:            bridge,
 		syncManager:       syncManager,
 		consensusEngine:   consensusEngine,
 		validatorManager:  validatorManager,
@@ -279,6 +285,13 @@ func (n *Node) Start() error {
 	// Start consensus engine
 	if err := n.consensusEngine.Start(); err != nil {
 		return fmt.Errorf("failed to start consensus engine: %v", err)
+	}
+
+	if n.bridge != nil {
+		if err := n.bridge.Start(); err != nil {
+			return fmt.Errorf("failed to start consensus bridge: %v", err)
+		}
+		fmt.Println("🌉 P2P <-> Consensus bridge started")
 	}
 
 	// Start API server if enabled
@@ -378,6 +391,12 @@ func (n *Node) Stop() error {
 	// Stop consensus engine
 	if err := n.consensusEngine.Stop(); err != nil {
 		return fmt.Errorf("failed to stop consensus engine: %v", err)
+	}
+
+	if n.bridge != nil {
+		if err := n.bridge.Stop(); err != nil {
+			return fmt.Errorf("failed to stop bridge: %v", err)
+		}
 	}
 
 	// Give goroutines time to stop gracefully
