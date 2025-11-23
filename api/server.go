@@ -26,13 +26,11 @@ import (
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
-	"github.com/thrylos-labs/go-thrylos/vm"
 )
 
 // Server represents the HTTP API server
 type Server struct {
 	worldState *state.WorldState
-	vm         *vm.ThrylosVM // ADD THIS LINE
 	router     *mux.Router
 	server     *http.Server
 	port       int
@@ -91,7 +89,6 @@ type TransactionHistoryResponse struct {
 func NewServer(worldState *state.WorldState, port int) *Server {
 	server := &Server{
 		worldState: worldState,
-		vm:         createDefaultVM(worldState), // Add VM with defaults
 		port:       port,
 	}
 
@@ -102,7 +99,6 @@ func NewServer(worldState *state.WorldState, port int) *Server {
 func NewServerWithServerConfig(worldState *state.WorldState, serverConfig *ServerConfig) *Server {
 	server := &Server{
 		worldState: worldState,
-		vm:         createDefaultVM(worldState), // Use default VM config
 		port:       serverConfig.Port,
 		enableTLS:  serverConfig.EnableTLS,
 		certFile:   serverConfig.CertFile,
@@ -114,16 +110,8 @@ func NewServerWithServerConfig(worldState *state.WorldState, serverConfig *Serve
 }
 
 func NewServerWithConfig(worldState *state.WorldState, cfg *config.Config) *Server {
-	// Create VM with config values
-	vm := vm.NewThrylosVM(
-		worldState,
-		cfg.Economics.BaseGasPrice, // Gas price from config (1000)
-		config.MaxGasPerBlock,      // Gas limit from config (10M)
-	)
-
 	server := &Server{
 		worldState: worldState,
-		vm:         vm,
 		port:       extractPortFromConfig(cfg.API.RESTAddr),
 		enableTLS:  cfg.API.EnableTLS,
 		certFile:   cfg.API.CertFile,
@@ -132,14 +120,6 @@ func NewServerWithConfig(worldState *state.WorldState, cfg *config.Config) *Serv
 
 	server.setupRoutes()
 	return server
-}
-
-func createDefaultVM(worldState *state.WorldState) *vm.ThrylosVM {
-	// Use config constants for defaults
-	gasPrice := int64(1000)     // config.BaseGasPrice
-	gasLimit := int64(10000000) // config.MaxGasPerBlock
-
-	return vm.NewThrylosVM(worldState, gasPrice, gasLimit)
 }
 
 // Helper to extract port from config address
@@ -191,13 +171,6 @@ func (s *Server) setupRoutes() {
 	// api.HandleFunc("/staking/claim", s.submitClaimTransaction).Methods("POST", "OPTIONS")
 	api.HandleFunc("/staking/delegations/{address}", s.getDelegationHistory).Methods("GET", "OPTIONS")
 	api.HandleFunc("/staking/rewards/{address}", s.getDetailedRewards).Methods("GET", "OPTIONS")
-
-	api.HandleFunc("/staking/vm/delegate", s.delegateViaVM).Methods("POST", "OPTIONS")
-	api.HandleFunc("/staking/vm/undelegate", s.undelegateViaVM).Methods("POST", "OPTIONS")
-	api.HandleFunc("/staking/vm/claim", s.claimRewardsViaVM).Methods("POST", "OPTIONS")
-	api.HandleFunc("/validator/vm/create", s.createValidatorViaVM).Methods("POST", "OPTIONS")
-	api.HandleFunc("/validator/vm/unbond", s.unbondValidatorViaVM).Methods("POST")
-	api.HandleFunc("/staking/vm/estimate-gas", s.estimateVMStakingGas).Methods("POST", "OPTIONS")
 
 	// Development endpoints - EXPLICITLY ADD OPTIONS
 	api.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
