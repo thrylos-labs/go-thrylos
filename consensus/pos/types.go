@@ -104,6 +104,9 @@ type ConsensusEngine struct {
 	blocksProposed   uint64
 	blocksMissed     uint64
 	attestationsMade uint64
+
+	chainCache *ChainCache // ADD THIS
+
 }
 
 // ForkChoice implements fork choice with memory management

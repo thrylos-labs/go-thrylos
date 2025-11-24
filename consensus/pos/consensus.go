@@ -49,6 +49,7 @@ func NewConsensusEngine(
 		votes:            make(map[string]*Vote),
 		currentEpoch:     0,
 		currentSlot:      0,
+		chainCache:       NewChainCache(), // ADD THIS
 	}
 
 	// Initialize validator management
@@ -90,12 +91,11 @@ func (ce *ConsensusEngine) Stop() error {
 	return nil
 }
 
-// consensusLoop runs the main consensus algorithm
+// In consensusLoop (around line 94-112)
 func (ce *ConsensusEngine) consensusLoop() {
 	slotTicker := time.NewTicker(ce.proposalTimeout)
 	defer slotTicker.Stop()
 
-	// Cleanup ticker - run every 32 slots (1 epoch)
 	cleanupTicker := time.NewTicker(ce.proposalTimeout * 32)
 	defer cleanupTicker.Stop()
 
@@ -107,6 +107,9 @@ func (ce *ConsensusEngine) consensusLoop() {
 		case <-cleanupTicker.C:
 			// Cleanup old epoch data to prevent memory leaks
 			ce.forkChoice.CleanupOldEpochs()
+
+			// ADD THIS LINE:
+			ce.cleanupChainCache()
 		}
 	}
 }
@@ -180,14 +183,30 @@ func (ce *ConsensusEngine) proposeBlock() error {
 		return fmt.Errorf("failed to add block to world state: %v", err)
 	}
 
-	// Broadcast block
-	ce.broadcastChan <- &BlockProposal{
+	// ============================================================================
+	// CHANGED SECTION - Sign the proposal before broadcasting
+	// ============================================================================
+
+	// Create the block proposal
+	proposal := &BlockProposal{
 		Block:     result.Block,
 		Proposer:  ce.nodeAddress,
 		Slot:      ce.currentSlot,
 		Epoch:     ce.currentEpoch,
-		Signature: nil, // Would be signed in production
+		Signature: nil, // Will be set by signBlockProposal
 	}
+
+	// Sign the proposal
+	if err := ce.signBlockProposal(proposal); err != nil {
+		return fmt.Errorf("failed to sign block proposal: %v", err)
+	}
+
+	// Broadcast block with signature
+	ce.broadcastChan <- proposal
+
+	// ============================================================================
+	// END CHANGED SECTION
+	// ============================================================================
 
 	// Log block construction metrics
 	fmt.Printf("Proposed block %s by validator %s with %d txs, gas: %d, fees: %d, construction time: %v, score: %.2f\n",
@@ -402,14 +421,6 @@ func (ce *ConsensusEngine) updateForkChoice() {
 	}
 }
 
-// isDescendant checks if blockHash is a descendant of ancestorHash
-// This is a simplified implementation - production would traverse the chain
-func (ce *ConsensusEngine) isDescendant(blockHash, ancestorHash string) bool {
-	// TODO: Implement proper chain traversal
-	// For now, assume blocks are descendants if they're different
-	return true
-}
-
 // signAttestation signs an attestation with the node's private key
 func (ce *ConsensusEngine) signAttestation(attestation *Attestation) ([]byte, error) {
 	// Create attestation hash
@@ -430,33 +441,6 @@ func (ce *ConsensusEngine) signAttestation(attestation *Attestation) ([]byte, er
 	}
 
 	return signature.Bytes(), nil
-}
-
-// verifyAttestationSignature verifies an attestation signature
-func (ce *ConsensusEngine) verifyAttestationSignature(attestation *Attestation) error {
-	// Get validator's public key
-	validator, err := ce.worldState.GetValidator(attestation.ValidatorAddress)
-	if err != nil {
-		return fmt.Errorf("validator not found: %v", err)
-	}
-
-	// Recreate the signed data
-	data := fmt.Sprintf("%s%s%d%d%d%d",
-		attestation.ValidatorAddress,
-		attestation.BlockHash,
-		attestation.BlockHeight,
-		attestation.Epoch,
-		attestation.Slot,
-		attestation.Timestamp)
-
-	hash := blake2b.Sum256([]byte(data))
-
-	// Verify signature (implementation would use actual crypto verification)
-	_ = validator.Pubkey
-	_ = hash
-	_ = attestation.Signature
-
-	return nil // Placeholder - would implement actual verification
 }
 
 // initializeValidatorSet initializes the validator set from world state
@@ -491,6 +475,12 @@ func (ce *ConsensusEngine) handleBlockProposal(proposal *BlockProposal) {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
 
+	// ADD THIS: Verify signature
+	if err := ce.verifyProposalSignature(proposal); err != nil {
+		fmt.Printf("❌ Invalid signature: %v\n", err)
+		return
+	}
+
 	// Validate the block
 	// FIX: Remove .(*core.Block)
 	if err := ce.blockValidator.ValidateBlock(proposal.Block); err != nil {
@@ -520,6 +510,12 @@ func (ce *ConsensusEngine) handleBlockProposal(proposal *BlockProposal) {
 func (ce *ConsensusEngine) handleAttestation(attestation *Attestation) {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
+
+	// ADD THIS: Verify signature
+	if err := ce.verifyAttestationSignature(attestation); err != nil {
+		fmt.Printf("❌ Invalid signature: %v\n", err)
+		return
+	}
 
 	if err := ce.validateAttestation(attestation); err != nil {
 		fmt.Printf("Invalid attestation: %v\n", err)
