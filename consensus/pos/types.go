@@ -106,32 +106,29 @@ type ConsensusEngine struct {
 	attestationsMade uint64
 }
 
-// ForkChoice implements the fork choice rule for consensus
+// ForkChoice implements fork choice with memory management
 type ForkChoice struct {
-	config *config.Config
+	config     *config.Config
+	fcConfig   *ForkChoiceConfig
+	worldState WorldStateReader
 
-	// World state for validator stake lookups
-	worldState WorldStateReader // <-- CHANGED: Was *state.WorldState
+	// Core consensus data
+	blockScores           map[string]int64            // blockHash -> total attesting stake
+	attestationsByBlock   map[string][]*Attestation   // blockHash -> attestations
+	validatorAttestations map[string]map[string]bool  // blockHash -> validatorAddress -> hasAttested
+	epochAttestations     map[uint64]map[string]int64 // epoch -> blockHash -> totalStake
+	blockEpochMap         map[string]uint64           // blockHash -> epoch (for cleanup)
 
-	// Block scores for fork choice (stake-weighted)
-	blockScores map[string]int64
-
-	// Attestation tracking - maps block hash to attestations
-	attestationsByBlock map[string][]*Attestation
-
-	// Track which validators have attested to each block (prevent double counting)
-	validatorAttestations map[string]map[string]bool // blockHash -> validatorAddress -> hasAttested
-
-	// Epoch tracking for finality
-	epochAttestations map[uint64]map[string]int64 // epoch -> blockHash -> totalStake
-
-	// Current justified and finalized checkpoints
+	// Checkpoints for finality
 	justifiedCheckpoint *Checkpoint
 	finalizedCheckpoint *Checkpoint
 
-	// Cache of total active stake (updated periodically)
+	// Performance optimizations
 	totalActiveStake     int64
 	totalActiveStakeTime time.Time
+
+	// Metrics
+	metrics *ForkChoiceMetrics
 
 	mu sync.RWMutex
 }

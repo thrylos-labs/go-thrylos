@@ -1,5 +1,5 @@
 // consensus/pos/fork_choice.go
-// Fork choice rule with stake-weighted quorum checking
+// Fork choice rule with stake-weighted quorum checking and memory management
 
 package pos
 
@@ -11,24 +11,83 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
+// ForkChoiceConfig contains configuration for fork choice memory management
+type ForkChoiceConfig struct {
+	MaxEpochsToKeep         uint64        // Keep data for this many epochs (default: 2)
+	MaxBlocksPerEpoch       int           // Maximum blocks to track per epoch (default: 100)
+	CleanupInterval         time.Duration // How often to run cleanup (default: 5 minutes)
+	StakeCacheTTL           time.Duration // How long to cache total stake (default: 30s)
+	EnableMetrics           bool          // Enable detailed metrics tracking
+	MaxAttestationsPerBlock int           // Max attestations to store per block (default: 1000)
+}
+
+// DefaultForkChoiceConfig returns sensible defaults
+func DefaultForkChoiceConfig() *ForkChoiceConfig {
+	return &ForkChoiceConfig{
+		MaxEpochsToKeep:         2,
+		MaxBlocksPerEpoch:       100,
+		CleanupInterval:         5 * time.Minute,
+		StakeCacheTTL:           30 * time.Second,
+		EnableMetrics:           true,
+		MaxAttestationsPerBlock: 1000,
+	}
+}
+
+// ForkChoiceMetrics tracks memory usage and performance
+type ForkChoiceMetrics struct {
+	TotalAttestations     int64
+	TotalBlocks           int64
+	TotalEpochs           int64
+	LastCleanupTime       time.Time
+	AttestationsRemoved   int64
+	BlocksRemoved         int64
+	EpochsRemoved         int64
+	MemoryEstimateBytes   int64
+	LastCleanupDurationMs int64
+}
+
 // This allows us to swap the real WorldState for a MockWorldState during testing.
 type WorldStateReader interface {
 	GetValidator(address string) (*core.Validator, error)
 	GetActiveValidators() []*core.Validator
 }
 
-// NewForkChoice creates a new fork choice instance
-// Update the argument type here ----------------vvvvvvvvvvvvvvvv
+// NewForkChoice creates a new fork choice instance with memory management
 func NewForkChoice(config *config.Config, worldState WorldStateReader) *ForkChoice {
-	return &ForkChoice{
+	return NewForkChoiceWithConfig(config, worldState, DefaultForkChoiceConfig())
+}
+
+// NewForkChoiceWithConfig creates a fork choice with custom configuration
+func NewForkChoiceWithConfig(config *config.Config, worldState WorldStateReader, fcConfig *ForkChoiceConfig) *ForkChoice {
+	fc := &ForkChoice{
 		config:                config,
+		fcConfig:              fcConfig,
 		worldState:            worldState,
 		blockScores:           make(map[string]int64),
 		attestationsByBlock:   make(map[string][]*Attestation),
 		validatorAttestations: make(map[string]map[string]bool),
 		epochAttestations:     make(map[uint64]map[string]int64),
+		blockEpochMap:         make(map[string]uint64),
 		totalActiveStake:      0,
 		totalActiveStakeTime:  time.Time{},
+		metrics:               &ForkChoiceMetrics{},
+	}
+
+	// Start background cleanup if configured
+	if fcConfig.CleanupInterval > 0 {
+		go fc.backgroundCleanup()
+	}
+
+	return fc
+}
+
+// backgroundCleanup runs periodic cleanup in the background
+func (fc *ForkChoice) backgroundCleanup() {
+	ticker := time.NewTicker(fc.fcConfig.CleanupInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		fc.CleanupOldEpochs()
 	}
 }
 
@@ -38,21 +97,13 @@ func (fc *ForkChoice) ProcessAttestation(attestation *Attestation) {
 	defer fc.mu.Unlock()
 
 	blockHash := attestation.BlockHash
-	validatorAddr := attestation.ValidatorAddress // ✅ Use FULL address for lookups
-
-	// Get validator info using FULL address
-	validator, err := fc.worldState.GetValidator(validatorAddr)
-	if err != nil || validator == nil {
-		fmt.Printf("⚠️ Failed to get validator %s for attestation: %v\n", validatorAddr, err)
-		return
-	}
+	validatorAddr := attestation.ValidatorAddress
+	epoch := attestation.Epoch
 
 	blockHashShort := blockHash
 	if len(blockHashShort) > 8 {
 		blockHashShort = blockHashShort[:8]
 	}
-
-	epoch := attestation.Epoch
 
 	// Check if this validator has already attested to this block
 	if fc.validatorAttestations[blockHash] == nil {
@@ -61,6 +112,13 @@ func (fc *ForkChoice) ProcessAttestation(attestation *Attestation) {
 
 	if fc.validatorAttestations[blockHash][validatorAddr] {
 		// Validator already attested to this block, ignore duplicate
+		return
+	}
+
+	// Get validator info
+	validator, err := fc.worldState.GetValidator(validatorAddr)
+	if err != nil || validator == nil {
+		fmt.Printf("⚠️ Failed to get validator %s for attestation: %v\n", validatorAddr, err)
 		return
 	}
 
@@ -74,18 +132,30 @@ func (fc *ForkChoice) ProcessAttestation(attestation *Attestation) {
 	// Mark validator as having attested to this block
 	fc.validatorAttestations[blockHash][validatorAddr] = true
 
-	// Add attestation to block
+	// Check if we've hit the attestation limit for this block
 	if fc.attestationsByBlock[blockHash] == nil {
-		fc.attestationsByBlock[blockHash] = make([]*Attestation, 0)
+		fc.attestationsByBlock[blockHash] = make([]*Attestation, 0, fc.fcConfig.MaxAttestationsPerBlock)
 	}
-	fc.attestationsByBlock[blockHash] = append(fc.attestationsByBlock[blockHash], attestation)
 
-	// Update block score with stake weight
+	// Only store attestation if under limit (still count stake even if we don't store)
+	if len(fc.attestationsByBlock[blockHash]) < fc.fcConfig.MaxAttestationsPerBlock {
+		fc.attestationsByBlock[blockHash] = append(fc.attestationsByBlock[blockHash], attestation)
+		fc.metrics.TotalAttestations++
+	} else {
+		fmt.Printf("⚠️ Block %s reached max attestations (%d), counting stake but not storing\n",
+			blockHashShort, fc.fcConfig.MaxAttestationsPerBlock)
+	}
+
+	// Update block score with stake weight (always count, even if not storing attestation)
 	fc.blockScores[blockHash] += validatorStake
+
+	// Track epoch and block mapping for cleanup
+	fc.blockEpochMap[blockHash] = epoch
 
 	// Track epoch attestations for finality
 	if fc.epochAttestations[epoch] == nil {
 		fc.epochAttestations[epoch] = make(map[string]int64)
+		fc.metrics.TotalEpochs++
 	}
 	fc.epochAttestations[epoch][blockHash] += validatorStake
 
@@ -105,10 +175,10 @@ func (fc *ForkChoice) ProcessAttestation(attestation *Attestation) {
 }
 
 // getTotalActiveStake calculates the total stake of all active validators
-// Results are cached for 30 seconds to avoid expensive recalculation
+// Results are cached based on StakeCacheTTL to avoid expensive recalculation
 func (fc *ForkChoice) getTotalActiveStake() int64 {
-	// Check cache (30 second TTL)
-	if time.Since(fc.totalActiveStakeTime) < 30*time.Second && fc.totalActiveStake > 0 {
+	// Check cache
+	if time.Since(fc.totalActiveStakeTime) < fc.fcConfig.StakeCacheTTL && fc.totalActiveStake > 0 {
 		return fc.totalActiveStake
 	}
 
@@ -127,6 +197,43 @@ func (fc *ForkChoice) getTotalActiveStake() int64 {
 	fc.totalActiveStakeTime = time.Now()
 
 	return totalStake
+}
+
+// updateMemoryEstimate calculates rough memory usage
+func (fc *ForkChoice) updateMemoryEstimate() {
+	estimate := int64(0)
+
+	// Block scores: ~100 bytes per entry (hash + int64)
+	estimate += int64(len(fc.blockScores)) * 100
+
+	// Attestations: ~200 bytes per attestation
+	for _, attestations := range fc.attestationsByBlock {
+		estimate += int64(len(attestations)) * 200
+	}
+
+	// Validator attestations: ~100 bytes per validator per block
+	for _, validators := range fc.validatorAttestations {
+		estimate += int64(len(validators)) * 100
+	}
+
+	// Epoch attestations: ~100 bytes per block per epoch
+	for _, blocks := range fc.epochAttestations {
+		estimate += int64(len(blocks)) * 100
+	}
+
+	fc.metrics.MemoryEstimateBytes = estimate
+}
+
+// getCurrentEpoch returns the current epoch
+func (fc *ForkChoice) getCurrentEpoch() uint64 {
+	// Find the highest epoch in our data
+	maxEpoch := uint64(0)
+	for epoch := range fc.epochAttestations {
+		if epoch > maxEpoch {
+			maxEpoch = epoch
+		}
+	}
+	return maxEpoch
 }
 
 // GetHead returns the current head block according to fork choice
@@ -207,7 +314,6 @@ func (fc *ForkChoice) GetQuorumPercentage(blockHash string) float64 {
 }
 
 // IsBlockSafeToAccept checks if a block has sufficient attestations to be safely accepted
-// A block is safe if it has 2/3+ of total stake attesting to it
 func (fc *ForkChoice) IsBlockSafeToAccept(blockHash string) bool {
 	return fc.HasQuorum(blockHash)
 }
@@ -235,3 +341,28 @@ func (fc *ForkChoice) GetAttestationsForBlock(blockHash string) []*Attestation {
 	copy(result, attestations)
 	return result
 }
+
+// GetMetrics returns current fork choice metrics
+func (fc *ForkChoice) GetMetrics() *ForkChoiceMetrics {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+
+	// Return a copy to avoid race conditions
+	metrics := *fc.metrics
+
+	// Update real-time counts
+	metrics.TotalBlocks = int64(len(fc.blockScores))
+	metrics.TotalEpochs = int64(len(fc.epochAttestations))
+
+	attestationCount := int64(0)
+	for _, attestations := range fc.attestationsByBlock {
+		attestationCount += int64(len(attestations))
+	}
+	metrics.TotalAttestations = attestationCount
+
+	return &metrics
+}
+
+// IsBlockFinalized checks if a specific block is finalized
+// Note: GetJustifiedCheckpoint, GetFinalizedCheckpoint, and IsBlockFinalized
+// are implemented in finality.go

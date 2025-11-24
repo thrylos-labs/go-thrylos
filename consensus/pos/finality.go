@@ -207,44 +207,6 @@ func (fc *ForkChoice) IsBlockFinalized(blockHash string) bool {
 	return fc.finalizedCheckpoint.BlockHash == blockHash
 }
 
-// CleanupOldEpochs removes attestation data for epochs older than the finalized checkpoint
-// This prevents unbounded memory growth
-func (fc *ForkChoice) CleanupOldEpochs() {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-
-	if fc.finalizedCheckpoint == nil {
-		return
-	}
-
-	finalizedEpoch := fc.finalizedCheckpoint.Epoch
-	if finalizedEpoch == 0 {
-		return
-	}
-
-	// Keep only the last 2 epochs before finalized (for safety)
-	cutoffEpoch := finalizedEpoch
-	if cutoffEpoch > 2 {
-		cutoffEpoch -= 2
-	} else {
-		cutoffEpoch = 0
-	}
-
-	// Remove old epoch attestations
-	deletedCount := 0
-	for epoch := range fc.epochAttestations {
-		if epoch < cutoffEpoch {
-			delete(fc.epochAttestations, epoch)
-			deletedCount++
-		}
-	}
-
-	if deletedCount > 0 {
-		fmt.Printf("🧹 Cleaned up %d epochs before epoch %d (finalized: %d)\n",
-			deletedCount, cutoffEpoch, finalizedEpoch)
-	}
-}
-
 // GetFinalityStatus returns detailed finality status information
 func (fc *ForkChoice) GetFinalityStatus() map[string]interface{} {
 	fc.mu.RLock()
@@ -267,4 +229,94 @@ func (fc *ForkChoice) GetFinalityStatus() map[string]interface{} {
 	}
 
 	return status
+}
+
+// CleanupOldEpochs removes old epoch data to prevent unbounded memory growth
+// This is critical for long-running nodes with many validators
+// Note: This enhances the existing CleanupOldEpochs from finality.go with more comprehensive cleanup
+func (fc *ForkChoice) CleanupOldEpochs() {
+	startTime := time.Now()
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	currentEpoch := fc.getCurrentEpoch()
+
+	// Use finalized epoch if available, otherwise use current epoch
+	var cutoffEpoch uint64
+	if fc.finalizedCheckpoint != nil {
+		finalizedEpoch := fc.finalizedCheckpoint.Epoch
+		// Keep 2 epochs before finalized for safety
+		if finalizedEpoch > 2 {
+			cutoffEpoch = finalizedEpoch - 2
+		} else {
+			cutoffEpoch = 0
+		}
+	} else {
+		// No finalization yet, use MaxEpochsToKeep from config
+		if currentEpoch > fc.fcConfig.MaxEpochsToKeep {
+			cutoffEpoch = currentEpoch - fc.fcConfig.MaxEpochsToKeep
+		} else {
+			cutoffEpoch = 0
+		}
+	}
+
+	epochsRemoved := 0
+	blocksRemoved := 0
+	attestationsRemoved := 0
+
+	// 1. Cleanup old epoch attestations
+	for epoch := range fc.epochAttestations {
+		if epoch < cutoffEpoch {
+			delete(fc.epochAttestations, epoch)
+			epochsRemoved++
+		}
+	}
+
+	// 2. Cleanup old blocks
+	for blockHash := range fc.blockScores {
+		blockEpoch, exists := fc.blockEpochMap[blockHash]
+
+		shouldRemove := false
+		if exists && blockEpoch < cutoffEpoch {
+			shouldRemove = true
+		}
+
+		if shouldRemove {
+			// Count attestations being removed
+			if attestations, ok := fc.attestationsByBlock[blockHash]; ok {
+				attestationsRemoved += len(attestations)
+			}
+
+			// Remove all data for this block
+			delete(fc.blockScores, blockHash)
+			delete(fc.attestationsByBlock, blockHash)
+			delete(fc.validatorAttestations, blockHash)
+			delete(fc.blockEpochMap, blockHash)
+			blocksRemoved++
+		}
+	}
+
+	// Update metrics
+	fc.metrics.LastCleanupTime = time.Now()
+	fc.metrics.EpochsRemoved += int64(epochsRemoved)
+	fc.metrics.BlocksRemoved += int64(blocksRemoved)
+	fc.metrics.AttestationsRemoved += int64(attestationsRemoved)
+	fc.metrics.LastCleanupDurationMs = time.Since(startTime).Milliseconds()
+	fc.metrics.TotalBlocks = int64(len(fc.blockScores))
+	fc.metrics.TotalEpochs = int64(len(fc.epochAttestations))
+
+	// Estimate memory usage
+	fc.updateMemoryEstimate()
+
+	if epochsRemoved > 0 || blocksRemoved > 0 {
+		fmt.Printf("🧹 Cleanup completed in %dms: removed %d epochs, %d blocks, %d attestations (current: %d blocks, %d epochs, ~%d MB)\n",
+			fc.metrics.LastCleanupDurationMs,
+			epochsRemoved,
+			blocksRemoved,
+			attestationsRemoved,
+			fc.metrics.TotalBlocks,
+			fc.metrics.TotalEpochs,
+			fc.metrics.MemoryEstimateBytes/(1024*1024))
+	}
 }
