@@ -408,19 +408,6 @@ func (ss *SlashingStorage) LoadAllSlashingData() (*SlashingData, error) {
 	return data, nil
 }
 
-const (
-	// DoubleVoting: Validator votes for two different blocks at the same height
-	DoubleVoting types.SlashingCondition = iota
-	// SurroundVoting: Validator's attestation surrounds another attestation
-	SurroundVoting
-	// InvalidProposal: Validator proposes an invalid block
-	InvalidProposal
-	// Downtime: Validator is offline for extended period
-	Downtime
-	// InvalidSignature: Validator signs with incorrect key or malformed signature
-	InvalidSignature
-)
-
 // SlashingConfig defines the penalties for each slashing condition
 type SlashingConfig struct {
 	// Penalty percentages (0-100)
