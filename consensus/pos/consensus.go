@@ -75,7 +75,7 @@ func NewConsensusEngine(
 		JailDuration:            time.Duration(cfg.Consensus.JailDurationHours) * time.Hour,
 		MinimumStake:            cfg.Staking.MinValidatorStake,
 	}
-	engine.slashingManager = NewSlashingManager(slashingConfig, worldState)
+	engine.slashingManager = NewSlashingManager(slashingConfig, worldState, nil) // nil storage for now, will add persistence later
 
 	return engine
 }
@@ -150,6 +150,12 @@ func (ce *ConsensusEngine) processSlot() {
 	proposer, err := ce.getSlotProposer(ce.currentSlot)
 	if err != nil {
 		fmt.Printf("Failed to get slot proposer: %v\n", err)
+		return
+	}
+
+	// ✅ SAFETY CHECK: Verify proposer is still active (not jailed since selection)
+	if !ce.slashingManager.IsValidatorActive(proposer) {
+		fmt.Printf("⚠️  Selected proposer %s is no longer active (jailed/slashed), skipping slot\n", proposer)
 		return
 	}
 
@@ -275,11 +281,24 @@ func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 		return "", fmt.Errorf("no active validators")
 	}
 
+	// ✅ CRITICAL FIX #3: Filter out jailed and slashed validators
+	eligibleValidators := make([]*core.Validator, 0)
+	for _, validator := range activeValidators {
+		if ce.slashingManager.IsValidatorActive(validator.Address) {
+			eligibleValidators = append(eligibleValidators, validator)
+		}
+	}
+
+	// Check if we have any eligible validators
+	if len(eligibleValidators) == 0 {
+		return "", fmt.Errorf("no eligible validators (all are jailed or slashed)")
+	}
+
 	// Use deterministic randomness based on slot and previous block hash
 	seed := ce.getRandomnessSeed(slot)
 
-	// Select validator based on stake-weighted randomness
-	selectedValidator, err := ce.selectValidatorByStake(activeValidators, seed)
+	// Select validator based on stake-weighted randomness from ELIGIBLE validators only
+	selectedValidator, err := ce.selectValidatorByStake(eligibleValidators, seed)
 	if err != nil {
 		return "", fmt.Errorf("failed to select validator: %v", err)
 	}
@@ -362,7 +381,19 @@ func (ce *ConsensusEngine) processAttestations() {
 			continue
 		}
 
-		// Add to fork choice
+		// ✅ CRITICAL FIX #2: Check for slashable offenses (double voting, etc.)
+		// This is THE KEY FIX - without this, slashing is completely inactive!
+		if err := ce.slashingManager.ProcessAttestation(attestation); err != nil {
+			// Slashing violation detected!
+			fmt.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n", 
+				attestation.ValidatorAddress, err)
+			
+			// TODO: Broadcast slashing evidence to network
+			// For now, we log it and skip this attestation
+			continue
+		}
+
+		// Add to fork choice (only if no slashing violation)
 		ce.forkChoice.ProcessAttestation(attestation)
 	}
 }
@@ -377,6 +408,11 @@ func (ce *ConsensusEngine) validateAttestation(attestation *Attestation) error {
 
 	if !validator.Active {
 		return fmt.Errorf("validator not active")
+	}
+
+	// ✅ CRITICAL FIX #1: Check if validator is jailed or slashed
+	if !ce.slashingManager.IsValidatorActive(attestation.ValidatorAddress) {
+		return fmt.Errorf("validator %s is jailed or slashed, cannot attest", attestation.ValidatorAddress)
 	}
 
 	// Verify signature

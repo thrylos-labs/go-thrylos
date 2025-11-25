@@ -41,7 +41,8 @@ type SlashingManager struct {
 }
 
 // NewSlashingManager creates a new slashing manager
-func NewSlashingManager(config *SlashingConfig, worldState WorldStateBalancer) *SlashingManager {
+// storage parameter is optional (can be nil) - will be used for persistence in future
+func NewSlashingManager(config *SlashingConfig, worldState WorldStateBalancer, storage interface{}) *SlashingManager {
 	if config == nil {
 		config = DefaultSlashingConfig()
 	}
@@ -55,6 +56,7 @@ func NewSlashingManager(config *SlashingConfig, worldState WorldStateBalancer) *
 		validatorStatus:         make(map[string]ValidatorStatus),
 		processedEvidence:       make(map[string]bool),
 		worldState:              worldState,
+		// storage will be added in future update
 	}
 }
 
