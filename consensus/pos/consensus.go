@@ -49,7 +49,7 @@ func NewConsensusEngine(
 		votes:            make(map[string]*Vote),
 		currentEpoch:     0,
 		currentSlot:      0,
-		chainCache:       NewChainCache(), // ADD THIS
+		chainCache:       NewChainCache(),
 	}
 
 	// Initialize validator management
@@ -62,6 +62,20 @@ func NewConsensusEngine(
 
 	// Initialize fork choice
 	engine.forkChoice = NewForkChoice(cfg, worldState)
+
+	// Initialize slashing manager - ADD THIS BLOCK
+	slashingConfig := &SlashingConfig{
+		DoubleVotingPenalty:     uint8(cfg.Consensus.SlashingDoubleVote),
+		SurroundVotingPenalty:   uint8(cfg.Consensus.SlashingSurroundVote),
+		InvalidProposalPenalty:  uint8(cfg.Consensus.SlashingInvalidProposal),
+		DowntimePenalty:         uint8(cfg.Consensus.SlashingDowntime),
+		InvalidSignaturePenalty: uint8(cfg.Consensus.SlashingInvalidSig),
+		MaxMissedAttestations:   cfg.Consensus.MaxMissedAttestations,
+		AttestationWindow:       24 * time.Hour,
+		JailDuration:            time.Duration(cfg.Consensus.JailDurationHours) * time.Hour,
+		MinimumStake:            cfg.Staking.MinValidatorStake,
+	}
+	engine.slashingManager = NewSlashingManager(slashingConfig, worldState)
 
 	return engine
 }

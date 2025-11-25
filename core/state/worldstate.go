@@ -439,6 +439,33 @@ func (ws *WorldState) GetBalance(address string) (int64, error) {
 	return ws.accountManager.GetBalance(address)
 }
 
+// UpdateBalance updates the balance for a given address (needed for slashing)
+func (ws *WorldState) UpdateBalance(address string, newBalance int64) error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	if newBalance < 0 {
+		return fmt.Errorf("cannot set negative balance")
+	}
+
+	// Get the account
+	account, err := ws.accountManager.GetAccount(address)
+	if err != nil {
+		return fmt.Errorf("failed to get account %s: %w", address, err)
+	}
+
+	// Update the balance
+	account.Balance = newBalance
+
+	// Save back using UpdateAccount
+	err = ws.accountManager.UpdateAccount(account)
+	if err != nil {
+		return fmt.Errorf("failed to update account %s: %w", address, err)
+	}
+
+	return nil
+}
+
 // GetNonce returns the nonce of an account
 func (ws *WorldState) GetNonce(address string) (uint64, error) {
 	ws.mu.RLock()

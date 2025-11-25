@@ -107,6 +107,8 @@ type ConsensusEngine struct {
 
 	chainCache *ChainCache // ADD THIS
 
+	slashingManager *SlashingManager // ADD THIS LINE
+
 }
 
 // ForkChoice implements fork choice with memory management
