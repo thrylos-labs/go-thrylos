@@ -45,8 +45,9 @@ import (
 
 // BadgerStorage implements blockchain storage using BadgerDB v3
 type BadgerStorage struct {
-	db *badger.DB
-	mu sync.RWMutex
+	db      *badger.DB
+	dataDir string // Track which directory this instance uses
+	mu      sync.RWMutex
 }
 
 var (
@@ -117,7 +118,8 @@ func NewBadgerStorage(dataDir string) (*BadgerStorage, error) {
 	fmt.Printf("✅ Successfully opened BadgerDB for %s\n", dataDir)
 
 	storage := &BadgerStorage{
-		db: db,
+		db:      db,
+		dataDir: dataDir, // Store the directory path
 	}
 
 	return storage, nil
@@ -132,17 +134,21 @@ func (bs *BadgerStorage) Close() error {
 	fmt.Printf("🔍 BadgerStorage.Close() called from %s:%d\n", file, line)
 
 	if bs.db != nil {
-		fmt.Printf("🔍 Closing BadgerDB...\n")
+		fmt.Printf("🔍 Closing BadgerDB for directory: %s\n", bs.dataDir)
 		err := bs.db.Close()
 		bs.db = nil
 
-		// Clean up tracking - we need to find which directory this was
-		// For now, just print the current state
+		// Remove from tracking map
+		if bs.dataDir != "" {
+			delete(badgerInstances, bs.dataDir)
+			fmt.Printf("✅ Removed %s from tracking map\n", bs.dataDir)
+		}
+
 		fmt.Printf("🔍 Current instances after close: %v\n", badgerInstances)
 		fmt.Printf("✅ BadgerStorage closed\n")
 		return err
 	}
-	fmt.Printf("⚠️ BadgerStorage was already closed or never opened\n")
+	fmt.Printf("⚠️  BadgerStorage was already closed or never opened\n")
 	return nil
 }
 
@@ -272,6 +278,13 @@ func (bs *BadgerStorage) RunGC(discardRatio float64) error {
 func (bs *BadgerStorage) Size() (int64, error) {
 	lsm, vlog := bs.db.Size()
 	return lsm + vlog, nil
+}
+
+// GetDB returns the underlying badger.DB instance
+// This is useful for components that need direct access to the database
+// such as the slashing manager for persistence
+func (bs *BadgerStorage) GetDB() *badger.DB {
+	return bs.db
 }
 
 // Flatten runs compaction to optimize storage

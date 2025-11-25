@@ -13,6 +13,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/storage"
+	"github.com/thrylos-labs/go-thrylos/types"
 )
 
 // setupTestWorldState creates a test world state
@@ -49,7 +50,7 @@ func setupTestWorldState(t *testing.T) *state.WorldState {
 func TestDoubleVotingIntegration(t *testing.T) {
 	worldState := setupTestWorldState(t)
 
-	slashingConfig := DefaultSlashingConfig()
+	slashingConfig := storage.DefaultSlashingConfig()
 	slashingManager := NewSlashingManager(slashingConfig, worldState, nil)
 
 	validatorAddress := "tl1jhagm044kdavupen3e6"
@@ -62,7 +63,7 @@ func TestDoubleVotingIntegration(t *testing.T) {
 	t.Logf("Initial validator balance: %d", initialStake)
 
 	// First attestation at epoch 1, block A
-	attestation1 := &Attestation{
+	attestation1 := &types.Attestation{
 		ValidatorAddress: validatorAddress,
 		BlockHash:        "block-a",
 		BlockHeight:      100,
@@ -81,7 +82,7 @@ func TestDoubleVotingIntegration(t *testing.T) {
 	t.Logf("✅ First attestation processed successfully")
 
 	// Second attestation at SAME epoch but DIFFERENT block (DOUBLE VOTE!)
-	attestation2 := &Attestation{
+	attestation2 := &types.Attestation{
 		ValidatorAddress: validatorAddress,
 		BlockHash:        "block-b",
 		BlockHeight:      100,
@@ -131,7 +132,7 @@ func TestDoubleVotingIntegration(t *testing.T) {
 		t.Errorf("Expected 1 slashing record, got %d", len(records))
 	}
 
-	if len(records) > 0 && records[0].Condition != DoubleVoting {
+	if len(records) > 0 && records[0].Condition != types.DoubleVoting {
 		t.Errorf("Expected DoubleVoting condition, got %v", records[0].Condition)
 	}
 
@@ -144,13 +145,13 @@ func TestDoubleVotingIntegration(t *testing.T) {
 func TestJailedValidatorCannotAttest(t *testing.T) {
 	worldState := setupTestWorldState(t)
 
-	slashingConfig := DefaultSlashingConfig()
+	slashingConfig := storage.DefaultSlashingConfig()
 	slashingManager := NewSlashingManager(slashingConfig, worldState, nil)
 
 	validatorAddress := "tl1jhagm044kdavupen3e6"
-	slashingManager.jailValidator(validatorAddress, DoubleVoting)
+	slashingManager.jailValidator(validatorAddress, types.DoubleVoting)
 
-	attestation := &Attestation{
+	attestation := &types.Attestation{
 		ValidatorAddress: validatorAddress,
 		BlockHash:        "block-x",
 		Epoch:            5,
@@ -180,7 +181,7 @@ func TestMultipleValidatorsIndependentSlashing(t *testing.T) {
 // TestSlashingDoesNotDoubleSlash tests that same evidence doesn't slash twice
 func TestSlashingDoesNotDoubleSlash(t *testing.T) {
 	worldState := setupTestWorldState(t)
-	slashingConfig := DefaultSlashingConfig()
+	slashingConfig := storage.DefaultSlashingConfig()
 	slashingManager := NewSlashingManager(slashingConfig, worldState, nil)
 
 	validatorAddress := "tl1jhagm044kdavupen3e6"
@@ -190,7 +191,7 @@ func TestSlashingDoesNotDoubleSlash(t *testing.T) {
 		t.Fatalf("Failed to get initial balance: %v", err)
 	}
 
-	att1 := &Attestation{
+	att1 := &types.Attestation{
 		ValidatorAddress: validatorAddress,
 		BlockHash:        "block-x",
 		Epoch:            1,
@@ -198,7 +199,7 @@ func TestSlashingDoesNotDoubleSlash(t *testing.T) {
 		Timestamp:        time.Now().Unix(),
 	}
 
-	att2 := &Attestation{
+	att2 := &types.Attestation{
 		ValidatorAddress: validatorAddress,
 		BlockHash:        "block-y",
 		Epoch:            1,

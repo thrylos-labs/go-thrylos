@@ -12,18 +12,8 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/types"
 )
-
-// Attestation represents a validator's vote on a block
-type Attestation struct {
-	ValidatorAddress string `json:"validator_address"`
-	BlockHash        string `json:"block_hash"`
-	BlockHeight      int64  `json:"block_height"`
-	Epoch            uint64 `json:"epoch"`
-	Slot             uint64 `json:"slot"`
-	Signature        []byte `json:"signature"`
-	Timestamp        int64  `json:"timestamp"`
-}
 
 // Vote represents a validator's vote in fork choice
 type Vote struct {
@@ -83,7 +73,7 @@ type ConsensusEngine struct {
 	blockValidator *BlockValidator
 
 	// Attestations and votes
-	attestations map[string]*Attestation
+	attestations map[string]*types.Attestation
 	votes        map[string]*Vote
 
 	// Fork choice
@@ -119,8 +109,8 @@ type ForkChoice struct {
 	slashingManager *SlashingManager
 
 	// Core consensus data
-	blockScores           map[string]int64            // blockHash -> total attesting stake
-	attestationsByBlock   map[string][]*Attestation   // blockHash -> attestations
+	blockScores           map[string]int64 // blockHash -> total attesting stake
+	attestationsByBlock   map[string][]*types.Attestation
 	validatorAttestations map[string]map[string]bool  // blockHash -> validatorAddress -> hasAttested
 	epochAttestations     map[uint64]map[string]int64 // epoch -> blockHash -> totalStake
 	blockEpochMap         map[string]uint64           // blockHash -> epoch (for cleanup)

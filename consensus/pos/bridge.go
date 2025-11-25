@@ -8,6 +8,7 @@ import (
 	"log"
 
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/types"
 )
 
 // P2PNetwork interface for the network layer
@@ -103,7 +104,7 @@ func (cb *ConsensusBridge) forwardNetworkToConsensus() {
 
 		// Forward attestations
 		case attestation := <-cb.network.GetAttestationChannel():
-			if att, ok := attestation.(*Attestation); ok {
+			if att, ok := attestation.(*types.Attestation); ok {
 				cb.consensus.receiveChan <- att
 				log.Printf("✅ Forwarded attestation from %s to consensus", att.ValidatorAddress[:min(8, len(att.ValidatorAddress))])
 			} else {
@@ -139,7 +140,7 @@ func (cb *ConsensusBridge) handleConsensusMessage(msg interface{}) error {
 		log.Printf("📤 Broadcasted block %s to network", m.Block.Hash[:min(8, len(m.Block.Hash))])
 		return nil
 
-	case *Attestation:
+	case *types.Attestation:
 		if err := cb.network.BroadcastAttestation(m); err != nil {
 			return fmt.Errorf("failed to broadcast attestation: %w", err)
 		}

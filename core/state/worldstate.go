@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dgraph-io/badger/v3"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/transaction"
@@ -71,6 +72,7 @@ type WorldState struct {
 	assets        map[string]*AssetToken      // assetID -> asset
 	assetBalances map[string]map[string]int64 // assetID -> (address -> balance)
 	assetRegistry map[string]string           // assetID -> cr
+	badgerStorage *storage.BadgerStorage
 }
 
 type AssetToken struct {
@@ -234,6 +236,7 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 		assetBalances:     make(map[string]map[string]int64),
 		assetRegistry:     make(map[string]string),
 		totalTransactions: 0, // ADD THIS
+		badgerStorage:     badgerStorage,
 	}
 
 	// Try to load existing state from storage
@@ -277,6 +280,13 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 	ws.crossShardManager = NewCrossShardManager(ws)
 
 	return ws, nil
+}
+
+func (ws *WorldState) GetBadgerDB() *badger.DB {
+	if ws.badgerStorage == nil {
+		return nil
+	}
+	return ws.badgerStorage.GetDB()
 }
 
 // InitializeGenesis initializes the world state with genesis data

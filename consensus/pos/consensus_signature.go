@@ -8,12 +8,13 @@ import (
 	"fmt"
 
 	"github.com/thrylos-labs/go-thrylos/crypto"
+	"github.com/thrylos-labs/go-thrylos/types"
 	"golang.org/x/crypto/blake2b"
 )
 
 // verifyAttestationSignature verifies an attestation signature
 // This is the FIXED version that actually performs cryptographic verification
-func (ce *ConsensusEngine) verifyAttestationSignature(attestation *Attestation) error {
+func (ce *ConsensusEngine) verifyAttestationSignature(attestation *types.Attestation) error {
 	// Get validator's public key from world state
 	validator, err := ce.worldState.GetValidator(attestation.ValidatorAddress)
 	if err != nil {

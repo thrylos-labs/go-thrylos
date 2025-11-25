@@ -9,6 +9,7 @@ import (
 
 	"github.com/thrylos-labs/go-thrylos/config"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/types"
 )
 
 // ForkChoiceConfig contains configuration for fork choice memory management
@@ -65,7 +66,7 @@ func NewForkChoiceWithConfig(config *config.Config, worldState WorldStateReader,
 		worldState:            worldState,
 		slashingManager:       slashingManager,
 		blockScores:           make(map[string]int64),
-		attestationsByBlock:   make(map[string][]*Attestation),
+		attestationsByBlock:   make(map[string][]*types.Attestation),
 		validatorAttestations: make(map[string]map[string]bool),
 		epochAttestations:     make(map[uint64]map[string]int64),
 		blockEpochMap:         make(map[string]uint64),
@@ -93,7 +94,7 @@ func (fc *ForkChoice) backgroundCleanup() {
 }
 
 // ProcessAttestation processes an attestation for fork choice with stake-weighted voting
-func (fc *ForkChoice) ProcessAttestation(attestation *Attestation) {
+func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 
@@ -149,7 +150,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *Attestation) {
 
 	// Check if we've hit the attestation limit for this block
 	if fc.attestationsByBlock[blockHash] == nil {
-		fc.attestationsByBlock[blockHash] = make([]*Attestation, 0, fc.fcConfig.MaxAttestationsPerBlock)
+		fc.attestationsByBlock[blockHash] = make([]*types.Attestation, 0, fc.fcConfig.MaxAttestationsPerBlock)
 	}
 
 	// Only store attestation if under limit (still count stake even if we don't store)
@@ -342,17 +343,19 @@ func (fc *ForkChoice) GetBlockScore(blockHash string) int64 {
 }
 
 // GetAttestationsForBlock returns attestations for a specific block
-func (fc *ForkChoice) GetAttestationsForBlock(blockHash string) []*Attestation {
+func (fc *ForkChoice) GetAttestationsForBlock(blockHash string) []*types.Attestation {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 
 	attestations := fc.attestationsByBlock[blockHash]
 	if attestations == nil {
-		return []*Attestation{}
+		// FIX: Return nil or an empty slice of pointers
+		return nil
+		// OR: return []*types.Attestation{}
 	}
 
 	// Return copy
-	result := make([]*Attestation, len(attestations))
+	result := make([]*types.Attestation, len(attestations))
 	copy(result, attestations)
 	return result
 }

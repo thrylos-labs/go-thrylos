@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/thrylos-labs/go-thrylos/storage"
+	"github.com/thrylos-labs/go-thrylos/types"
 )
 
 // WorldStateBalancer interface for balance operations needed by slashing
@@ -14,22 +17,22 @@ type WorldStateBalancer interface {
 
 // SlashingManager handles all slashing-related operations
 type SlashingManager struct {
-	config *SlashingConfig
+	config *storage.SlashingConfig
 
 	// Track all attestations by validator for double voting detection
-	attestationsByValidator map[string][]*AttestationRecord
+	attestationsByValidator map[string][]*storage.AttestationRecord
 
 	// Track jailed validators
-	jailedValidators map[string]*JailedValidator
+	jailedValidators map[string]*storage.JailedValidator // ✅
 
 	// Track slashed validators and their records
-	slashingRecords map[string][]*SlashingRecord
+	slashingRecords map[string][]*types.SlashingRecord // ✅
 
 	// Track attestation history for downtime detection
-	attestationHistory map[string]*AttestationHistory
+	attestationHistory map[string]*storage.AttestationHistory
 
 	// Track validator statuses
-	validatorStatus map[string]ValidatorStatus
+	validatorStatus map[string]storage.ValidatorStatus // ✅
 
 	// Track processed evidence to prevent double slashing
 	processedEvidence map[string]bool
@@ -38,30 +41,72 @@ type SlashingManager struct {
 
 	// Reference to world state for stake updates
 	worldState WorldStateBalancer
+
+	// Persistent storage (optional, can be nil for tests)
+	storage *storage.SlashingStorage // ✅
+
 }
 
 // NewSlashingManager creates a new slashing manager
-// storage parameter is optional (can be nil) - will be used for persistence in future
-func NewSlashingManager(config *SlashingConfig, worldState WorldStateBalancer, storage interface{}) *SlashingManager {
+// storage parameter is optional (can be nil) - will be used for persistence
+func NewSlashingManager(config *storage.SlashingConfig, worldState WorldStateBalancer, slashingStorage *storage.SlashingStorage) *SlashingManager {
 	if config == nil {
-		config = DefaultSlashingConfig()
+		config = storage.DefaultSlashingConfig()
 	}
 
-	return &SlashingManager{
+	sm := &SlashingManager{
 		config:                  config,
-		attestationsByValidator: make(map[string][]*AttestationRecord),
-		jailedValidators:        make(map[string]*JailedValidator),
-		slashingRecords:         make(map[string][]*SlashingRecord),
-		attestationHistory:      make(map[string]*AttestationHistory),
-		validatorStatus:         make(map[string]ValidatorStatus),
+		attestationsByValidator: make(map[string][]*storage.AttestationRecord),
+		jailedValidators:        make(map[string]*storage.JailedValidator),
+		slashingRecords:         make(map[string][]*types.SlashingRecord),
+		attestationHistory:      make(map[string]*storage.AttestationHistory),
+		validatorStatus:         make(map[string]storage.ValidatorStatus),
 		processedEvidence:       make(map[string]bool),
 		worldState:              worldState,
-		// storage will be added in future update
+		storage:                 slashingStorage,
 	}
+
+	// Load data from storage if available
+	if slashingStorage != nil {
+		if err := sm.loadFromStorage(); err != nil {
+			// Log error but don't fail - start with empty state
+			fmt.Printf("⚠️  Warning: Failed to load slashing data from storage: %v\n", err)
+		} else {
+			fmt.Printf("✅ Loaded slashing data from storage\n")
+		}
+	}
+
+	return sm
+}
+
+// loadFromStorage loads all slashing data from persistent storage into memory
+func (sm *SlashingManager) loadFromStorage() error {
+	if sm.storage == nil {
+		return nil
+	}
+
+	data, err := sm.storage.LoadAllSlashingData()
+	if err != nil {
+		return fmt.Errorf("failed to load slashing data: %w", err)
+	}
+
+	// Load jailed validators
+	sm.jailedValidators = data.JailedValidators
+	fmt.Printf("   📥 Loaded %d jailed validators\n", len(sm.jailedValidators))
+
+	// Load processed evidence
+	sm.processedEvidence = data.ProcessedEvidence
+	fmt.Printf("   📥 Loaded %d processed evidence records\n", len(sm.processedEvidence))
+
+	// Load validator statuses
+	sm.validatorStatus = data.ValidatorStatuses
+	fmt.Printf("   📥 Loaded %d validator statuses\n", len(sm.validatorStatus))
+
+	return nil
 }
 
 // ProcessAttestation checks an attestation for slashable offenses
-func (sm *SlashingManager) ProcessAttestation(att *Attestation) error {
+func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -73,7 +118,7 @@ func (sm *SlashingManager) ProcessAttestation(att *Attestation) error {
 	}
 
 	// Create attestation record
-	record := &AttestationRecord{
+	record := &storage.AttestationRecord{
 		ValidatorAddress: att.ValidatorAddress,
 		Epoch:            att.Epoch,
 		BlockHash:        att.BlockHash,
@@ -143,7 +188,7 @@ func (sm *SlashingManager) ReportMissedAttestation(validatorKey string, slot uin
 	// Get or create attestation history
 	history, exists := sm.attestationHistory[validatorKey]
 	if !exists {
-		history = &AttestationHistory{
+		history = &storage.AttestationHistory{
 			ValidatorAddress: validatorKey,
 		}
 		sm.attestationHistory[validatorKey] = history
@@ -158,14 +203,14 @@ func (sm *SlashingManager) ReportMissedAttestation(validatorKey string, slot uin
 }
 
 // ReportInvalidProposal reports that a validator proposed an invalid block
-func (sm *SlashingManager) ReportInvalidProposal(proposal *BlockProposal, reason string) error {
+func (sm *SlashingManager) ReportInvalidProposal(proposal *types.BlockProposal, reason string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	validatorAddress := proposal.Proposer
 
-	evidence := SlashingEvidence{
-		InvalidBlock: proposal,
+	evidence := types.SlashingEvidence{
+		InvalidBlock: proposal, // Now this matches!
 	}
 
 	// Check if already processed
@@ -184,14 +229,15 @@ func (sm *SlashingManager) ReportInvalidProposal(proposal *BlockProposal, reason
 	penaltyAmount := balance * int64(sm.config.InvalidProposalPenalty) / 100
 
 	// Create slashing record
-	record := &SlashingRecord{
+	record := &types.SlashingRecord{
 		ValidatorAddress: validatorAddress,
-		Condition:        InvalidProposal,
-		Epoch:            proposal.Epoch,
-		Timestamp:        time.Now(),
-		Evidence:         evidence,
-		SlashedAmount:    penaltyAmount,
-		Reason:           fmt.Sprintf("Invalid proposal: %s", reason),
+		// CHANGE THIS: storage.InvalidProposal -> types.InvalidProposal
+		Condition:     types.InvalidProposal,
+		Epoch:         proposal.Epoch,
+		Timestamp:     time.Now(),
+		Evidence:      evidence,
+		SlashedAmount: penaltyAmount,
+		Reason:        fmt.Sprintf("Invalid proposal: %s", reason),
 	}
 
 	// Apply slashing
@@ -199,14 +245,14 @@ func (sm *SlashingManager) ReportInvalidProposal(proposal *BlockProposal, reason
 }
 
 // slashDoubleVoting handles double voting offense
-func (sm *SlashingManager) slashDoubleVoting(att *Attestation, first, second *AttestationRecord) error {
+func (sm *SlashingManager) slashDoubleVoting(att *types.Attestation, first, second *storage.AttestationRecord) error {
 	validatorAddress := att.ValidatorAddress
 
 	fmt.Printf("🚨 slashDoubleVoting called for %s\n", validatorAddress)
 
-	evidence := SlashingEvidence{
+	evidence := types.SlashingEvidence{
 		FirstAttestation: att,
-		SecondAttestation: &Attestation{
+		SecondAttestation: &types.Attestation{
 			ValidatorAddress: second.ValidatorAddress,
 			BlockHash:        second.BlockHash,
 			BlockHeight:      int64(second.Epoch * 100), // Approximate
@@ -238,9 +284,9 @@ func (sm *SlashingManager) slashDoubleVoting(att *Attestation, first, second *At
 	fmt.Printf("⚖️  Penalty amount: %d (%d%%)\n", penaltyAmount, sm.config.DoubleVotingPenalty)
 
 	// Create slashing record
-	record := &SlashingRecord{
+	record := &types.SlashingRecord{
 		ValidatorAddress: validatorAddress,
-		Condition:        DoubleVoting,
+		Condition:        types.DoubleVoting,
 		Epoch:            att.Epoch,
 		Timestamp:        time.Now(),
 		Evidence:         evidence,
@@ -261,8 +307,8 @@ func (sm *SlashingManager) slashDoubleVoting(att *Attestation, first, second *At
 
 // slashDowntime handles downtime offense
 // slashDowntime handles downtime offense
-func (sm *SlashingManager) slashDowntime(validatorAddress string, history *AttestationHistory) error {
-	evidence := SlashingEvidence{
+func (sm *SlashingManager) slashDowntime(validatorAddress string, history *storage.AttestationHistory) error {
+	evidence := types.SlashingEvidence{
 		MissedSlots: history.MissedSlotList,
 	}
 
@@ -282,9 +328,9 @@ func (sm *SlashingManager) slashDowntime(validatorAddress string, history *Attes
 	penaltyAmount := balance * int64(sm.config.DowntimePenalty) / 100
 
 	// Create slashing record
-	record := &SlashingRecord{
+	record := &types.SlashingRecord{
 		ValidatorAddress: validatorAddress,
-		Condition:        Downtime,
+		Condition:        types.Downtime,
 		Timestamp:        time.Now(),
 		Evidence:         evidence,
 		SlashedAmount:    penaltyAmount,
@@ -296,11 +342,19 @@ func (sm *SlashingManager) slashDowntime(validatorAddress string, history *Attes
 }
 
 // applySlashing executes the slashing penalty
-func (sm *SlashingManager) applySlashing(record *SlashingRecord) error {
+func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 	validatorAddress := record.ValidatorAddress
 
 	// Mark evidence as processed
-	sm.processedEvidence[record.Evidence.Hash()] = true
+	evidenceHash := record.Evidence.Hash()
+	sm.processedEvidence[evidenceHash] = true
+
+	// Persist evidence
+	if sm.storage != nil {
+		if err := sm.storage.SaveProcessedEvidence(evidenceHash); err != nil {
+			fmt.Printf("⚠️  Failed to persist processed evidence: %v\n", err)
+		}
+	}
 
 	// Reduce validator's stake
 	currentBalance, err := sm.worldState.GetBalance(validatorAddress)
@@ -319,34 +373,59 @@ func (sm *SlashingManager) applySlashing(record *SlashingRecord) error {
 	}
 
 	// Jail validator for severe offenses
-	if record.Condition == DoubleVoting || record.Condition == SurroundVoting {
+	if record.Condition == types.DoubleVoting || record.Condition == types.SurroundVoting {
 		sm.jailValidator(validatorAddress, record.Condition)
 	}
 
 	// Update validator status
 	if newBalance < sm.config.MinimumStake {
-		sm.validatorStatus[validatorAddress] = ValidatorSlashed
+		sm.validatorStatus[validatorAddress] = storage.ValidatorSlashed
+
+		// Persist status
+		if sm.storage != nil {
+			if err := sm.storage.SaveValidatorStatus(validatorAddress, storage.ValidatorSlashed); err != nil {
+				fmt.Printf("⚠️  Failed to persist validator status: %v\n", err)
+			}
+		}
 	}
 
 	// Record the slashing
 	sm.slashingRecords[validatorAddress] = append(sm.slashingRecords[validatorAddress], record)
 
+	// Persist slashing record
+	if sm.storage != nil {
+		if err := sm.storage.SaveSlashingRecord(validatorAddress, record); err != nil {
+			fmt.Printf("⚠️  Failed to persist slashing record: %v\n", err)
+		}
+	}
+
 	return nil
 }
 
 // jailValidator temporarily jails a validator
-func (sm *SlashingManager) jailValidator(validatorAddress string, reason SlashingCondition) {
+func (sm *SlashingManager) jailValidator(validatorAddress string, reason types.SlashingCondition) {
 	jailTime := time.Now()
 	releaseTime := jailTime.Add(sm.config.JailDuration)
 
-	sm.jailedValidators[validatorAddress] = &JailedValidator{
+	jail := &storage.JailedValidator{
 		ValidatorAddress: validatorAddress,
 		JailTime:         jailTime,
 		ReleaseTime:      releaseTime,
 		Reason:           reason,
 	}
 
-	sm.validatorStatus[validatorAddress] = ValidatorJailed
+	sm.jailedValidators[validatorAddress] = jail
+	sm.validatorStatus[validatorAddress] = storage.ValidatorJailed
+
+	// Persist to storage
+	if sm.storage != nil {
+		if err := sm.storage.SaveJailedValidator(validatorAddress, jail); err != nil {
+			fmt.Printf("⚠️  Failed to persist jailed validator %s: %v\n", validatorAddress, err)
+		}
+		if err := sm.storage.SaveValidatorStatus(validatorAddress, storage.ValidatorJailed); err != nil {
+			fmt.Printf("⚠️  Failed to persist validator status %s: %v\n", validatorAddress, err)
+		}
+	}
 }
 
 // isValidatorJailed checks if a validator is currently jailed
@@ -359,7 +438,18 @@ func (sm *SlashingManager) isValidatorJailed(validatorAddress string) bool {
 	// Check if jail time has expired
 	if time.Now().After(jailed.ReleaseTime) {
 		delete(sm.jailedValidators, validatorAddress)
-		sm.validatorStatus[validatorAddress] = ValidatorActive
+		sm.validatorStatus[validatorAddress] = storage.ValidatorActive
+
+		// Persist release from jail
+		if sm.storage != nil {
+			if err := sm.storage.DeleteJailedValidator(validatorAddress); err != nil {
+				fmt.Printf("⚠️  Failed to delete jailed validator %s from storage: %v\n", validatorAddress, err)
+			}
+			if err := sm.storage.SaveValidatorStatus(validatorAddress, storage.ValidatorActive); err != nil {
+				fmt.Printf("⚠️  Failed to persist validator status %s: %v\n", validatorAddress, err)
+			}
+		}
+
 		return false
 	}
 
@@ -367,10 +457,10 @@ func (sm *SlashingManager) isValidatorJailed(validatorAddress string) bool {
 }
 
 // recordAttestationForDowntime updates attestation history
-func (sm *SlashingManager) recordAttestationForDowntime(validatorKey string, att *Attestation) {
+func (sm *SlashingManager) recordAttestationForDowntime(validatorKey string, att *types.Attestation) {
 	history, exists := sm.attestationHistory[validatorKey]
 	if !exists {
-		history = &AttestationHistory{
+		history = &storage.AttestationHistory{
 			ValidatorAddress: validatorKey,
 		}
 		sm.attestationHistory[validatorKey] = history
@@ -381,7 +471,7 @@ func (sm *SlashingManager) recordAttestationForDowntime(validatorKey string, att
 }
 
 // GetSlashingRecords returns all slashing records for a validator
-func (sm *SlashingManager) GetSlashingRecords(validatorKey string) []*SlashingRecord {
+func (sm *SlashingManager) GetSlashingRecords(validatorKey string) []*types.SlashingRecord {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -389,24 +479,24 @@ func (sm *SlashingManager) GetSlashingRecords(validatorKey string) []*SlashingRe
 }
 
 // GetValidatorStatus returns the current status of a validator
-func (sm *SlashingManager) GetValidatorStatus(validatorKey string) ValidatorStatus {
+func (sm *SlashingManager) GetValidatorStatus(validatorKey string) storage.ValidatorStatus {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
 	status, exists := sm.validatorStatus[validatorKey]
 	if !exists {
-		return ValidatorActive
+		return storage.ValidatorActive
 	}
 
 	return status
 }
 
 // GetJailedValidators returns all currently jailed validators
-func (sm *SlashingManager) GetJailedValidators() []*JailedValidator {
+func (sm *SlashingManager) GetJailedValidators() []*storage.JailedValidator {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	validators := make([]*JailedValidator, 0, len(sm.jailedValidators))
+	validators := make([]*storage.JailedValidator, 0, len(sm.jailedValidators))
 	for _, v := range sm.jailedValidators {
 		validators = append(validators, v)
 	}
@@ -426,7 +516,7 @@ func (sm *SlashingManager) IsValidatorActive(validatorKey string) bool {
 
 	// Check if slashed below minimum
 	status, exists := sm.validatorStatus[validatorKey]
-	if exists && status != ValidatorActive {
+	if exists && status != storage.ValidatorActive {
 		return false
 	}
 

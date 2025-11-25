@@ -24,6 +24,7 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 	thrylosSync "github.com/thrylos-labs/go-thrylos/sync" // Use alias to avoid conflict with "sync" package
+	"github.com/thrylos-labs/go-thrylos/types"
 )
 
 // Node represents a blockchain node with PoS consensus and comprehensive state management
@@ -816,7 +817,7 @@ func (n *Node) handleOutgoingMessage(msg interface{}) {
 		if err := n.BroadcastBlock(m.Block); err != nil {
 			fmt.Printf("Failed to broadcast block via P2P: %v\n", err)
 		}
-	case *pos.Attestation:
+	case *types.Attestation:
 		fmt.Printf("Broadcasting attestation\n")
 		if n.p2pNetwork != nil {
 			if err := n.p2pNetwork.BroadcastAttestation(m); err != nil {

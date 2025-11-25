@@ -13,6 +13,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/crypto/address"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
+	"github.com/thrylos-labs/go-thrylos/types"
 )
 
 // MockPublicKey implements the PublicKey interface for testing
@@ -339,7 +340,7 @@ func TestBridgeForwardsConsensusToNetwork(t *testing.T) {
 	})
 
 	t.Run("Forward attestation", func(t *testing.T) {
-		attestation := &Attestation{
+		attestation := &types.Attestation{
 			ValidatorAddress: "validator1",
 			BlockHash:        "block_hash",
 			Epoch:            1,
@@ -405,7 +406,7 @@ func TestBridgeForwardsNetworkToConsensus(t *testing.T) {
 	})
 
 	t.Run("Forward attestation from network", func(t *testing.T) {
-		attestation := &Attestation{
+		attestation := &types.Attestation{
 			ValidatorAddress: "validator3",
 			BlockHash:        "network_block_hash",
 			Epoch:            5,
@@ -421,7 +422,7 @@ func TestBridgeForwardsNetworkToConsensus(t *testing.T) {
 		// Check consensus received it
 		select {
 		case msg := <-engine.receiveChan:
-			if att, ok := msg.(*Attestation); ok {
+			if att, ok := msg.(*types.Attestation); ok {
 				if att.ValidatorAddress != "validator3" {
 					t.Error("Wrong attestation forwarded")
 				}
@@ -473,7 +474,7 @@ func TestBridgeStopGracefully(t *testing.T) {
 	}
 
 	// Send some messages
-	engine.broadcastChan <- &Attestation{
+	engine.broadcastChan <- &types.Attestation{
 		ValidatorAddress: "test",
 		BlockHash:        "test",
 	}
@@ -497,7 +498,7 @@ func BenchmarkBridgeForwarding(b *testing.B) {
 	bridge.Start()
 	defer bridge.Stop()
 
-	attestation := &Attestation{
+	attestation := &types.Attestation{
 		ValidatorAddress: "benchmark_validator",
 		BlockHash:        "benchmark_block",
 		Epoch:            1,

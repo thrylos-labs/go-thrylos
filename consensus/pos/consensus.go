@@ -13,6 +13,7 @@ package pos
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math/big"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/storage"
+	"github.com/thrylos-labs/go-thrylos/types"
 	"golang.org/x/crypto/blake2b"
 )
 
@@ -45,7 +48,7 @@ func NewConsensusEngine(
 		receiveChan:      receiveChan,
 		proposalTimeout:  time.Duration(cfg.Consensus.BlockTime),
 		attestationPhase: time.Duration(cfg.Consensus.BlockTime) / 3,
-		attestations:     make(map[string]*Attestation),
+		attestations:     make(map[string]*types.Attestation),
 		votes:            make(map[string]*Vote),
 		currentEpoch:     0,
 		currentSlot:      0,
@@ -63,8 +66,8 @@ func NewConsensusEngine(
 	// Initialize fork choice
 	engine.forkChoice = NewForkChoice(cfg, worldState, &SlashingManager{})
 
-	// Initialize slashing manager - ADD THIS BLOCK
-	slashingConfig := &SlashingConfig{
+	// Initialize slashing manager with persistent storage
+	slashingConfig := &storage.SlashingConfig{
 		DoubleVotingPenalty:     uint8(cfg.Consensus.SlashingDoubleVote),
 		SurroundVotingPenalty:   uint8(cfg.Consensus.SlashingSurroundVote),
 		InvalidProposalPenalty:  uint8(cfg.Consensus.SlashingInvalidProposal),
@@ -75,7 +78,20 @@ func NewConsensusEngine(
 		JailDuration:            time.Duration(cfg.Consensus.JailDurationHours) * time.Hour,
 		MinimumStake:            cfg.Staking.MinValidatorStake,
 	}
-	engine.slashingManager = NewSlashingManager(slashingConfig, worldState, nil) // nil storage for now, will add persistence later
+
+	// Create slashing storage if we have access to BadgerDB
+	var slashingStorage *storage.SlashingStorage
+	badgerDB := worldState.GetBadgerDB()
+
+	if badgerDB != nil {
+		slashingStorage = storage.NewSlashingStorage(badgerDB) // ← storage. prefix
+		log.Println("✅ Slashing persistence enabled")
+	} else {
+		slashingStorage = nil
+		log.Println("⚠️ Slashing persistence disabled")
+	}
+
+	engine.slashingManager = NewSlashingManager(slashingConfig, worldState, slashingStorage)
 
 	return engine
 }
@@ -248,7 +264,7 @@ func (ce *ConsensusEngine) createAttestation() error {
 		return fmt.Errorf("no current head block")
 	}
 
-	attestation := &Attestation{
+	attestation := &types.Attestation{
 		ValidatorAddress: ce.nodeAddress,
 		BlockHash:        currentHead.Hash,
 		BlockHeight:      currentHead.Header.Index,
@@ -385,9 +401,9 @@ func (ce *ConsensusEngine) processAttestations() {
 		// This is THE KEY FIX - without this, slashing is completely inactive!
 		if err := ce.slashingManager.ProcessAttestation(attestation); err != nil {
 			// Slashing violation detected!
-			fmt.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n", 
+			fmt.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n",
 				attestation.ValidatorAddress, err)
-			
+
 			// TODO: Broadcast slashing evidence to network
 			// For now, we log it and skip this attestation
 			continue
@@ -399,7 +415,7 @@ func (ce *ConsensusEngine) processAttestations() {
 }
 
 // validateAttestation validates an attestation
-func (ce *ConsensusEngine) validateAttestation(attestation *Attestation) error {
+func (ce *ConsensusEngine) validateAttestation(attestation *types.Attestation) error {
 	// Check validator exists and is active
 	validator, err := ce.worldState.GetValidator(attestation.ValidatorAddress)
 	if err != nil {
@@ -472,7 +488,7 @@ func (ce *ConsensusEngine) updateForkChoice() {
 }
 
 // signAttestation signs an attestation with the node's private key
-func (ce *ConsensusEngine) signAttestation(attestation *Attestation) ([]byte, error) {
+func (ce *ConsensusEngine) signAttestation(attestation *types.Attestation) ([]byte, error) {
 	// Create attestation hash
 	data := fmt.Sprintf("%s%s%d%d%d%d",
 		attestation.ValidatorAddress,
@@ -512,7 +528,7 @@ func (ce *ConsensusEngine) messageHandler() {
 		switch m := msg.(type) {
 		case *BlockProposal:
 			ce.handleBlockProposal(m)
-		case *Attestation:
+		case *types.Attestation:
 			ce.handleAttestation(m)
 		case *Vote:
 			ce.handleVote(m)
@@ -557,7 +573,7 @@ func (ce *ConsensusEngine) handleBlockProposal(proposal *BlockProposal) {
 }
 
 // handleAttestation processes a received attestation
-func (ce *ConsensusEngine) handleAttestation(attestation *Attestation) {
+func (ce *ConsensusEngine) handleAttestation(attestation *types.Attestation) {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
 
