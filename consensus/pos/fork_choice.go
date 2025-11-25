@@ -53,16 +53,17 @@ type WorldStateReader interface {
 }
 
 // NewForkChoice creates a new fork choice instance with memory management
-func NewForkChoice(config *config.Config, worldState WorldStateReader) *ForkChoice {
-	return NewForkChoiceWithConfig(config, worldState, DefaultForkChoiceConfig())
+func NewForkChoice(config *config.Config, worldState WorldStateReader, slashingManager *SlashingManager) *ForkChoice {
+	return NewForkChoiceWithConfig(config, worldState, slashingManager, DefaultForkChoiceConfig())
 }
 
 // NewForkChoiceWithConfig creates a fork choice with custom configuration
-func NewForkChoiceWithConfig(config *config.Config, worldState WorldStateReader, fcConfig *ForkChoiceConfig) *ForkChoice {
+func NewForkChoiceWithConfig(config *config.Config, worldState WorldStateReader, slashingManager *SlashingManager, fcConfig *ForkChoiceConfig) *ForkChoice {
 	fc := &ForkChoice{
 		config:                config,
 		fcConfig:              fcConfig,
 		worldState:            worldState,
+		slashingManager:       slashingManager,
 		blockScores:           make(map[string]int64),
 		attestationsByBlock:   make(map[string][]*Attestation),
 		validatorAttestations: make(map[string]map[string]bool),
@@ -103,6 +104,20 @@ func (fc *ForkChoice) ProcessAttestation(attestation *Attestation) {
 	blockHashShort := blockHash
 	if len(blockHashShort) > 8 {
 		blockHashShort = blockHashShort[:8]
+	}
+
+	// 1. Check for slashing violations (double voting, etc.)
+	if fc.slashingManager != nil {
+		if err := fc.slashingManager.ProcessAttestation(attestation); err != nil {
+			fmt.Printf("⚠️ Slashing violation detected for validator %s: %v\n", validatorAddr, err)
+			return // Don't process attestation from slashed validator
+		}
+
+		// 2. Check if validator is active (not jailed/slashed)
+		if !fc.slashingManager.IsValidatorActive(validatorAddr) {
+			fmt.Printf("⚠️ Inactive/jailed validator %s attempted to attest\n", validatorAddr)
+			return
+		}
 	}
 
 	// Check if this validator has already attested to this block

@@ -61,7 +61,7 @@ func NewConsensusEngine(
 	engine.blockValidator = NewBlockValidator(engine)
 
 	// Initialize fork choice
-	engine.forkChoice = NewForkChoice(cfg, worldState)
+	engine.forkChoice = NewForkChoice(cfg, worldState, &SlashingManager{})
 
 	// Initialize slashing manager - ADD THIS BLOCK
 	slashingConfig := &SlashingConfig{

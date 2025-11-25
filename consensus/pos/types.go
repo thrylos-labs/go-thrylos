@@ -113,9 +113,10 @@ type ConsensusEngine struct {
 
 // ForkChoice implements fork choice with memory management
 type ForkChoice struct {
-	config     *config.Config
-	fcConfig   *ForkChoiceConfig
-	worldState WorldStateReader
+	config          *config.Config
+	fcConfig        *ForkChoiceConfig
+	worldState      WorldStateReader
+	slashingManager *SlashingManager
 
 	// Core consensus data
 	blockScores           map[string]int64            // blockHash -> total attesting stake
