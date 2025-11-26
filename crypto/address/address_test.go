@@ -20,12 +20,12 @@ func TestNew(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, address)
 
-	// Test that the address has the correct tl1 format
+	// Test that the address has the correct 0x format
 	addrStr := address.String()
-	require.True(t, strings.HasPrefix(addrStr, "tl1"), "Address should start with tl1")
-	require.Equal(t, 22, len(addrStr), "Address should be 22 characters long")
+	require.True(t, strings.HasPrefix(addrStr, "0x"), "Address should start with 0x")
+	require.Equal(t, 42, len(addrStr), "Address should be 42 characters long (0x + 40 hex)")
 
-	// Test that it's valid bech32
+	// Test that it's valid hex
 	require.NoError(t, Validate(addrStr), "First address should be valid")
 
 	// Test deterministic generation - same key should produce same address
@@ -86,28 +86,33 @@ func TestValidate(t *testing.T) {
 			valid:   true,
 		},
 		{
+			name:    "valid address without 0x",
+			address: strings.TrimPrefix(validAddrStr, "0x"),
+			valid:   false, // Must have 0x prefix
+		},
+		{
 			name:    "invalid - wrong prefix",
-			address: "eth1k2x4p9m6v8q3w7f5t2d4",
+			address: "eth1234567890123456789012345678901234567890",
 			valid:   false,
 		},
 		{
 			name:    "invalid - no prefix",
-			address: "k2x4p9m6v8q3w7f5t2d4g9h7",
-			valid:   false,
-		},
-		{
-			name:    "invalid - wrong checksum",
-			address: "tl1k2x4p9m6v8q3w7f5t2d5", // Changed last character
+			address: "1234567890123456789012345678901234567890",
 			valid:   false,
 		},
 		{
 			name:    "invalid - too short",
-			address: "tl1k2x4p9m6v8",
+			address: "0x12345678",
 			valid:   false,
 		},
 		{
-			name:    "invalid - invalid bech32 character",
-			address: "tl1k2x4p9m6v8q3w7f5t2b4", // 'b' is not valid in bech32
+			name:    "invalid - too long",
+			address: "0x123456789012345678901234567890123456789012345",
+			valid:   false,
+		},
+		{
+			name:    "invalid - non-hex character",
+			address: "0x123456789012345678901234567890123456zzzz",
 			valid:   false,
 		},
 		{
@@ -151,31 +156,38 @@ func TestFromString(t *testing.T) {
 	// Test invalid address
 	_, err = FromString("invalid")
 	require.Error(t, err)
+
+	// Test old tl1 format (should fail)
+	_, err = FromString("tl1k2x4p9m6v8q3w7f5t2d4")
+	require.Error(t, err)
 }
 
 func TestFromBytes(t *testing.T) {
-	// Test valid 8-byte input
-	bytes8 := []byte{
+	// Test valid 20-byte input (Ethereum address length)
+	bytes20 := []byte{
 		0x4a, 0x7b, 0x3c, 0x8d, 0x9e, 0x2f, 0x1a, 0x6b,
+		0x5c, 0x7d, 0x8e, 0x9f, 0x0a, 0x1b, 0x2c, 0x3d,
+		0x4e, 0x5f, 0x6a, 0x7b,
 	}
 
-	address, err := FromBytes(bytes8)
+	address, err := FromBytes(bytes20)
 	require.NoError(t, err)
 	require.NotNil(t, address)
 
-	// Verify it creates a valid bech32 address
+	// Verify it creates a valid hex address
 	addrStr := address.String()
-	require.True(t, strings.HasPrefix(addrStr, "tl1"))
+	require.True(t, strings.HasPrefix(addrStr, "0x"))
 	require.NoError(t, Validate(addrStr))
+	require.Equal(t, 42, len(addrStr)) // 0x + 40 hex chars
 
 	// Test invalid byte length
 	_, err = FromBytes([]byte{0x01, 0x02})
 	require.Error(t, err)
 
-	_, err = FromBytes(make([]byte, 12)) // Wrong length (12 instead of 8)
+	_, err = FromBytes(make([]byte, 8)) // Old tl1 length
 	require.Error(t, err)
 
-	_, err = FromBytes(make([]byte, 20)) // Old Ethereum length
+	_, err = FromBytes(make([]byte, 12)) // Wrong length
 	require.Error(t, err)
 }
 
@@ -186,17 +198,17 @@ func TestAddressMethods(t *testing.T) {
 	addr := address.String()
 
 	// Test String()
-	require.True(t, strings.HasPrefix(addr, "tl1"))
-	require.Equal(t, 22, len(addr))
+	require.True(t, strings.HasPrefix(addr, "0x"))
+	require.Equal(t, 42, len(addr)) // 0x + 40 hex chars
 
 	// Test Hex()
 	hex := address.Hex()
-	require.Equal(t, 16, len(hex))     // 8 bytes = 16 hex characters
-	require.NotContains(t, hex, "tl1") // Should be raw hex
+	require.Equal(t, 40, len(hex))    // 20 bytes = 40 hex characters
+	require.NotContains(t, hex, "0x") // Should be raw hex without prefix
 
 	// Test Bytes()
 	bytes := address.Bytes()
-	require.Equal(t, 8, len(bytes)) // 8 bytes for new format
+	require.Equal(t, 20, len(bytes)) // 20 bytes for Ethereum format
 
 	// Test IsZero()
 	require.False(t, address.IsZero())
@@ -229,7 +241,7 @@ func TestAddressCopy(t *testing.T) {
 	require.NotSame(t, original, copied) // Different memory addresses
 
 	// Modify original, copy should remain unchanged
-	original.Set(make([]byte, 8)) // 8 bytes for new format
+	original.Set(make([]byte, 20)) // 20 bytes for Ethereum format
 	require.False(t, original.Equal(copied))
 }
 
@@ -273,8 +285,8 @@ func TestUtilityFunctions(t *testing.T) {
 	// Test GenerateAddress
 	addrStr, err := GenerateAddress(pubKey)
 	require.NoError(t, err)
-	require.True(t, strings.HasPrefix(addrStr, "tl1"))
-	require.Equal(t, 22, len(addrStr))
+	require.True(t, strings.HasPrefix(addrStr, "0x"))
+	require.Equal(t, 42, len(addrStr))
 
 	// Test ParseAddress
 	parsed, err := ParseAddress(addrStr)
@@ -293,8 +305,9 @@ func TestNullAddress(t *testing.T) {
 	require.True(t, nullAddr.IsZero())
 
 	nullStr := nullAddr.String()
-	require.True(t, strings.HasPrefix(nullStr, "tl1"))
-	require.NoError(t, Validate(nullStr)) // Should be valid bech32
+	require.True(t, strings.HasPrefix(nullStr, "0x"))
+	require.NoError(t, Validate(nullStr)) // Should be valid hex address
+	require.Equal(t, "0x0000000000000000000000000000000000000000", nullStr)
 }
 
 func TestConvertToAddress(t *testing.T) {
@@ -304,21 +317,22 @@ func TestConvertToAddress(t *testing.T) {
 	// Test ConvertToAddress
 	addrStr, err := ConvertToAddress(pubKey)
 	require.NoError(t, err)
-	require.True(t, strings.HasPrefix(addrStr, "tl1"))
+	require.True(t, strings.HasPrefix(addrStr, "0x"))
 	require.NoError(t, Validate(addrStr))
-	require.Equal(t, 22, len(addrStr))
+	require.Equal(t, 42, len(addrStr))
 }
 
 func TestAddressMetrics(t *testing.T) {
 	metrics := AddressMetrics()
 
-	require.Equal(t, "Bech32", metrics["format"])
-	require.Equal(t, "tl", metrics["prefix"])
-	require.Equal(t, 8, metrics["byte_length"])
-	require.Equal(t, 22, metrics["estimated_str_length"])
-	require.Equal(t, "2^64", metrics["collision_resistance"])
+	require.Equal(t, "Ethereum Hex", metrics["format"])
+	require.Equal(t, "0x", metrics["prefix"])
+	require.Equal(t, 20, metrics["byte_length"])
+	require.Equal(t, 42, metrics["estimated_str_length"])
+	require.Equal(t, "2^160", metrics["collision_resistance"])
 	require.Equal(t, false, metrics["case_sensitive"])
-	require.Equal(t, "Ed25519", metrics["crypto_scheme"])
+	require.Equal(t, "Ed25519 (Ethereum-compatible)", metrics["crypto_scheme"])
+	require.Equal(t, "Full Ethereum/Metamask compatibility", metrics["compatibility"])
 }
 
 func TestAddressLengthConsistency(t *testing.T) {
@@ -331,13 +345,13 @@ func TestAddressLengthConsistency(t *testing.T) {
 		require.NoError(t, err)
 
 		addrStr := address.String()
-		require.Equal(t, 22, len(addrStr), "Address length should be consistent")
-		require.True(t, strings.HasPrefix(addrStr, "tl1"))
+		require.Equal(t, 42, len(addrStr), "Address length should be consistent")
+		require.True(t, strings.HasPrefix(addrStr, "0x"))
 		require.NoError(t, Validate(addrStr))
 	}
 }
 
-func TestBech32CaseInsensitivity(t *testing.T) {
+func TestHexCaseInsensitivity(t *testing.T) {
 	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
 	address, _ := New(pubKey)
 	original := address.String()
@@ -353,7 +367,7 @@ func TestBech32CaseInsensitivity(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should be equal when normalized
-	require.Equal(t, lowerAddr.String(), upperAddr.String())
+	require.Equal(t, strings.ToLower(lowerAddr.String()), strings.ToLower(upperAddr.String()))
 }
 
 func TestAddressDeterminism(t *testing.T) {
@@ -434,4 +448,35 @@ func TestAddressRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	require.True(t, originalAddr.Equal(bytesAddr))
+}
+
+func TestEthereumAddressConversion(t *testing.T) {
+	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	address, _ := New(pubKey)
+
+	// Test conversion to go-ethereum Address
+	ethAddr := address.ToEthereumAddress()
+	require.NotNil(t, ethAddr)
+
+	// Convert back and should be equal
+	converted := FromEthereumAddress(ethAddr)
+	require.True(t, address.Equal(converted))
+}
+
+func TestChecksumAddress(t *testing.T) {
+	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	address, _ := New(pubKey)
+
+	// Test checksum address (EIP-55)
+	checksumAddr := address.ToChecksumAddress()
+	require.True(t, strings.HasPrefix(checksumAddr, "0x"))
+	require.Equal(t, 42, len(checksumAddr))
+
+	// Should be valid
+	require.NoError(t, Validate(checksumAddr))
+
+	// Test ChecksumAddress function
+	checksumAddr2, err := ChecksumAddress(address.String())
+	require.NoError(t, err)
+	require.Equal(t, checksumAddr, checksumAddr2)
 }

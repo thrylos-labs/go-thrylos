@@ -46,7 +46,7 @@ func (m *MockPublicKey) Verify(data []byte, signature *crypto.Signature) error {
 
 func (m *MockPublicKey) Address() (*address.Address, error) {
 	// Create a simple mock address using FromBytes
-	mockBytes := make([]byte, address.AddressByteLength)
+	mockBytes := make([]byte, address.AddressLength)
 	copy(mockBytes, []byte("mockadd"))
 	return address.FromBytes(mockBytes)
 }
