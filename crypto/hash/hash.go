@@ -69,8 +69,8 @@ var blake2bHasherPool = sync.Pool{
 	New: func() interface{} {
 		hasher, err := blake2b.New256(nil)
 		if err != nil {
-			// Log error and return nil, handle at call site
-			log.Fatalf("FATAL: Cannot initialize BLAKE2b hasher: %v", err)
+			log.Printf("ERROR: Cannot initialize BLAKE2b hasher: %v", err)
+			// Return nil and handle at call site
 			return nil
 		}
 		return hasher
@@ -80,7 +80,12 @@ var blake2bHasherPool = sync.Pool{
 func HashData(data []byte) ([]byte, error) {
 	hasher := blake2bHasherPool.Get()
 	if hasher == nil {
-		return nil, fmt.Errorf("failed to get hasher from pool")
+		// Emergency fallback - try creating new hasher
+		h, err := blake2b.New256(nil)
+		if err != nil {
+			return nil, fmt.Errorf("critical: cannot create hasher: %v", err)
+		}
+		hasher = h
 	}
 	h := hasher.(hash.Hash)
 	defer blake2bHasherPool.Put(h)
