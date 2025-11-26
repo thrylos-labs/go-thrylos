@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"time"
@@ -39,6 +40,10 @@ type Server struct {
 	enableTLS bool
 	certFile  string
 	keyFile   string
+
+	// Rate limiting
+	rateLimiter     *RateLimiter
+	rateLimitConfig *RateLimitConfig
 }
 
 // ServerConfig represents server configuration
@@ -88,36 +93,55 @@ type TransactionHistoryResponse struct {
 // NewServer creates a new API server
 func NewServer(worldState *state.WorldState, port int) *Server {
 	server := &Server{
-		worldState: worldState,
-		port:       port,
+		worldState:      worldState,
+		port:            port,
+		rateLimitConfig: DefaultRateLimitConfig(),
 	}
 
+	server.rateLimiter = NewRateLimiter(server.rateLimitConfig)
 	server.setupRoutes()
 	return server
 }
 
 func NewServerWithServerConfig(worldState *state.WorldState, serverConfig *ServerConfig) *Server {
 	server := &Server{
-		worldState: worldState,
-		port:       serverConfig.Port,
-		enableTLS:  serverConfig.EnableTLS,
-		certFile:   serverConfig.CertFile,
-		keyFile:    serverConfig.KeyFile,
+		worldState:      worldState,
+		port:            serverConfig.Port,
+		enableTLS:       serverConfig.EnableTLS,
+		certFile:        serverConfig.CertFile,
+		keyFile:         serverConfig.KeyFile,
+		rateLimitConfig: DefaultRateLimitConfig(),
 	}
 
+	server.rateLimiter = NewRateLimiter(server.rateLimitConfig)
 	server.setupRoutes()
 	return server
 }
 
 func NewServerWithConfig(worldState *state.WorldState, cfg *config.Config) *Server {
-	server := &Server{
-		worldState: worldState,
-		port:       extractPortFromConfig(cfg.API.RESTAddr),
-		enableTLS:  cfg.API.EnableTLS,
-		certFile:   cfg.API.CertFile,
-		keyFile:    cfg.API.KeyFile,
+	// Create rate limit config from main config
+	rateLimitConfig := &RateLimitConfig{
+		StrictRPS:       float64(cfg.API.RateLimit) / 10, // 1/10 of standard for strict
+		StandardRPS:     float64(cfg.API.RateLimit),
+		PermissiveRPS:   float64(cfg.API.RateLimit) * 10, // 10x for permissive
+		StrictBurst:     3,
+		StandardBurst:   20,
+		PermissiveBurst: 200,
+		CleanupInterval: 1 * time.Minute,
+		MaxIdleTime:     5 * time.Minute,
+		Enabled:         true,
 	}
 
+	server := &Server{
+		worldState:      worldState,
+		port:            extractPortFromConfig(cfg.API.RESTAddr),
+		enableTLS:       cfg.API.EnableTLS,
+		certFile:        cfg.API.CertFile,
+		keyFile:         cfg.API.KeyFile,
+		rateLimitConfig: rateLimitConfig,
+	}
+
+	server.rateLimiter = NewRateLimiter(server.rateLimitConfig)
 	server.setupRoutes()
 	return server
 }
@@ -155,40 +179,51 @@ func (s *Server) setupRoutes() {
 	// API version prefix
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 
+	// ========== STRICT RATE LIMITING (1 req/sec) ==========
+	// Sensitive endpoints that modify state or provide funding
+	strict := api.PathPrefix("").Subrouter()
+	strict.Use(s.RateLimitMiddleware("strict"))
+
+	strict.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
+	strict.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
+
+	// ========== STANDARD RATE LIMITING (10 req/sec) ==========
+	// Normal API operations
+	standard := api.PathPrefix("").Subrouter()
+	standard.Use(s.RateLimitMiddleware("standard"))
+
+	standard.HandleFunc("/estimate-gas", s.estimateGas).Methods("POST", "OPTIONS")
+
+	// ========== PERMISSIVE RATE LIMITING (100 req/sec) ==========
+	// Read-only endpoints
+	permissive := api.PathPrefix("").Subrouter()
+	permissive.Use(s.RateLimitMiddleware("permissive"))
+
 	// Account endpoints
-	api.HandleFunc("/account/{address}/balance", s.getAccountBalance).Methods("GET", "OPTIONS")
-	api.HandleFunc("/account/{address}", s.getAccount).Methods("GET", "OPTIONS")
-	api.HandleFunc("/account/{address}/transactions", s.getAccountTransactions).Methods("GET", "OPTIONS")
-	api.HandleFunc("/account/{address}/delegations", s.getAccountDelegations).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/account/{address}/balance", s.getAccountBalance).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/account/{address}", s.getAccount).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/account/{address}/transactions", s.getAccountTransactions).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/account/{address}/delegations", s.getAccountDelegations).Methods("GET", "OPTIONS")
 
 	// Staking endpoints
-	api.HandleFunc("/account/{address}/stake", s.getAccountStake).Methods("GET", "OPTIONS")
-	api.HandleFunc("/account/{address}/rewards", s.getAccountRewards).Methods("GET", "OPTIONS")
-	api.HandleFunc("/staking/stats", s.getStakingStats).Methods("GET", "OPTIONS")
-	api.HandleFunc("/staking/validators", s.getStakingValidators).Methods("GET", "OPTIONS")
-	// api.HandleFunc("/staking/delegate", s.submitStakeTransaction).Methods("POST", "OPTIONS")
-	// api.HandleFunc("/staking/undelegate", s.submitUnstakeTransaction).Methods("POST", "OPTIONS")
-	// api.HandleFunc("/staking/claim", s.submitClaimTransaction).Methods("POST", "OPTIONS")
-	api.HandleFunc("/staking/delegations/{address}", s.getDelegationHistory).Methods("GET", "OPTIONS")
-	api.HandleFunc("/staking/rewards/{address}", s.getDetailedRewards).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/account/{address}/stake", s.getAccountStake).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/account/{address}/rewards", s.getAccountRewards).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/staking/stats", s.getStakingStats).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/staking/validators", s.getStakingValidators).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/staking/delegations/{address}", s.getDelegationHistory).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/staking/rewards/{address}", s.getDetailedRewards).Methods("GET", "OPTIONS")
 
-	// Development endpoints - EXPLICITLY ADD OPTIONS
-	api.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
-
-	api.HandleFunc("/transaction/{hash}", s.getTransaction).Methods("GET", "OPTIONS")
-	api.HandleFunc("/transactions/pending", s.getPendingTransactions).Methods("GET", "OPTIONS")
-	api.HandleFunc("/block/{hash}", s.getBlockByHash).Methods("GET", "OPTIONS")
-	api.HandleFunc("/block/height/{height}", s.getBlockByHeight).Methods("GET", "OPTIONS")
-	api.HandleFunc("/block/latest", s.getLatestBlock).Methods("GET", "OPTIONS")
-	api.HandleFunc("/validator/{address}", s.getValidator).Methods("GET", "OPTIONS")
-	api.HandleFunc("/validators", s.getValidators).Methods("GET", "OPTIONS")
-	api.HandleFunc("/validators/active", s.getActiveValidators).Methods("GET", "OPTIONS")
-	api.HandleFunc("/status", s.getStatus).Methods("GET", "OPTIONS")
-	api.HandleFunc("/health", s.getHealth).Methods("GET", "OPTIONS")
-	api.HandleFunc("/estimate-gas", s.estimateGas).Methods("POST", "OPTIONS")
-	api.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
-	// api.HandleFunc("/validator/create", s.createValidator).Methods("POST", "OPTIONS")
-	api.HandleFunc("/validator/{address}/activity", s.getValidatorActivity).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/transaction/{hash}", s.getTransaction).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/transactions/pending", s.getPendingTransactions).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/block/{hash}", s.getBlockByHash).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/block/height/{height}", s.getBlockByHeight).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/block/latest", s.getLatestBlock).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/validator/{address}", s.getValidator).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/validators", s.getValidators).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/validators/active", s.getActiveValidators).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/status", s.getStatus).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/health", s.getHealth).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/validator/{address}/activity", s.getValidatorActivity).Methods("GET", "OPTIONS")
 
 	// Enhanced CORS configuration
 	c := cors.New(cors.Options{
@@ -213,10 +248,12 @@ func (s *Server) setupRoutes() {
 		ExposedHeaders: []string{
 			"Content-Length",
 			"Access-Control-Allow-Origin",
+			"X-RateLimit-Limit",
+			"Retry-After",
 		},
 		AllowCredentials: true,
 		MaxAge:           86400, // 24 hours
-		Debug:            true,  // Enable for development debugging
+		Debug:            false, // Disable in production
 	})
 
 	// Apply CORS middleware to the entire router
@@ -226,7 +263,6 @@ func (s *Server) setupRoutes() {
 
 	// Add explicit OPTIONS handler for all routes
 	s.router.Methods("OPTIONS").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("OPTIONS request to: %s", r.URL.Path)
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With")
@@ -555,7 +591,15 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 }
 
 // Development endpoint to fund addresses (for testing)
+// SECURITY: Only enabled in development/testnet environments
 func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
+	// CRITICAL: Only allow in development/testnet
+	// Ethereum/Solana approach: use environment checks, not API keys
+	if !isDevEnvironment() {
+		s.writeError(w, "Funding endpoint not available in production", http.StatusForbidden)
+		return
+	}
+
 	var req struct {
 		Address string `json:"address"`
 		Amount  int64  `json:"amount"`
@@ -568,6 +612,13 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 
 	if req.Address == "" || req.Amount <= 0 {
 		s.writeError(w, "Invalid address or amount", http.StatusBadRequest)
+		return
+	}
+
+	// Additional safety: Limit funding amount
+	const MAX_FUND_AMOUNT = 1000 * 1000000000 // 1000 THRYLOS max per request
+	if req.Amount > MAX_FUND_AMOUNT {
+		s.writeError(w, fmt.Sprintf("Funding amount exceeds maximum of %d nano", MAX_FUND_AMOUNT), http.StatusBadRequest)
 		return
 	}
 
@@ -610,6 +661,25 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, response)
+}
+
+// isDevEnvironment checks if we're running in a development environment
+// Ethereum/Solana approach: environment-based, not authentication-based
+func isDevEnvironment() bool {
+	env := os.Getenv("THRYLOS_ENVIRONMENT")
+
+	// Allow in: development, devnet, testnet
+	// Block in: production, mainnet
+	switch env {
+	case "development", "dev", "devnet", "testnet", "test":
+		return true
+	case "production", "prod", "mainnet":
+		return false
+	default:
+		// Default to development for safety during testing
+		// In production, explicitly set THRYLOS_ENVIRONMENT=production
+		return true
+	}
 }
 
 // Transaction endpoints (keep existing implementation)
