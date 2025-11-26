@@ -24,14 +24,16 @@ const (
 	GenesisSupply = int64(15000000)   // 15 million THRYLOS initial supply (15%) - Reduced for sustainability
 
 	// Economic thresholds
-	MinimumBalance        = BaseUnit / 1000 // 0.001 THRYLOS (1,000,000 base units)
-	MinimumTransfer       = BaseUnit / 100  // 0.01 THRYLOS (10,000,000 base units)
-	MinimumStakeAmount    = BaseUnit * 1    // 1 THRYLOS (1,000,000,000 base units)
-	MinimumDelegation     = BaseUnit / 10   // 0.1 THRYLOS (100,000,000 base units)
-	MinimumValidatorStake = BaseUnit * 25   // 25 THRYLOS (25,000,000,000 base units) - Reduced for accessibility
+	MinimumBalance     = BaseUnit / 1000 // 0.001 THRYLOS
+	MinimumTransfer    = BaseUnit / 100  // 0.01 THRYLOS
+	MinimumStakeAmount = BaseUnit * 1    // 1 THRYLOS
+	MinimumDelegation  = BaseUnit / 10   // 0.1 THRYLOS
+
+	// At $0.10/token, this is a $250 entry cost (Secure but Accessible).
+	MinimumValidatorStake = BaseUnit * 2500
 
 	// Gas economics
-	BaseGasPrice   = int64(10)       // 0.00000001 THRYLOS per gas unit
+	BaseGasPrice   = int64(10)       // 0.00000001 THRYLOS (Low fees)
 	MaxGasPerBlock = int64(10000000) // 10M gas per block
 	StandardTxGas  = int64(21000)    // Standard transaction gas
 	StakingTxGas   = int64(50000)    // Staking transaction gas
@@ -40,9 +42,9 @@ const (
 	BaseBlockReward = BaseUnit / 100 // 0.01 THRYLOS base (will be adjusted dynamically)
 
 	// Block rewards and validator economics
-	BlockReward     = BaseUnit / 50  // 0.02 THRYLOS per block
-	ValidatorReward = BaseUnit / 100 // 0.01 THRYLOS validator reward
-	DelegatorReward = BaseUnit / 200 // 0.005 THRYLOS delegator reward
+	BlockReward     = BaseUnit * 38 / 100 // 0.38 THRYLOS (Matches 4% Inflation)
+	ValidatorReward = BaseUnit * 30 / 100 // 0.30 THRYLOS (Primary incentive)
+	DelegatorReward = BaseUnit * 8 / 100  // 0.08 THRYLOS (Delegation incentive)
 
 	// === OPTIMIZED DISTRIBUTION (No Advisors) ===
 	// Total: 100M THRYLOS distributed as follows:
@@ -297,12 +299,15 @@ func Load() (*Config, error) {
 		},
 
 		Staking: StakingConfig{
-			MinValidatorStake:          MinimumValidatorStake,      // 25 THRYLOS (reduced for accessibility)
-			MinDelegation:              MinimumDelegation,          // 0.1 THRYLOS
-			MinSelfStake:               MinimumValidatorStake / 10, // 2.5 THRYLOS (10% of validator stake)
-			MaxCommission:              0.20,                       // 20% max commission
-			CommissionChangeMax:        0.01,                       // 1% per day max change
-			UnbondingTime:              21 * 24 * time.Hour,        // 21 days
+			// CHANGED: Uses the new 2,500 constant
+			MinValidatorStake: MinimumValidatorStake,
+			MinDelegation:     MinimumDelegation,
+
+			// CHANGED: Self stake is now 250 THRYLOS (10% of 2,500)
+			MinSelfStake:               MinimumValidatorStake / 10,
+			MaxCommission:              0.20,
+			CommissionChangeMax:        0.01,
+			UnbondingTime:              21 * 24 * time.Hour,
 			MaxDelegationsPerValidator: 1000,
 
 			// Slashing parameters
@@ -318,27 +323,30 @@ func Load() (*Config, error) {
 			GenesisSupply:     GenesisSupply, // 15M THRYLOS
 			CirculatingSupply: GenesisSupply, // Start with genesis supply
 
-			InflationRate: 0.04, // 4% annual inflation (balanced)
-			InflationMax:  0.07, // 7% max inflation
-			InflationMin:  0.02, // 2% min inflation
-			GoalBonded:    0.70, // Target 70% of supply bonded (increased)
+			InflationRate: 0.04, // 4% annual (balanced)
+			InflationMax:  0.07,
+			InflationMin:  0.02,
+			GoalBonded:    0.70,
 
-			BaseGasPrice: BaseGasPrice,
-			MinimumFee:   BaseGasPrice * StandardTxGas, // ~0.021 THRYLOS
+			// Fee parameters
+			BaseGasPrice: BaseGasPrice,                 // 10
+			MinimumFee:   BaseGasPrice * StandardTxGas, // 0.00021 THRYLOS
 
-			// Explicit definition of limits
-			MinGasLimit: StandardTxGas,  // 21,000
-			MaxGasPerTx: 2000000,        // 2M (Limit single tx size)
-			MaxGasPrice: 10000,          // Cap gas price to prevent abuse
-			MaxBlockGas: MaxGasPerBlock, // 10M
+			// Gas Limits (Explicitly defined)
+			MinGasLimit: StandardTxGas,
+			MaxGasPerTx: 2000000,
+			MaxGasPrice: 10000,
+			MaxBlockGas: MaxGasPerBlock,
 
-			BlockReward:         BlockReward, // 0.02 THRYLOS per block
-			CommunityTax:        0.03,        // 3% community tax (increased)
-			BaseProposerReward:  0.015,       // 1.5% base proposer reward
-			BonusProposerReward: 0.035,       // 3.5% bonus proposer reward
+			// Rewards
+			BlockReward:         BlockReward, // 0.38 THRYLOS
+			CommunityTax:        0.03,
+			BaseProposerReward:  0.015,
+			BonusProposerReward: 0.035,
 
-			ValidatorRewardRate: 0.09, // 9% annual for validators (increased)
-			DelegatorRewardRate: 0.07, // 7% annual for delegators (increased)
+			// CHANGED: Increased APR slightly to incentivize the 2,500 stake
+			ValidatorRewardRate: 0.12, // 12% APY for Validators
+			DelegatorRewardRate: 0.08, // 8% APY for Delegators
 
 			MinBalance:    MinimumBalance,     // 0.001 THRYLOS
 			MinTransfer:   MinimumTransfer,    // 0.01 THRYLOS
