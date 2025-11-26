@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -125,7 +126,6 @@ func (v *Validator) CreateDelegateTransaction(from, validator string, amount, ga
 
 // CalculateTransactionHash calculates the Blake2b hash of a transaction
 func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, error) {
-
 	var buf bytes.Buffer
 
 	// Serialize transaction fields for hashing (excluding signature and hash)
@@ -171,8 +171,8 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("failed to hash buffer: %w", err)
 	}
-	return fmt.Sprintf("%x", hashBytes), nil
 
+	return fmt.Sprintf("%x", hashBytes), err
 }
 
 // SignTransaction signs a transaction with Ed25519
@@ -188,7 +188,7 @@ func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.Priv
 	// Calculate the hash to sign using crypto/hash
 	hashToSign, err := hash.HashData([]byte(tx.Hash))
 	if err != nil {
-		return fmt.Errorf("failed to hash tx.Hash: %w", err)
+		return fmt.Errorf("failed to hash transaction: %w", err)
 	}
 
 	// Sign with Ed25519
@@ -218,7 +218,7 @@ func (v *Validator) VerifyTransactionSignature(tx *core.Transaction, publicKey c
 	// Recreate the hash that was signed using crypto/hash
 	hashToVerify, err := hash.HashData([]byte(tx.Hash))
 	if err != nil {
-		return fmt.Errorf("failed to hash tx.Hash: %w", err)
+		return fmt.Errorf("failed to hash transaction: %w", err)
 	}
 
 	// Create signature object from bytes
@@ -426,14 +426,100 @@ func (v *Validator) validateBusinessLogic(tx *core.Transaction, accountManager *
 	}
 }
 
+// Helper functions for safe arithmetic operations and input validation
+
+// validateAmountNonNegative checks if an amount is non-negative
+func validateAmountNonNegative(amount int64, fieldName string) error {
+	if amount < 0 {
+		return fmt.Errorf("%s cannot be negative: %d", fieldName, amount)
+	}
+	return nil
+}
+
+// safeMultiply performs multiplication with overflow check
+func safeMultiply(a, b int64, operation string) (int64, error) {
+	if a == 0 || b == 0 {
+		return 0, nil
+	}
+
+	// Check for overflow: if a * b would overflow, then a > MaxInt64 / b
+	if a > 0 && b > 0 && a > math.MaxInt64/b {
+		return 0, fmt.Errorf("%s would overflow (tried to multiply %d * %d)", operation, a, b)
+	}
+	if a < 0 && b < 0 && a < math.MaxInt64/b {
+		return 0, fmt.Errorf("%s would overflow (tried to multiply %d * %d)", operation, a, b)
+	}
+	if (a > 0 && b < 0 && b < math.MinInt64/a) || (a < 0 && b > 0 && a < math.MinInt64/b) {
+		return 0, fmt.Errorf("%s would underflow (tried to multiply %d * %d)", operation, a, b)
+	}
+
+	return a * b, nil
+}
+
+// safeAdd performs addition with overflow check
+func safeAdd(a, b int64, operation string) (int64, error) {
+	// Check for positive overflow
+	if a > 0 && b > 0 && a > math.MaxInt64-b {
+		return 0, fmt.Errorf("%s would overflow (tried to add %d + %d)", operation, a, b)
+	}
+	// Check for negative overflow (underflow)
+	if a < 0 && b < 0 && a < math.MinInt64-b {
+		return 0, fmt.Errorf("%s would underflow (tried to add %d + %d)", operation, a, b)
+	}
+
+	return a + b, nil
+}
+
+// calculateGasCost safely calculates gas cost with overflow protection
+func (v *Validator) calculateGasCost(gas, gasPrice int64) (int64, error) {
+	// Validate both inputs are non-negative
+	if err := validateAmountNonNegative(gas, "gas"); err != nil {
+		return 0, err
+	}
+	if err := validateAmountNonNegative(gasPrice, "gas price"); err != nil {
+		return 0, err
+	}
+
+	// Calculate with overflow protection
+	return safeMultiply(gas, gasPrice, "gas cost calculation")
+}
+
+// calculateTotalCost safely calculates total transaction cost with overflow protection
+func (v *Validator) calculateTotalCost(amount, gas, gasPrice int64) (int64, error) {
+	// Validate amount is non-negative
+	if err := validateAmountNonNegative(amount, "amount"); err != nil {
+		return 0, err
+	}
+
+	// Calculate gas cost
+	gasCost, err := v.calculateGasCost(gas, gasPrice)
+	if err != nil {
+		return 0, err
+	}
+
+	// Calculate total with overflow protection
+	return safeAdd(amount, gasCost, "total cost calculation")
+}
+
 // validateTransfer validates transfer transaction logic
 func (v *Validator) validateTransfer(tx *core.Transaction, sender *core.Account) error {
-	totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+	// Validate amount is non-negative
+	if err := validateAmountNonNegative(tx.Amount, "transfer amount"); err != nil {
+		return err
+	}
 
+	// Calculate total cost with overflow protection
+	totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
+	if err != nil {
+		return fmt.Errorf("transfer validation failed: %v", err)
+	}
+
+	// Check sufficient balance
 	if sender.Balance < totalCost {
 		return fmt.Errorf("insufficient balance: have %d, need %d", sender.Balance, totalCost)
 	}
 
+	// Prevent self-transfer
 	if tx.From == tx.To {
 		return fmt.Errorf("cannot transfer to self")
 	}
@@ -443,8 +529,18 @@ func (v *Validator) validateTransfer(tx *core.Transaction, sender *core.Account)
 
 // validateStake validates stake transaction logic
 func (v *Validator) validateStake(tx *core.Transaction, sender *core.Account) error {
-	totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+	// Validate amount is non-negative
+	if err := validateAmountNonNegative(tx.Amount, "stake amount"); err != nil {
+		return err
+	}
 
+	// Calculate total cost with overflow protection
+	totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
+	if err != nil {
+		return fmt.Errorf("stake validation failed: %v", err)
+	}
+
+	// Check sufficient balance
 	if sender.Balance < totalCost {
 		return fmt.Errorf("insufficient balance for staking: have %d, need %d", sender.Balance, totalCost)
 	}
@@ -454,12 +550,23 @@ func (v *Validator) validateStake(tx *core.Transaction, sender *core.Account) er
 
 // validateUnstake validates unstake transaction logic
 func (v *Validator) validateUnstake(tx *core.Transaction, sender *core.Account) error {
-	gasCost := tx.Gas * tx.GasPrice
+	// Validate amount is non-negative
+	if err := validateAmountNonNegative(tx.Amount, "unstake amount"); err != nil {
+		return err
+	}
 
+	// Calculate gas cost with overflow protection
+	gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
+	if err != nil {
+		return fmt.Errorf("unstake validation failed: %v", err)
+	}
+
+	// Check sufficient balance for gas
 	if sender.Balance < gasCost {
 		return fmt.Errorf("insufficient balance for gas: have %d, need %d", sender.Balance, gasCost)
 	}
 
+	// Check sufficient staked amount
 	if sender.StakedAmount < tx.Amount {
 		return fmt.Errorf("insufficient staked amount: have %d, need %d", sender.StakedAmount, tx.Amount)
 	}
@@ -469,12 +576,23 @@ func (v *Validator) validateUnstake(tx *core.Transaction, sender *core.Account) 
 
 // validateDelegate validates delegate transaction logic
 func (v *Validator) validateDelegate(tx *core.Transaction, sender *core.Account) error {
-	totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+	// Validate amount is non-negative
+	if err := validateAmountNonNegative(tx.Amount, "delegation amount"); err != nil {
+		return err
+	}
 
+	// Calculate total cost with overflow protection
+	totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
+	if err != nil {
+		return fmt.Errorf("delegation validation failed: %v", err)
+	}
+
+	// Check sufficient balance
 	if sender.Balance < totalCost {
 		return fmt.Errorf("insufficient balance for delegation: have %d, need %d", sender.Balance, totalCost)
 	}
 
+	// Prevent self-delegation
 	if tx.From == tx.To {
 		return fmt.Errorf("cannot delegate to self")
 	}
@@ -484,8 +602,18 @@ func (v *Validator) validateDelegate(tx *core.Transaction, sender *core.Account)
 
 // validateUndelegate validates undelegate transaction logic
 func (v *Validator) validateUndelegate(tx *core.Transaction, sender *core.Account) error {
-	gasCost := tx.Gas * tx.GasPrice
+	// Validate amount is non-negative
+	if err := validateAmountNonNegative(tx.Amount, "undelegation amount"); err != nil {
+		return err
+	}
 
+	// Calculate gas cost with overflow protection
+	gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
+	if err != nil {
+		return fmt.Errorf("undelegation validation failed: %v", err)
+	}
+
+	// Check sufficient balance for gas
 	if sender.Balance < gasCost {
 		return fmt.Errorf("insufficient balance for gas: have %d, need %d", sender.Balance, gasCost)
 	}
@@ -495,6 +623,7 @@ func (v *Validator) validateUndelegate(tx *core.Transaction, sender *core.Accoun
 		return fmt.Errorf("no delegations found")
 	}
 
+	// Check sufficient delegated amount to specific validator
 	delegatedAmount, exists := sender.DelegatedTo[tx.To]
 	if !exists || delegatedAmount < tx.Amount {
 		return fmt.Errorf("insufficient delegation to validator %s: have %d, need %d",
@@ -506,12 +635,18 @@ func (v *Validator) validateUndelegate(tx *core.Transaction, sender *core.Accoun
 
 // validateClaimRewards validates claim rewards transaction logic
 func (v *Validator) validateClaimRewards(tx *core.Transaction, sender *core.Account) error {
-	gasCost := tx.Gas * tx.GasPrice
+	// Calculate gas cost with overflow protection
+	gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
+	if err != nil {
+		return fmt.Errorf("claim rewards validation failed: %v", err)
+	}
 
+	// Check sufficient balance for gas
 	if sender.Balance < gasCost {
 		return fmt.Errorf("insufficient balance for gas: have %d, need %d", sender.Balance, gasCost)
 	}
 
+	// Check if there are rewards to claim
 	if sender.Rewards <= 0 {
 		return fmt.Errorf("no rewards to claim")
 	}
@@ -574,49 +709,167 @@ func (v *Validator) ValidateBatch(transactions []*core.Transaction, accountManag
 func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.Account) error {
 	switch tx.Type {
 	case core.TransactionType_TRANSFER:
-		totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+		// Calculate total cost with overflow protection
+		totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
+		if err != nil {
+			return fmt.Errorf("transfer state update failed: %v", err)
+		}
+
+		// Check for underflow
+		if account.Balance < totalCost {
+			return fmt.Errorf("balance underflow: balance %d < total cost %d", account.Balance, totalCost)
+		}
+
 		account.Balance -= totalCost
 		account.Nonce++
 
 	case core.TransactionType_STAKE:
-		totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+		// Calculate total cost with overflow protection
+		totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
+		if err != nil {
+			return fmt.Errorf("stake state update failed: %v", err)
+		}
+
+		// Check for underflow
+		if account.Balance < totalCost {
+			return fmt.Errorf("balance underflow: balance %d < total cost %d", account.Balance, totalCost)
+		}
+
 		account.Balance -= totalCost
-		account.StakedAmount += tx.Amount
+
+		// Check for overflow when adding to staked amount
+		newStakedAmount, err := safeAdd(account.StakedAmount, tx.Amount, "staked amount update")
+		if err != nil {
+			return fmt.Errorf("stake state update failed: %v", err)
+		}
+		account.StakedAmount = newStakedAmount
 		account.Nonce++
 
 	case core.TransactionType_UNSTAKE:
-		gasCost := tx.Gas * tx.GasPrice
+		// Calculate gas cost with overflow protection
+		gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
+		if err != nil {
+			return fmt.Errorf("unstake state update failed: %v", err)
+		}
+
+		// Check for underflow on balance for gas
+		if account.Balance < gasCost {
+			return fmt.Errorf("balance underflow: balance %d < gas cost %d", account.Balance, gasCost)
+		}
+
+		// Check for underflow on staked amount
+		if account.StakedAmount < tx.Amount {
+			return fmt.Errorf("staked amount underflow: staked %d < unstake amount %d",
+				account.StakedAmount, tx.Amount)
+		}
+
 		account.Balance -= gasCost
-		account.Balance += tx.Amount
+
+		// Check for overflow when adding unstaked amount back to balance
+		newBalance, err := safeAdd(account.Balance, tx.Amount, "balance update after unstake")
+		if err != nil {
+			return fmt.Errorf("unstake state update failed: %v", err)
+		}
+		account.Balance = newBalance
 		account.StakedAmount -= tx.Amount
 		account.Nonce++
 
 	case core.TransactionType_DELEGATE:
-		totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+		// Calculate total cost with overflow protection
+		totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
+		if err != nil {
+			return fmt.Errorf("delegate state update failed: %v", err)
+		}
+
+		// Check for underflow
+		if account.Balance < totalCost {
+			return fmt.Errorf("balance underflow: balance %d < total cost %d", account.Balance, totalCost)
+		}
+
 		account.Balance -= totalCost
-		account.StakedAmount += tx.Amount
+
+		// Check for overflow when adding to staked amount
+		newStakedAmount, err := safeAdd(account.StakedAmount, tx.Amount, "staked amount update")
+		if err != nil {
+			return fmt.Errorf("delegate state update failed: %v", err)
+		}
+		account.StakedAmount = newStakedAmount
+
 		if account.DelegatedTo == nil {
 			account.DelegatedTo = make(map[string]int64)
 		}
-		account.DelegatedTo[tx.To] += tx.Amount
+
+		// Check for overflow when adding to delegation
+		currentDelegation := account.DelegatedTo[tx.To]
+		newDelegation, err := safeAdd(currentDelegation, tx.Amount, "delegation update")
+		if err != nil {
+			return fmt.Errorf("delegate state update failed: %v", err)
+		}
+		account.DelegatedTo[tx.To] = newDelegation
 		account.Nonce++
 
 	case core.TransactionType_UNDELEGATE:
-		gasCost := tx.Gas * tx.GasPrice
+		// Calculate gas cost with overflow protection
+		gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
+		if err != nil {
+			return fmt.Errorf("undelegate state update failed: %v", err)
+		}
+
+		// Check for underflow on balance for gas
+		if account.Balance < gasCost {
+			return fmt.Errorf("balance underflow: balance %d < gas cost %d", account.Balance, gasCost)
+		}
+
+		// Check for underflow on staked amount
+		if account.StakedAmount < tx.Amount {
+			return fmt.Errorf("staked amount underflow: staked %d < undelegate amount %d",
+				account.StakedAmount, tx.Amount)
+		}
+
+		// Check for underflow on delegation
+		currentDelegation := account.DelegatedTo[tx.To]
+		if currentDelegation < tx.Amount {
+			return fmt.Errorf("delegation underflow: delegated %d < undelegate amount %d",
+				currentDelegation, tx.Amount)
+		}
+
 		account.Balance -= gasCost
-		account.Balance += tx.Amount
+
+		// Check for overflow when adding undelegated amount back to balance
+		newBalance, err := safeAdd(account.Balance, tx.Amount, "balance update after undelegate")
+		if err != nil {
+			return fmt.Errorf("undelegate state update failed: %v", err)
+		}
+		account.Balance = newBalance
 		account.StakedAmount -= tx.Amount
 		account.DelegatedTo[tx.To] -= tx.Amount
+
 		if account.DelegatedTo[tx.To] == 0 {
 			delete(account.DelegatedTo, tx.To)
 		}
 		account.Nonce++
 
 	case core.TransactionType_CLAIM_REWARDS:
-		gasCost := tx.Gas * tx.GasPrice
+		// Calculate gas cost with overflow protection
+		gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
+		if err != nil {
+			return fmt.Errorf("claim rewards state update failed: %v", err)
+		}
+
+		// Check for underflow on balance for gas
+		if account.Balance < gasCost {
+			return fmt.Errorf("balance underflow: balance %d < gas cost %d", account.Balance, gasCost)
+		}
+
 		account.Balance -= gasCost
 		claimedRewards := account.Rewards
-		account.Balance += claimedRewards
+
+		// Check for overflow when adding rewards to balance
+		newBalance, err := safeAdd(account.Balance, claimedRewards, "balance update with rewards")
+		if err != nil {
+			return fmt.Errorf("claim rewards state update failed: %v", err)
+		}
+		account.Balance = newBalance
 		account.Rewards = 0
 		account.Nonce++
 	}
