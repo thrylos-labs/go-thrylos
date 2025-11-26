@@ -173,6 +173,7 @@ func extractPortFromConfig(addr string) int {
 // }
 
 // setupRoutes configures all API routes
+// setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
 	s.router = mux.NewRouter()
 
@@ -180,22 +181,17 @@ func (s *Server) setupRoutes() {
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 
 	// ========== STRICT RATE LIMITING (1 req/sec) ==========
-	// Sensitive endpoints that modify state or provide funding
 	strict := api.PathPrefix("").Subrouter()
 	strict.Use(s.RateLimitMiddleware("strict"))
-
 	strict.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
 	strict.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
 
 	// ========== STANDARD RATE LIMITING (10 req/sec) ==========
-	// Normal API operations
 	standard := api.PathPrefix("").Subrouter()
 	standard.Use(s.RateLimitMiddleware("standard"))
-
 	standard.HandleFunc("/estimate-gas", s.estimateGas).Methods("POST", "OPTIONS")
 
 	// ========== PERMISSIVE RATE LIMITING (100 req/sec) ==========
-	// Read-only endpoints
 	permissive := api.PathPrefix("").Subrouter()
 	permissive.Use(s.RateLimitMiddleware("permissive"))
 
@@ -213,6 +209,7 @@ func (s *Server) setupRoutes() {
 	permissive.HandleFunc("/staking/delegations/{address}", s.getDelegationHistory).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/staking/rewards/{address}", s.getDetailedRewards).Methods("GET", "OPTIONS")
 
+	// General Data endpoints
 	permissive.HandleFunc("/transaction/{hash}", s.getTransaction).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/transactions/pending", s.getPendingTransactions).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/block/{hash}", s.getBlockByHash).Methods("GET", "OPTIONS")
@@ -225,50 +222,54 @@ func (s *Server) setupRoutes() {
 	permissive.HandleFunc("/health", s.getHealth).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/validator/{address}/activity", s.getValidatorActivity).Methods("GET", "OPTIONS")
 
-	// Enhanced CORS configuration
+	// FIXED: CORS Configuration (Strict Security)
+	// 1. Removed "*" and "chrome-extension://*"
+	// 2. Removed PUT/DELETE methods (not needed for public API)
+	// 3. Removed wildcard headers
+
+	allowedOrigins := []string{
+		"https://thrylos.org",
+		"https://www.thrylos.org",
+		"https://app.thrylos.org",
+	}
+
+	// Add localhost for development (can be conditional based on env if needed)
+	allowedOrigins = append(allowedOrigins,
+		"http://localhost:3000",
+		"http://localhost:5173",
+		"http://localhost:8080",
+		"http://127.0.0.1:5173",
+		"http://127.0.0.1:3000",
+	)
+
 	c := cors.New(cors.Options{
-		AllowedOrigins: []string{
-			"http://localhost:3000",
-			"http://localhost:5173",
-			"http://localhost:8080",
-			"http://127.0.0.1:5173",
-			"http://127.0.0.1:3000",
-			"*", // Allow all origins for development - REMOVE IN PRODUCTION
-		},
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedOrigins: allowedOrigins,
+		AllowedMethods: []string{"GET", "POST", "OPTIONS"}, // Read & Submit only
 		AllowedHeaders: []string{
-			"*",
 			"Content-Type",
 			"Authorization",
 			"Accept",
 			"Origin",
 			"X-Requested-With",
-			"Access-Control-Allow-Origin",
 		},
 		ExposedHeaders: []string{
 			"Content-Length",
-			"Access-Control-Allow-Origin",
 			"X-RateLimit-Limit",
+			"X-RateLimit-Remaining",
 			"Retry-After",
 		},
 		AllowCredentials: true,
-		MaxAge:           86400, // 24 hours
-		Debug:            false, // Disable in production
+		MaxAge:           300, // 5 minutes cache for preflight
+		Debug:            false,
 	})
 
-	// Apply CORS middleware to the entire router
-	s.router.Use(c.Handler)
+	// Apply Middleware
+	s.router.Use(c.Handler) // Applies CORS to all routes
 	s.router.Use(s.loggingMiddleware)
 	s.router.Use(s.jsonMiddleware)
 
-	// Add explicit OPTIONS handler for all routes
-	s.router.Methods("OPTIONS").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With")
-		w.Header().Set("Access-Control-Max-Age", "86400")
-		w.WriteHeader(http.StatusOK)
-	})
+	// REMOVED: The manual "s.router.Methods("OPTIONS").HandlerFunc..." block.
+	// The cors library handles OPTIONS requests automatically and securely.
 }
 
 // Start starts the HTTP server
