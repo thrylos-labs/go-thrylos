@@ -52,6 +52,21 @@ func NewAccountManager(shardID ShardID, totalShards int) *AccountManager {
 	}
 }
 
+// This is primarily used for Genesis setup and Testing to inject state
+// without strict validation checks (like shard ownership).
+
+func (am *AccountManager) SetAccount(addr string, account *core.Account) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	// Ensure the address key matches the account address
+	if account.Address != addr {
+		account.Address = addr
+	}
+
+	am.accounts[addr] = account
+}
+
 // CalculateShardID determines which shard an address belongs to
 func CalculateShardID(addr string, totalShards int) ShardID {
 	if totalShards <= 1 {

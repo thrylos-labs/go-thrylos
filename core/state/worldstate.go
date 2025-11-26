@@ -221,12 +221,21 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 	db := storage.NewDB(badgerStorage)
 	stateStorage := storage.NewStateStorage(badgerStorage)
 
+	acctMgr := account.NewAccountManager(shardID, totalShards)
+
 	ws := &WorldState{
-		config:            cfg,
-		db:                db,
-		state:             stateStorage,
-		accountManager:    account.NewAccountManager(shardID, totalShards),
-		txPool:            transaction.NewPool(shardID, totalShards, cfg.Consensus.MaxTxPerBlock, cfg.Consensus.MinGasPrice),
+		config:         cfg,
+		db:             db,
+		state:          stateStorage,
+		accountManager: acctMgr, // Use the variable here
+		txPool: transaction.NewPool(
+			shardID,
+			totalShards,
+			cfg.Consensus.MaxTxPerBlock,
+			cfg.Consensus.MinGasPrice,
+			acctMgr, // <--- Add this variable
+		),
+
 		txValidator:       transaction.NewValidator(shardID, totalShards, cfg),
 		txExecutor:        transaction.NewExecutor(shardID, totalShards),
 		shardID:           shardID,
@@ -1682,7 +1691,13 @@ func (ws *WorldState) Clear() error {
 	ws.lastTimestamp = 0
 
 	// Recreate transaction pool
-	ws.txPool = transaction.NewPool(ws.shardID, ws.totalShards, ws.config.Consensus.MaxTxPerBlock, ws.config.Consensus.MinGasPrice)
+	ws.txPool = transaction.NewPool(
+		ws.shardID,
+		ws.totalShards,
+		ws.config.Consensus.MaxTxPerBlock,
+		ws.config.Consensus.MinGasPrice,
+		ws.accountManager,
+	)
 
 	return nil
 }
