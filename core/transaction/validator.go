@@ -36,6 +36,13 @@ type Validator struct {
 	config      *config.Config
 }
 
+// --- ADD THIS INTERFACE ---
+// StateReader defines the interface for accessing account state.
+// This allows passing either *account.AccountManager or a mock in tests.
+type StateReader interface {
+	GetAccount(address string) (*core.Account, error)
+}
+
 // NewValidator creates a new transaction validator
 func NewValidator(shardID account.ShardID, totalShards int, cfg *config.Config) *Validator {
 	return &Validator{
@@ -308,8 +315,7 @@ func (v *Validator) VerifyTransactionSignature(tx *core.Transaction, publicKey c
 	return nil
 }
 
-// ValidateTransaction performs comprehensive transaction validation
-func (v *Validator) ValidateTransaction(tx *core.Transaction, accountManager *account.AccountManager) error {
+func (v *Validator) ValidateTransaction(tx *core.Transaction, stateReader StateReader) error {
 	if tx == nil {
 		return fmt.Errorf("transaction cannot be nil")
 	}
@@ -330,7 +336,7 @@ func (v *Validator) ValidateTransaction(tx *core.Transaction, accountManager *ac
 	}
 
 	// Business logic validation
-	if err := v.validateBusinessLogic(tx, accountManager); err != nil {
+	if err := v.validateBusinessLogic(tx, stateReader); err != nil {
 		return fmt.Errorf("business logic validation failed: %v", err)
 	}
 
@@ -394,13 +400,22 @@ func (v *Validator) validateStructure(tx *core.Transaction) error {
 		}
 	}
 
-	// Gas validation
-	if tx.Gas <= 0 {
-		return fmt.Errorf("gas must be positive, got %d", tx.Gas)
+	// Gas validation with upper and lower bounds
+	if tx.Gas < v.config.Economics.MinGasLimit {
+		return fmt.Errorf("gas too low: minimum %d, got %d", v.config.Economics.MinGasLimit, tx.Gas)
 	}
 
+	if tx.Gas > v.config.Economics.MaxGasPerTx {
+		return fmt.Errorf("gas too high: maximum %d, got %d", v.config.Economics.MaxGasPerTx, tx.Gas)
+	}
+
+	// Gas price validation with upper and lower bounds
 	if tx.GasPrice < v.config.Economics.BaseGasPrice {
 		return fmt.Errorf("gas price %d below minimum %d", tx.GasPrice, v.config.Economics.BaseGasPrice)
+	}
+
+	if tx.GasPrice > v.config.Economics.MaxGasPrice {
+		return fmt.Errorf("gas price too high: maximum %d, got %d", v.config.Economics.MaxGasPrice, tx.GasPrice)
 	}
 
 	// Signature validation
@@ -498,9 +513,9 @@ func (v *Validator) validateNonce(txNonce, accountNonce uint64, address string) 
 
 // ValidateForMempool validates a transaction for mempool inclusion
 // This allows future nonces within a reasonable range for queued transactions
-func (v *Validator) ValidateForMempool(tx *core.Transaction, accountManager *account.AccountManager) error {
+func (v *Validator) ValidateForMempool(tx *core.Transaction, stateReader StateReader) error {
 	// Get sender account
-	sender, err := accountManager.GetAccount(tx.From)
+	sender, err := stateReader.GetAccount(tx.From)
 	if err != nil {
 		return fmt.Errorf("failed to get sender account: %v", err)
 	}
@@ -511,31 +526,26 @@ func (v *Validator) ValidateForMempool(tx *core.Transaction, accountManager *acc
 			sender.Nonce, tx.Nonce)
 	}
 
-	// 2. Allow current nonce and reasonable future nonces (for transaction queuing)
-	const maxMempoolNonceGap = 100 // Allow queuing up to 100 transactions ahead
+	// 2. Allow current nonce and reasonable future nonces
+	const maxMempoolNonceGap = 100
 
 	if tx.Nonce > sender.Nonce+maxMempoolNonceGap {
 		return fmt.Errorf("nonce too far in future: account nonce is %d, transaction nonce is %d (max gap: %d)",
 			sender.Nonce, tx.Nonce, maxMempoolNonceGap)
 	}
 
-	// 3. Validate the transaction has sufficient balance for ALL pending transactions
-	// This prevents accepting transactions that will never be processable
-	return v.validateSufficientBalanceForNonce(tx, sender, accountManager)
+	// 3. Validate sufficient balance
+	return v.validateSufficientBalanceForNonce(tx, sender, stateReader)
 }
 
 // validateSufficientBalanceForNonce checks if the sender has enough balance
 // to process all transactions up to and including this nonce
-func (v *Validator) validateSufficientBalanceForNonce(tx *core.Transaction, sender *core.Account, accountManager *account.AccountManager) error {
-	// Calculate total cost of this transaction
+func (v *Validator) validateSufficientBalanceForNonce(tx *core.Transaction, sender *core.Account, stateReader StateReader) error {
 	totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
 	if err != nil {
 		return fmt.Errorf("failed to calculate total cost: %v", err)
 	}
 
-	// Check if sender has enough balance for this transaction
-	// Note: In a real implementation, you'd also check against other pending transactions
-	// in the mempool with lower nonces, but that's handled by the transaction pool
 	if sender.Balance < totalCost {
 		return fmt.Errorf("insufficient balance for transaction: have %d, need %d",
 			sender.Balance, totalCost)
@@ -545,19 +555,19 @@ func (v *Validator) validateSufficientBalanceForNonce(tx *core.Transaction, send
 }
 
 // validateBusinessLogic validates transaction business logic
-func (v *Validator) validateBusinessLogic(tx *core.Transaction, accountManager *account.AccountManager) error {
-	// Get sender account
-	sender, err := accountManager.GetAccount(tx.From)
+func (v *Validator) validateBusinessLogic(tx *core.Transaction, stateReader StateReader) error {
+	// Get sender account via Interface
+	sender, err := stateReader.GetAccount(tx.From)
 	if err != nil {
 		return fmt.Errorf("failed to get sender account: %v", err)
 	}
 
-	// Comprehensive nonce validation to prevent replay attacks
+	// Comprehensive nonce validation
 	if err := v.validateNonce(tx.Nonce, sender.Nonce, tx.From); err != nil {
 		return err
 	}
 
-	// Validate based on transaction type
+	// Validate based on transaction type (Logic inside these functions remains the same)
 	switch tx.Type {
 	case core.TransactionType_TRANSFER:
 		return v.validateTransfer(tx, sender)
@@ -805,23 +815,21 @@ func (v *Validator) validateClaimRewards(tx *core.Transaction, sender *core.Acco
 }
 
 // ValidateBatch validates multiple transactions as a batch
-func (v *Validator) ValidateBatch(transactions []*core.Transaction, accountManager *account.AccountManager) error {
-	// Create temporary account states to validate the entire batch
+func (v *Validator) ValidateBatch(transactions []*core.Transaction, stateReader StateReader) error {
 	tempAccounts := make(map[string]*core.Account)
 
 	for i, tx := range transactions {
-		// Get or create temporary account state
 		var sender *core.Account
 		if tempAccount, exists := tempAccounts[tx.From]; exists {
 			sender = tempAccount
 		} else {
-			// Get current account state
-			currentAccount, err := accountManager.GetAccount(tx.From)
+			// Get current account state via Interface
+			currentAccount, err := stateReader.GetAccount(tx.From)
 			if err != nil {
 				return fmt.Errorf("failed to get account %s for transaction %d: %v", tx.From, i, err)
 			}
 
-			// Create copy for temporary state
+			// Create copy for temporary state (deep copy logic remains same)
 			sender = &core.Account{
 				Address:      currentAccount.Address,
 				Balance:      currentAccount.Balance,
@@ -832,17 +840,17 @@ func (v *Validator) ValidateBatch(transactions []*core.Transaction, accountManag
 				CodeHash:     currentAccount.CodeHash,
 				StorageRoot:  currentAccount.StorageRoot,
 			}
-
-			// Copy delegations
-			for k, v := range currentAccount.DelegatedTo {
-				sender.DelegatedTo[k] = v
+			for k, val := range currentAccount.DelegatedTo {
+				sender.DelegatedTo[k] = val
 			}
-
 			tempAccounts[tx.From] = sender
 		}
 
 		// Validate transaction against temporary state
-		if err := v.ValidateTransaction(tx, accountManager); err != nil {
+		// NOTE: We recursively call ValidateTransaction.
+		// Ideally, we refactor validation to separate "Check Statless" from "Check State".
+		// For now, to fix your compile error, we pass the reader:
+		if err := v.ValidateTransaction(tx, stateReader); err != nil {
 			return fmt.Errorf("transaction %d validation failed: %v", i, err)
 		}
 

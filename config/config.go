@@ -31,7 +31,7 @@ const (
 	MinimumValidatorStake = BaseUnit * 25   // 25 THRYLOS (25,000,000,000 base units) - Reduced for accessibility
 
 	// Gas economics
-	BaseGasPrice   = int64(1000)     // 0.000001 THRYLOS per gas unit
+	BaseGasPrice   = int64(10)       // 0.00000001 THRYLOS per gas unit
 	MaxGasPerBlock = int64(10000000) // 10M gas per block
 	StandardTxGas  = int64(21000)    // Standard transaction gas
 	StakingTxGas   = int64(50000)    // Staking transaction gas
@@ -195,6 +195,12 @@ type EconomicsConfig struct {
 	BaseGasPrice int64 `json:"base_gas_price"`
 	MinimumFee   int64 `json:"minimum_fee"`
 
+	// Gas limit constants
+	MinGasLimit int64 `json:"min_gas_limit"`
+	MaxGasPerTx int64 `json:"max_gas_per_tx"`
+	MaxGasPrice int64 `json:"max_gas_price"`
+	MaxBlockGas int64 `json:"max_block_gas"`
+
 	// Rewards (optimized for sustainability)
 	BlockReward         int64   `json:"block_reward"`          // 0.02 THRYLOS per block
 	CommunityTax        float64 `json:"community_tax"`         // 3% community tax (increased)
@@ -319,6 +325,12 @@ func Load() (*Config, error) {
 
 			BaseGasPrice: BaseGasPrice,
 			MinimumFee:   BaseGasPrice * StandardTxGas, // ~0.021 THRYLOS
+
+			// Explicit definition of limits
+			MinGasLimit: StandardTxGas,  // 21,000
+			MaxGasPerTx: 2000000,        // 2M (Limit single tx size)
+			MaxGasPrice: 10000,          // Cap gas price to prevent abuse
+			MaxBlockGas: MaxGasPerBlock, // 10M
 
 			BlockReward:         BlockReward, // 0.02 THRYLOS per block
 			CommunityTax:        0.03,        // 3% community tax (increased)
