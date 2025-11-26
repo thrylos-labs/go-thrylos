@@ -99,6 +99,7 @@ type ConsensusEngine struct {
 
 	slashingManager *SlashingManager // ADD THIS LINE
 
+	evidenceTracker *EvidenceTracker
 }
 
 // ForkChoice implements fork choice with memory management

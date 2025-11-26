@@ -255,7 +255,7 @@ func (sm *SlashingManager) slashDoubleVoting(att *types.Attestation, first, seco
 		SecondAttestation: &types.Attestation{
 			ValidatorAddress: second.ValidatorAddress,
 			BlockHash:        second.BlockHash,
-			BlockHeight:      int64(second.Epoch * 100), // Approximate
+			BlockHeight:      int64(second.Epoch * 32), // Approximate start of epoch
 			Epoch:            second.Epoch,
 			Slot:             second.Epoch * 32, // Approximate
 			Signature:        second.Signature,

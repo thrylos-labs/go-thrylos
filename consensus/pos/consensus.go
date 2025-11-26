@@ -84,7 +84,7 @@ func NewConsensusEngine(
 	badgerDB := worldState.GetBadgerDB()
 
 	if badgerDB != nil {
-		slashingStorage = storage.NewSlashingStorage(badgerDB) // ← storage. prefix
+		slashingStorage = storage.NewSlashingStorage(badgerDB)
 		log.Println("✅ Slashing persistence enabled")
 	} else {
 		slashingStorage = nil
@@ -92,6 +92,13 @@ func NewConsensusEngine(
 	}
 
 	engine.slashingManager = NewSlashingManager(slashingConfig, worldState, slashingStorage)
+
+	// ============================================================================
+	// ADD THIS: Initialize evidence tracker for slashing evidence broadcasting
+	// ============================================================================
+	engine.evidenceTracker = NewEvidenceTracker()
+	log.Println("✅ Slashing evidence tracker initialized")
+	// ============================================================================
 
 	return engine
 }
@@ -390,22 +397,30 @@ func (ce *ConsensusEngine) isCurrentNodeValidator() bool {
 }
 
 // processAttestations processes received attestations
+// OLD CODE (remove the TODO comment and add broadcasting):
 func (ce *ConsensusEngine) processAttestations() {
-	// Process attestations for fork choice and finality
 	for _, attestation := range ce.attestations {
 		if err := ce.validateAttestation(attestation); err != nil {
 			continue
 		}
 
-		// ✅ CRITICAL FIX #2: Check for slashable offenses (double voting, etc.)
-		// This is THE KEY FIX - without this, slashing is completely inactive!
+		// Check for slashable offenses
 		if err := ce.slashingManager.ProcessAttestation(attestation); err != nil {
 			// Slashing violation detected!
 			fmt.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n",
 				attestation.ValidatorAddress, err)
 
-			// TODO: Broadcast slashing evidence to network
-			// For now, we log it and skip this attestation
+			// TODO: Broadcast slashing evidence to network  ← REMOVE THIS TODO
+
+			// ✅ NEW: Create and broadcast slashing evidence
+			evidence := ce.createSlashingEvidenceFromAttestation(attestation, err)
+			if evidence != nil {
+				if err := ce.handleSlashingEvidence(evidence); err != nil {
+					log.Printf("❌ Failed to handle slashing evidence: %v", err)
+				}
+			}
+
+			// Skip this attestation
 			continue
 		}
 
@@ -532,6 +547,9 @@ func (ce *ConsensusEngine) messageHandler() {
 			ce.handleAttestation(m)
 		case *Vote:
 			ce.handleVote(m)
+		// ADD THIS:
+		case *SlashingEvidence:
+			ce.processReceivedSlashingEvidence(m)
 		}
 	}
 }
