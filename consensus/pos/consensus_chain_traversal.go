@@ -219,17 +219,16 @@ func (ce *ConsensusEngine) getCommonAncestor(blockHash1, blockHash2 string) (str
 // isForkDetected checks if two blocks represent different forks at the same height
 func (ce *ConsensusEngine) isForkDetected(blockHash1, blockHash2 string) bool {
 	if blockHash1 == blockHash2 {
-		return false // Same block, not a fork
+		return false
 	}
 
-	block1, _ := ce.worldState.GetBlockByHash(blockHash2)
+	block1, _ := ce.worldState.GetBlockByHash(blockHash1) // FIXED
 	block2, _ := ce.worldState.GetBlockByHash(blockHash2)
 
 	if block1 == nil || block2 == nil {
-		return false // Can't determine if fork
+		return false
 	}
 
-	// If they're at the same height and different, it's a fork
 	if block1.Header.Index == block2.Header.Index {
 		return true
 	}
