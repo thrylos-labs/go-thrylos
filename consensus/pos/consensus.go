@@ -68,15 +68,21 @@ func NewConsensusEngine(
 
 	// Initialize slashing manager with persistent storage
 	slashingConfig := &storage.SlashingConfig{
-		DoubleVotingPenalty:     uint8(cfg.Consensus.SlashingDoubleVote),
-		SurroundVotingPenalty:   uint8(cfg.Consensus.SlashingSurroundVote),
-		InvalidProposalPenalty:  uint8(cfg.Consensus.SlashingInvalidProposal),
-		DowntimePenalty:         uint8(cfg.Consensus.SlashingDowntime),
+		DoubleVotingPenalty:    uint8(cfg.Consensus.SlashingDoubleVote),
+		SurroundVotingPenalty:  uint8(cfg.Consensus.SlashingSurroundVote),
+		InvalidProposalPenalty: uint8(cfg.Consensus.SlashingInvalidProposal),
+
+		// ✅ FIX 1: Use SlashingDowntime
+		SlashingDowntime: uint8(cfg.Consensus.SlashingDowntime),
+
 		InvalidSignaturePenalty: uint8(cfg.Consensus.SlashingInvalidSig),
 		MaxMissedAttestations:   cfg.Consensus.MaxMissedAttestations,
 		AttestationWindow:       24 * time.Hour,
-		JailDuration:            time.Duration(cfg.Consensus.JailDurationHours) * time.Hour,
-		MinimumStake:            cfg.Staking.MinValidatorStake,
+
+		// ✅ FIX 2: Use JailDurationHours (and pass the int directly, no math needed here)
+		JailDurationHours: cfg.Consensus.JailDurationHours,
+
+		MinimumStake: cfg.Staking.MinValidatorStake,
 	}
 
 	// Create slashing storage if we have access to BadgerDB

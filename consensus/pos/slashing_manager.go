@@ -15,6 +15,19 @@ type WorldStateBalancer interface {
 	UpdateBalance(address string, newBalance int64) error
 }
 
+type DowntimePolicy struct {
+	WarningThreshold   uint64 // Warning after X misses
+	MinorSlashingStart uint64 // Start slashing at X misses
+	MajorSlashingStart uint64 // Escalate penalty at X misses
+	JailThreshold      uint64 // Jail validator at X misses
+	EjectionThreshold  uint64 // Force unstake at X misses
+
+	MinorPenalty int64         // Percentage penalty (e.g., 1)
+	MajorPenalty int64         // Percentage penalty (e.g., 3)
+	JailPenalty  int64         // Percentage penalty (e.g., 5)
+	JailDuration time.Duration // How long to jail
+}
+
 // SlashingManager handles all slashing-related operations
 type SlashingManager struct {
 	config *storage.SlashingConfig
@@ -45,6 +58,7 @@ type SlashingManager struct {
 	// Persistent storage (optional, can be nil for tests)
 	storage *storage.SlashingStorage // ✅
 
+	policy DowntimePolicy
 }
 
 // NewSlashingManager creates a new slashing manager
@@ -54,8 +68,28 @@ func NewSlashingManager(config *storage.SlashingConfig, worldState WorldStateBal
 		config = storage.DefaultSlashingConfig()
 	}
 
+	// ✅ NEW: Calculate progressive thresholds
+	maxMisses := config.MaxMissedAttestations
+	if maxMisses == 0 {
+		maxMisses = 100
+	}
+
+	policy := DowntimePolicy{
+		WarningThreshold:   maxMisses / 20, // 5% misses
+		MinorSlashingStart: maxMisses / 10, // 10% misses
+		MajorSlashingStart: maxMisses / 5,  // 20% misses
+		JailThreshold:      maxMisses / 2,  // 50% misses
+		EjectionThreshold:  maxMisses,      // 100% misses
+
+		MinorPenalty: 1, // 1%
+		MajorPenalty: 3, // 3%
+		JailPenalty:  int64(config.SlashingDowntime),
+		JailDuration: time.Duration(config.JailDurationHours) * time.Hour,
+	}
+
 	sm := &SlashingManager{
 		config:                  config,
+		policy:                  policy, // ✅ Set the policy
 		attestationsByValidator: make(map[string][]*storage.AttestationRecord),
 		jailedValidators:        make(map[string]*storage.JailedValidator),
 		slashingRecords:         make(map[string][]*types.SlashingRecord),
@@ -195,11 +229,87 @@ func (sm *SlashingManager) ReportMissedAttestation(validatorKey string, slot uin
 	}
 
 	history.RecordMiss(slot)
+	missedCount := history.MissedSlots
 
-	// Check if validator exceeded max missed attestations
-	if history.MissedSlots >= sm.config.MaxMissedAttestations {
-		sm.slashDowntime(validatorKey, history)
+	fmt.Printf("⚠️ Validator %s missed attestation (Total: %d)\n", validatorKey, missedCount)
+
+	// ✅ NEW: Progressive penalties logic
+	if missedCount >= sm.policy.EjectionThreshold {
+		// 1. Ejection: Force Unstake
+		fmt.Printf("⛔ EJECTING validator %s for excessive downtime\n", validatorKey)
+		sm.forceUnstake(validatorKey)
+		sm.slashValidator(validatorKey, sm.policy.JailPenalty, "extended_downtime_ejection", history)
+
+	} else if missedCount >= sm.policy.JailThreshold {
+		// 2. Jail: Suspend validator + High Penalty
+		if !sm.isValidatorJailed(validatorKey) {
+			fmt.Printf("🔒 JAILING validator %s for downtime\n", validatorKey)
+			sm.jailValidator(validatorKey, types.Downtime)
+			sm.slashValidator(validatorKey, sm.policy.JailPenalty, "extended_downtime_jail", history)
+		}
+
+	} else if missedCount >= sm.policy.MajorSlashingStart {
+		// 3. Major Slashing
+		sm.slashValidator(validatorKey, sm.policy.MajorPenalty, "downtime_major", history)
+
+	} else if missedCount >= sm.policy.MinorSlashingStart {
+		// 4. Minor Slashing
+		sm.slashValidator(validatorKey, sm.policy.MinorPenalty, "downtime_minor", history)
+
+	} else if missedCount >= sm.policy.WarningThreshold {
+		// 5. Warning
+		sm.recordWarning(validatorKey, "approaching_downtime_threshold")
 	}
+}
+
+// slashValidator applies a generic slashing penalty based on percentage
+func (sm *SlashingManager) slashValidator(validatorKey string, percent int64, reason string, history *storage.AttestationHistory) {
+	// Construct evidence
+	evidence := types.SlashingEvidence{
+		MissedSlots: history.MissedSlotList,
+	}
+
+	// Deduplicate logic
+	evidenceHash := fmt.Sprintf("%s-%s-%d", validatorKey, reason, history.MissedSlots)
+	if sm.processedEvidence[evidenceHash] {
+		return
+	}
+
+	balance, _ := sm.worldState.GetBalance(validatorKey)
+	penaltyAmount := balance * percent / 100
+
+	record := &types.SlashingRecord{
+		ValidatorAddress: validatorKey,
+		Condition:        types.Downtime,
+		Timestamp:        time.Now(),
+		Evidence:         evidence,
+		SlashedAmount:    penaltyAmount,
+		Reason:           fmt.Sprintf("%s (Missed: %d)", reason, history.MissedSlots),
+	}
+
+	if err := sm.applySlashing(record); err == nil {
+		sm.processedEvidence[evidenceHash] = true
+	}
+}
+
+// forceUnstake permanently removes a validator from the active set due to excessive downtime
+// Assumes lock is held by caller
+func (sm *SlashingManager) forceUnstake(validatorKey string) {
+	// Mark as slashed (permanently removed from active set)
+	sm.validatorStatus[validatorKey] = storage.ValidatorSlashed
+
+	// Persist to storage if available
+	if sm.storage != nil {
+		if err := sm.storage.SaveValidatorStatus(validatorKey, storage.ValidatorSlashed); err != nil {
+			fmt.Printf("⚠️ Failed to persist forced unstake status for %s: %v\n", validatorKey, err)
+		}
+	}
+}
+
+// recordWarning logs a warning for a validator nearing the slashing threshold
+func (sm *SlashingManager) recordWarning(validatorKey string, reason string) {
+	// Log to console (in production this would likely emit a metric or event)
+	fmt.Printf("⚠️  [SlashingManager] WARNING: Validator %s %s\n", validatorKey, reason)
 }
 
 // ReportInvalidProposal reports that a validator proposed an invalid block
@@ -307,6 +417,7 @@ func (sm *SlashingManager) slashDoubleVoting(att *types.Attestation, first, seco
 
 // slashDowntime handles downtime offense
 // slashDowntime handles downtime offense
+// slashDowntime handles downtime offense
 func (sm *SlashingManager) slashDowntime(validatorAddress string, history *storage.AttestationHistory) error {
 	evidence := types.SlashingEvidence{
 		MissedSlots: history.MissedSlotList,
@@ -324,8 +435,8 @@ func (sm *SlashingManager) slashDowntime(validatorAddress string, history *stora
 		return fmt.Errorf("failed to get validator balance: %w", err)
 	}
 
-	// Calculate penalty (less severe)
-	penaltyAmount := balance * int64(sm.config.DowntimePenalty) / 100
+	// ✅ FIX: Use SlashingDowntime instead of DowntimePenalty
+	penaltyAmount := balance * int64(sm.config.SlashingDowntime) / 100
 
 	// Create slashing record
 	record := &types.SlashingRecord{
@@ -403,9 +514,13 @@ func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 }
 
 // jailValidator temporarily jails a validator
+// jailValidator temporarily jails a validator
 func (sm *SlashingManager) jailValidator(validatorAddress string, reason types.SlashingCondition) {
 	jailTime := time.Now()
-	releaseTime := jailTime.Add(sm.config.JailDuration)
+
+	// ✅ FIX: Convert int hours to time.Duration
+	duration := time.Duration(sm.config.JailDurationHours) * time.Hour
+	releaseTime := jailTime.Add(duration)
 
 	jail := &storage.JailedValidator{
 		ValidatorAddress: validatorAddress,

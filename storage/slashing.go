@@ -411,10 +411,13 @@ func (ss *SlashingStorage) LoadAllSlashingData() (*SlashingData, error) {
 // SlashingConfig defines the penalties for each slashing condition
 type SlashingConfig struct {
 	// Penalty percentages (0-100)
-	DoubleVotingPenalty     uint8 // Default: 50%
-	SurroundVotingPenalty   uint8 // Default: 30%
-	InvalidProposalPenalty  uint8 // Default: 20%
-	DowntimePenalty         uint8 // Default: 5%
+	DoubleVotingPenalty    uint8 // Default: 50%
+	SurroundVotingPenalty  uint8 // Default: 30%
+	InvalidProposalPenalty uint8 // Default: 20%
+
+	// RENAMED: DowntimePenalty -> SlashingDowntime to match manager expectations
+	SlashingDowntime uint8 // Default: 5%
+
 	InvalidSignaturePenalty uint8 // Default: 10%
 
 	// Downtime configuration
@@ -422,7 +425,8 @@ type SlashingConfig struct {
 	AttestationWindow     time.Duration // Default: 24 hours
 
 	// Slashing jail time (time before validator can rejoin)
-	JailDuration time.Duration // Default: 7 days
+	// RENAMED: JailDuration -> JailDurationHours (int) to match manager
+	JailDurationHours int // Default: 168 (7 days)
 
 	// Minimum stake required to be a validator
 	MinimumStake int64 // Default: 1000 tokens
@@ -434,11 +438,11 @@ func DefaultSlashingConfig() *SlashingConfig {
 		DoubleVotingPenalty:     50,
 		SurroundVotingPenalty:   30,
 		InvalidProposalPenalty:  20,
-		DowntimePenalty:         5,
+		SlashingDowntime:        5, // Renamed field
 		InvalidSignaturePenalty: 10,
 		MaxMissedAttestations:   100,
 		AttestationWindow:       24 * time.Hour,
-		JailDuration:            7 * 24 * time.Hour,
+		JailDurationHours:       168, // 7 days (168 hours)
 		MinimumStake:            1000,
 	}
 }
