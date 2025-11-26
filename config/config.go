@@ -144,16 +144,18 @@ type NetworkConfig struct {
 }
 
 type ConsensusConfig struct {
-	BlockTime         time.Duration `json:"block_time"`
-	MaxTxPerBlock     int           `json:"max_tx_per_block"`
-	MaxBlockSize      int64         `json:"max_block_size"`
-	MinGasPrice       int64         `json:"min_gas_price"`
-	MaxValidators     int           `json:"max_validators"`
-	ValidatorRotation time.Duration `json:"validator_rotation"`
-	SlashingEnabled   bool          `json:"slashing_enabled"`
-	MaxTimestampSkew  time.Duration `json:"max_timestamp_skew"`
-	MaxTimestampAge   time.Duration `json:"max_timestamp_age"`
-	MaxTxDataSize     int           `json:"max_tx_data_size"`
+	BlockTime          time.Duration `json:"block_time"`
+	MaxTxPerBlock      int           `json:"max_tx_per_block"`
+	MaxBlockSize       int64         `json:"max_block_size"`
+	MinGasPrice        int64         `json:"min_gas_price"`
+	MaxValidators      int           `json:"max_validators"`
+	ValidatorRotation  time.Duration `json:"validator_rotation"`
+	SlashingEnabled    bool          `json:"slashing_enabled"`
+	MaxFutureBlockTime time.Duration `json:"max_future_block_time"` // 15s
+	MaxPastBlockTime   time.Duration `json:"max_past_block_time"`   // 2h
+	MaxTimestampSkew   time.Duration `json:"max_timestamp_skew"`
+	MaxTimestampAge    time.Duration `json:"max_timestamp_age"`
+	MaxTxDataSize      int           `json:"max_tx_data_size"`
 
 	SlashingDoubleVote      int    `json:"slashing_double_vote"`      // Percentage (50)
 	SlashingSurroundVote    int    `json:"slashing_surround_vote"`    // Percentage (30)
@@ -286,6 +288,8 @@ func Load() (*Config, error) {
 			MaxValidators:           100,
 			ValidatorRotation:       24 * time.Hour,
 			SlashingEnabled:         true,
+			MaxFutureBlockTime:      15 * time.Second,
+			MaxPastBlockTime:        2 * time.Hour,
 			MaxTimestampSkew:        5 * time.Minute,
 			MaxTimestampAge:         1 * time.Hour,
 			MaxTxDataSize:           1024 * 1024, // 1MB max transaction data

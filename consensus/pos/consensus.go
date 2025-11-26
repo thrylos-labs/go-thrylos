@@ -759,25 +759,31 @@ func (bv *BlockValidator) ValidateBlock(block *core.Block) error {
 
 // validateBlockStructure validates the basic structure of a block
 func (bv *BlockValidator) validateBlockStructure(block *core.Block) error {
-	config := bv.consensusEngine.config
+	// Get config from the engine
+	cfg := bv.consensusEngine.config.Consensus
 
 	// Check transaction count
-	if len(block.Transactions) > config.Consensus.MaxTxPerBlock {
+	if len(block.Transactions) > cfg.MaxTxPerBlock {
 		return fmt.Errorf("block contains %d transactions, maximum allowed is %d",
-			len(block.Transactions), config.Consensus.MaxTxPerBlock)
+			len(block.Transactions), cfg.MaxTxPerBlock)
 	}
 
-	// Check timestamp
+	// CHANGED: Use Config values for Timestamp Validation
 	currentTime := time.Now().Unix()
-	if block.Header.Timestamp > currentTime+int64(config.Consensus.MaxTimestampSkew.Seconds()) {
-		return fmt.Errorf("block timestamp too far in future")
+
+	// 1. Future Check
+	if block.Header.Timestamp > currentTime+int64(cfg.MaxFutureBlockTime.Seconds()) {
+		return fmt.Errorf("block timestamp %d too far in future (max drift: %s)",
+			block.Header.Timestamp, cfg.MaxFutureBlockTime)
 	}
 
-	if block.Header.Timestamp < currentTime-int64(config.Consensus.MaxTimestampAge.Seconds()) {
-		return fmt.Errorf("block timestamp too old")
+	// 2. Past Check
+	if block.Header.Timestamp < currentTime-int64(cfg.MaxPastBlockTime.Seconds()) {
+		return fmt.Errorf("block timestamp %d too old (max age: %s)",
+			block.Header.Timestamp, cfg.MaxPastBlockTime)
 	}
 
-	// Validate chain continuity
+	// Validate chain continuity (Previous Block Check)
 	currentBlock := bv.consensusEngine.worldState.GetCurrentBlock()
 	if currentBlock != nil {
 		if block.Header.Index != currentBlock.Header.Index+1 {
@@ -789,8 +795,9 @@ func (bv *BlockValidator) validateBlockStructure(block *core.Block) error {
 			return fmt.Errorf("invalid previous hash")
 		}
 
+		// 3. Monotonic Time Check
 		if block.Header.Timestamp <= currentBlock.Header.Timestamp {
-			return fmt.Errorf("block timestamp must be greater than previous block")
+			return fmt.Errorf("block timestamp must be strictly greater than previous block")
 		}
 	}
 

@@ -3,6 +3,7 @@ package block
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
@@ -291,15 +292,26 @@ func (v *Validator) ValidateGasUsage(block *core.Block) error {
 }
 
 // ValidateTimestamp validates block timestamp is reasonable
-func (v *Validator) ValidateTimestamp(block *core.Block, maxFutureTime, maxPastTime int64) error {
-	if block.Header.Timestamp > maxFutureTime {
-		return fmt.Errorf("block timestamp %d is too far in the future (max: %d)",
-			block.Header.Timestamp, maxFutureTime)
+func (v *Validator) ValidateTimestamp(block *core.Block, prevBlock *core.Block, maxFutureTime time.Duration, maxPastTime time.Duration) error {
+	blockTime := block.Header.Timestamp
+	now := time.Now().Unix()
+
+	// 1. Block timestamp must not be too far in future
+	if blockTime > now+int64(maxFutureTime.Seconds()) {
+		return fmt.Errorf("block timestamp too far in future: %d > %d",
+			blockTime, now+int64(maxFutureTime.Seconds()))
 	}
 
-	if block.Header.Timestamp < maxPastTime {
-		return fmt.Errorf("block timestamp %d is too far in the past (min: %d)",
-			block.Header.Timestamp, maxPastTime)
+	// 2. Block timestamp must not be too far in past
+	if blockTime < now-int64(maxPastTime.Seconds()) {
+		return fmt.Errorf("block timestamp too far in past: %d < %d",
+			blockTime, now-int64(maxPastTime.Seconds()))
+	}
+
+	// 3. Block timestamp must be strictly after previous block
+	if prevBlock != nil && blockTime <= prevBlock.Header.Timestamp {
+		return fmt.Errorf("block timestamp must be after previous block: %d <= %d",
+			blockTime, prevBlock.Header.Timestamp)
 	}
 
 	return nil
