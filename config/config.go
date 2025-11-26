@@ -44,6 +44,10 @@ const (
 	// Added to enforce network stability and prevent congestion
 	MaxBlockSize            = 1_000_000 // 1MB max block size
 	MaxTransactionsPerBlock = 1000      // Max transactions per block
+	// === TRANSACTION POOL ===
+	// TransactionPoolTTL defines how long a transaction stays in the mempool
+	// before being expired (prevents bloat).
+	TransactionPoolTTL = 24 * time.Hour
 	// Block rewards and validator economics
 	BlockReward     = BaseUnit * 38 / 100 // 0.38 THRYLOS (Matches 4% Inflation)
 	ValidatorReward = BaseUnit * 30 / 100 // 0.30 THRYLOS (Primary incentive)

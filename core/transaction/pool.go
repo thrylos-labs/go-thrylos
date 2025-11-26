@@ -1,24 +1,34 @@
+// core/transaction/pool.go
 package transaction
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/thrylos-labs/go-thrylos/config" // Import config
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
+// TransactionEntry wraps a transaction with metadata
+type TransactionEntry struct {
+	Transaction *core.Transaction
+	ReceivedAt  time.Time
+}
+
 // Pool manages pending transactions for a shard
 type Pool struct {
 	// Transaction storage
-	pending   map[string]*core.Transaction            // txid -> tx
-	byAddress map[string]map[uint64]*core.Transaction // address -> nonce -> tx (Changed for O(1) lookup)
+	// CHANGED: pending now maps to TransactionEntry instead of raw Transaction
+	pending   map[string]*TransactionEntry            // txid -> entry
+	byAddress map[string]map[uint64]*core.Transaction // address -> nonce -> tx
 	byHash    map[string]*core.Transaction            // hash -> tx for quick lookup
 
 	// Dependencies
-	accountManager *account.AccountManager // Needed for balance checks
+	accountManager *account.AccountManager
 
 	// Configuration
 	shardID     account.ShardID
@@ -46,10 +56,9 @@ type PoolStats struct {
 }
 
 // NewPool creates a new transaction pool for a shard
-// NOTE: Added accountManager to constructor to enable balance validation
 func NewPool(shardID account.ShardID, totalShards int, maxTxs int, minGasPrice int64, am *account.AccountManager) *Pool {
 	return &Pool{
-		pending:        make(map[string]*core.Transaction),
+		pending:        make(map[string]*TransactionEntry), // Updated type
 		byAddress:      make(map[string]map[uint64]*core.Transaction),
 		byHash:         make(map[string]*core.Transaction),
 		accountManager: am,
@@ -69,7 +78,7 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// 1. Check if transaction already exists (Id or Hash)
+	// 1. Check if transaction already exists
 	if _, exists := p.pending[tx.Id]; exists {
 		return fmt.Errorf("transaction %s already exists in pool", tx.Id)
 	}
@@ -86,22 +95,14 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 
 	// 3. Check for Duplicate Nonce (Replace-by-Fee logic)
 	if existingTx, conflict := senderTxs[tx.Nonce]; conflict {
-		// Only allow replacement if new tx has higher gas price
 		if tx.GasPrice <= existingTx.GasPrice {
-			return fmt.Errorf("nonce %d already exists; replacement requires higher gas price (existing: %d, new: %d)",
-				tx.Nonce, existingTx.GasPrice, tx.GasPrice)
+			return fmt.Errorf("nonce %d already exists; replacement requires higher gas price", tx.Nonce)
 		}
-
-		// Log replacement
-		fmt.Printf("♻️ Pool: Replacing tx %s with %s (nonce %d, higher gas price)\n",
-			existingTx.Id, tx.Id, tx.Nonce)
-
 		// Remove old transaction internally
 		p.removeInternal(existingTx)
 	}
 
 	// 4. Validate Total Pending Balance
-	// Ensure user has enough balance for THIS + ALL other pending transactions
 	if err := p.validateTotalPendingBalance(tx.From, tx); err != nil {
 		return fmt.Errorf("insufficient balance for pending transactions: %v", err)
 	}
@@ -109,15 +110,18 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 	// 5. Check Capacity
 	if len(p.pending) >= p.maxTxs {
 		if !p.evictLowestGasPrice(tx.GasPrice) {
-			return fmt.Errorf("transaction pool is full and cannot evict lower gas price transactions")
+			return fmt.Errorf("transaction pool is full")
 		}
 	}
 
 	// 6. Add to all indices
-	p.pending[tx.Id] = tx
+	// CHANGED: Wrap transaction in TransactionEntry
+	p.pending[tx.Id] = &TransactionEntry{
+		Transaction: tx,
+		ReceivedAt:  time.Now(),
+	}
 	p.byHash[tx.Hash] = tx
 
-	// Re-fetch senderTxs in case it was modified/deleted during eviction/removal
 	if p.byAddress[tx.From] == nil {
 		p.byAddress[tx.From] = make(map[uint64]*core.Transaction)
 	}
@@ -127,26 +131,46 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 	return nil
 }
 
-// validateTotalPendingBalance calculates the total cost of all pending transactions plus the new one
-// and checks if the account balance is sufficient.
+// CleanupExpired removes transactions that have been in the pool longer than the TTL
+// Fixes: MEDIUM Severity - Missing Transaction Expiration
+func (p *Pool) CleanupExpired() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	expiredCount := 0
+
+	// Iterate over pending transactions
+	for _, entry := range p.pending {
+		if now.Sub(entry.ReceivedAt) > config.TransactionPoolTTL {
+			// We use removeInternal to ensure indices (byHash, byAddress) are also cleared
+			p.removeInternal(entry.Transaction)
+			expiredCount++
+			log.Printf("Removed expired transaction: %s (Age: %v)",
+				entry.Transaction.Id, now.Sub(entry.ReceivedAt))
+		}
+	}
+
+	if expiredCount > 0 {
+		log.Printf("CleanupExpired: Removed %d stale transactions", expiredCount)
+	}
+}
+
+// validateTotalPendingBalance calculates the total cost of pending transactions
 func (p *Pool) validateTotalPendingBalance(address string, newTx *core.Transaction) error {
-	// If we don't have an account manager, we skip this check (or fail safe)
 	if p.accountManager == nil {
 		return nil
 	}
 
 	account, err := p.accountManager.GetAccount(address)
 	if err != nil {
-		return fmt.Errorf("could not retrieve account for balance check: %v", err)
+		return fmt.Errorf("could not retrieve account: %v", err)
 	}
 
 	totalRequired := int64(0)
 
-	// Sum existing pending transactions
 	if senderTxs, exists := p.byAddress[address]; exists {
 		for _, tx := range senderTxs {
-			// Skip the one we might be replacing (though logic in Add handles removal first usually,
-			// this is safe if called before removal)
 			if tx.Nonce == newTx.Nonce {
 				continue
 			}
@@ -154,7 +178,6 @@ func (p *Pool) validateTotalPendingBalance(address string, newTx *core.Transacti
 		}
 	}
 
-	// Add new transaction cost
 	totalRequired += newTx.Amount + (newTx.Gas * newTx.GasPrice)
 
 	if account.Balance < totalRequired {
@@ -164,7 +187,7 @@ func (p *Pool) validateTotalPendingBalance(address string, newTx *core.Transacti
 	return nil
 }
 
-// removeInternal performs the deletion logic without locking (caller must hold lock)
+// removeInternal performs the deletion logic without locking
 func (p *Pool) removeInternal(tx *core.Transaction) {
 	delete(p.pending, tx.Id)
 	delete(p.byHash, tx.Hash)
@@ -183,18 +206,18 @@ func (p *Pool) RemoveTransaction(txID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	tx, exists := p.pending[txID]
+	entry, exists := p.pending[txID]
 	if !exists {
 		return fmt.Errorf("transaction %s not found in pool", txID)
 	}
 
-	p.removeInternal(tx)
+	p.removeInternal(entry.Transaction)
 	return nil
 }
 
 // RemoveTransactionByHash removes a transaction by its hash
 func (p *Pool) RemoveTransactionByHash(txHash string) error {
-	p.mu.Lock() // Changed to Lock because removeInternal writes
+	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	tx, exists := p.byHash[txHash]
@@ -211,12 +234,12 @@ func (p *Pool) GetTransaction(txID string) (*core.Transaction, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	tx, exists := p.pending[txID]
+	entry, exists := p.pending[txID]
 	if !exists {
 		return nil, fmt.Errorf("transaction %s not found in pool", txID)
 	}
 
-	return tx, nil
+	return entry.Transaction, nil
 }
 
 // GetTransactionByHash retrieves a transaction by hash
@@ -238,15 +261,14 @@ func (p *Pool) GetPendingTransactions() []*core.Transaction {
 	defer p.mu.RUnlock()
 
 	txs := make([]*core.Transaction, 0, len(p.pending))
-	for _, tx := range p.pending {
-		txs = append(txs, tx)
+	for _, entry := range p.pending {
+		txs = append(txs, entry.Transaction)
 	}
 
 	return txs
 }
 
 // getSortedTransactions is a helper to get transactions for an address sorted by nonce
-// The caller must hold the lock.
 func (p *Pool) getSortedTransactions(address string) []*core.Transaction {
 	senderMap, exists := p.byAddress[address]
 	if !exists {
@@ -258,7 +280,6 @@ func (p *Pool) getSortedTransactions(address string) []*core.Transaction {
 		result = append(result, tx)
 	}
 
-	// Sort by nonce
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Nonce < result[j].Nonce
 	})
@@ -278,31 +299,25 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	// Use internal accountManager if passed one is nil, or prefer passed one?
-	// Usually strict dependency injection is better, but falling back to struct field is safe.
 	am := accountManager
 	if am == nil {
 		am = p.accountManager
 	}
 
-	fmt.Printf("🔍 Pool: GetExecutableTransactions called, max=%d, pending=%d\n", maxCount, len(p.pending))
-
 	var executable []*core.Transaction
-	processed := make(map[string]bool) // Track processed addresses
+	processed := make(map[string]bool)
 
-	// First pass: Get transactions with perfect nonce sequence
+	// First pass: Perfect nonce sequence
 	for address := range p.byAddress {
 		if len(executable) >= maxCount {
 			break
 		}
 
-		// Get sorted transactions for this address (since map is unsorted)
 		txs := p.getSortedTransactions(address)
 		if len(txs) == 0 {
 			continue
 		}
 
-		// Get current nonce for this address
 		currentNonce, err := am.GetNonce(address)
 		if err != nil {
 			continue
@@ -316,51 +331,44 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 		expectedNonce := currentNonce
 		remainingBalance := account.Balance
 
-		// Process transactions in nonce order
 		for _, tx := range txs {
 			if len(executable) >= maxCount {
 				break
 			}
 
-			// Check if transaction has expected nonce (consecutive)
 			if tx.Nonce == expectedNonce {
-				// Check if account has sufficient balance
 				totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
 				if remainingBalance >= totalCost {
 					executable = append(executable, tx)
 					expectedNonce++
 					remainingBalance -= totalCost
 				} else {
-					break // Insufficient balance, skip remaining for this address
+					break
 				}
 			} else if tx.Nonce > expectedNonce {
-				break // Gap in nonces
+				break
 			}
-			// Skip transactions with nonce < expectedNonce (already executed)
 		}
 		processed[address] = true
 	}
 
-	// Second pass: If we still need more transactions, be more lenient (High Gas Price filler)
+	// Second pass: Fill with high gas price txs if room
 	if len(executable) < maxCount && len(executable) < len(p.pending)/2 {
 		var remaining []*core.Transaction
 
-		// Collect candidates
-		for _, tx := range p.pending {
-			// Skip if already included
+		for _, entry := range p.pending {
 			isIncluded := false
 			for _, execTx := range executable {
-				if execTx.Id == tx.Id {
+				if execTx.Id == entry.Transaction.Id {
 					isIncluded = true
 					break
 				}
 			}
 			if !isIncluded {
-				remaining = append(remaining, tx)
+				remaining = append(remaining, entry.Transaction)
 			}
 		}
 
-		// Sort by gas price (highest first)
 		sort.Slice(remaining, func(i, j int) bool {
 			return remaining[i].GasPrice > remaining[j].GasPrice
 		})
@@ -370,17 +378,16 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 				break
 			}
 
-			// Basic validations
 			currentNonce, err := am.GetNonce(tx.From)
 			if err != nil {
 				continue
 			}
+
 			account, err := am.GetAccount(tx.From)
 			if err != nil {
 				continue
 			}
 
-			// Allow transactions that are close to the expected nonce (within 5)
 			if tx.Nonce >= currentNonce && tx.Nonce <= currentNonce+5 {
 				totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
 				if account.Balance >= totalCost {
@@ -399,11 +406,10 @@ func (p *Pool) GetHighestGasPriceTransactions(maxCount int) []*core.Transaction 
 	defer p.mu.RUnlock()
 
 	txs := make([]*core.Transaction, 0, len(p.pending))
-	for _, tx := range p.pending {
-		txs = append(txs, tx)
+	for _, entry := range p.pending {
+		txs = append(txs, entry.Transaction)
 	}
 
-	// Sort by gas price (descending)
 	sort.Slice(txs, func(i, j int) bool {
 		return txs[i].GasPrice > txs[j].GasPrice
 	})
@@ -438,12 +444,12 @@ func (p *Pool) Clear() {
 
 	p.totalRemoved += int64(len(p.pending))
 
-	p.pending = make(map[string]*core.Transaction)
+	p.pending = make(map[string]*TransactionEntry)
 	p.byAddress = make(map[string]map[uint64]*core.Transaction)
 	p.byHash = make(map[string]*core.Transaction)
 }
 
-// CleanupStaleTransactions removes transactions older than the specified duration
+// CleanupStaleTransactions removes transactions older than the specified duration (based on Timestamp)
 func (p *Pool) CleanupStaleTransactions(maxAge time.Duration) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -453,9 +459,10 @@ func (p *Pool) CleanupStaleTransactions(maxAge time.Duration) int {
 
 	var staleTransactions []*core.Transaction
 
-	for _, tx := range p.pending {
-		if currentTime-tx.Timestamp > int64(maxAge.Seconds()) {
-			staleTransactions = append(staleTransactions, tx)
+	for _, entry := range p.pending {
+		// This checks the signed timestamp (when user created it)
+		if currentTime-entry.Transaction.Timestamp > int64(maxAge.Seconds()) {
+			staleTransactions = append(staleTransactions, entry.Transaction)
 		}
 	}
 
@@ -494,7 +501,6 @@ func (p *Pool) validateTransactionForPool(tx *core.Transaction) error {
 		return fmt.Errorf("transaction signature cannot be empty")
 	}
 
-	// Check if sender belongs to this shard (unless it's beacon shard)
 	if p.shardID != account.BeaconShardID {
 		senderShard := account.CalculateShardID(tx.From, p.totalShards)
 		if senderShard != p.shardID {
@@ -511,11 +517,10 @@ func (p *Pool) evictLowestGasPrice(newGasPrice int64) bool {
 	var lowestGasPrice int64 = newGasPrice
 	var evictTx *core.Transaction
 
-	// Find transaction with lowest gas price
-	for _, tx := range p.pending {
-		if tx.GasPrice < lowestGasPrice {
-			lowestGasPrice = tx.GasPrice
-			evictTx = tx
+	for _, entry := range p.pending {
+		if entry.Transaction.GasPrice < lowestGasPrice {
+			lowestGasPrice = entry.Transaction.GasPrice
+			evictTx = entry.Transaction
 		}
 	}
 
@@ -584,9 +589,9 @@ func (p *Pool) UpdateGasPrice(newMinGasPrice int64) int {
 	p.minGasPrice = newMinGasPrice
 
 	var toRemove []*core.Transaction
-	for _, tx := range p.pending {
-		if tx.GasPrice < newMinGasPrice {
-			toRemove = append(toRemove, tx)
+	for _, entry := range p.pending {
+		if entry.Transaction.GasPrice < newMinGasPrice {
+			toRemove = append(toRemove, entry.Transaction)
 		}
 	}
 
@@ -603,8 +608,8 @@ func (p *Pool) GetTransactionsByGasPrice(ascending bool) []*core.Transaction {
 	defer p.mu.RUnlock()
 
 	txs := make([]*core.Transaction, 0, len(p.pending))
-	for _, tx := range p.pending {
-		txs = append(txs, tx)
+	for _, entry := range p.pending {
+		txs = append(txs, entry.Transaction)
 	}
 
 	sort.Slice(txs, func(i, j int) bool {
@@ -627,7 +632,6 @@ func (p *Pool) GetAddressNonceGap(address string, currentNonce uint64) []uint64 
 		return []uint64{}
 	}
 
-	// Find highest nonce
 	var highestNonce uint64 = currentNonce - 1
 	for nonce := range senderTxs {
 		if nonce > highestNonce {
@@ -635,7 +639,6 @@ func (p *Pool) GetAddressNonceGap(address string, currentNonce uint64) []uint64 
 		}
 	}
 
-	// Check gaps
 	var gaps []uint64
 	for nonce := currentNonce; nonce <= highestNonce; nonce++ {
 		if _, ok := senderTxs[nonce]; !ok {
