@@ -41,6 +41,9 @@ const (
 	// Dynamic reward economics
 	BaseBlockReward = BaseUnit / 100 // 0.01 THRYLOS base (will be adjusted dynamically)
 
+	// Added to enforce network stability and prevent congestion
+	MaxBlockSize            = 1_000_000 // 1MB max block size
+	MaxTransactionsPerBlock = 1000      // Max transactions per block
 	// Block rewards and validator economics
 	BlockReward     = BaseUnit * 38 / 100 // 0.38 THRYLOS (Matches 4% Inflation)
 	ValidatorReward = BaseUnit * 30 / 100 // 0.30 THRYLOS (Primary incentive)

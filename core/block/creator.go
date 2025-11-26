@@ -4,10 +4,12 @@ package block
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
@@ -85,13 +87,19 @@ func (bc *Creator) CreateBlock(
 		GasLimit:  gasLimit,
 	}
 
-	// Create block
+	// Create block object
 	block := &core.Block{
 		Header:       header,
 		Transactions: shardTransactions,
 		Hash:         "",  // Will be calculated
 		Signature:    nil, // Will be set when signed
 	}
+
+	// --- SECURITY FIX: VALIDATE BLOCK SIZE ---
+	if err := bc.ValidateBlockSize(block); err != nil {
+		return nil, fmt.Errorf("block validation failed: %w", err)
+	}
+	// -----------------------------------------
 
 	// Calculate block hash
 	blockHash, err := bc.calculateBlockHash(block)
@@ -101,6 +109,39 @@ func (bc *Creator) CreateBlock(
 	block.Hash = blockHash
 
 	return block, nil
+}
+
+// ValidateBlockSize enforces maximum block size and transaction count limits
+// Fixes: MEDIUM Severity - No Maximum Block Size Enforcement
+func (bc *Creator) ValidateBlockSize(block *core.Block) error {
+	// 1. Check Transaction Count
+	if len(block.Transactions) > config.MaxTransactionsPerBlock {
+		return fmt.Errorf("too many transactions: %d > %d",
+			len(block.Transactions), config.MaxTransactionsPerBlock)
+	}
+
+	// 2. Check Physical Block Size (in bytes)
+	blockSize, err := bc.calculateActualBlockSize(block)
+	if err != nil {
+		return fmt.Errorf("failed to calculate block size: %v", err)
+	}
+
+	if blockSize > config.MaxBlockSize {
+		return fmt.Errorf("block too large: %d bytes > %d bytes limit", blockSize, config.MaxBlockSize)
+	}
+
+	return nil
+}
+
+// calculateActualBlockSize marshals the block to get the exact size in bytes
+func (bc *Creator) calculateActualBlockSize(block *core.Block) (int, error) {
+	// We use JSON marshaling here to get a concrete byte size representing
+	// the network payload.
+	data, err := json.Marshal(block)
+	if err != nil {
+		return 0, err
+	}
+	return len(data), nil
 }
 
 // CreateGenesisBlock creates the genesis block for a shard
