@@ -53,7 +53,8 @@ func TestDoubleVotingIntegration(t *testing.T) {
 	slashingConfig := storage.DefaultSlashingConfig()
 	slashingManager := NewSlashingManager(slashingConfig, worldState, nil)
 
-	validatorAddress := "tl1jhagm044kdavupen3e6"
+	// Using a standard Ethereum-style address (0x + 40 hex chars)
+	validatorAddress := "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
 
 	initialStake, err := worldState.GetBalance(validatorAddress)
 	if err != nil {
@@ -148,7 +149,8 @@ func TestJailedValidatorCannotAttest(t *testing.T) {
 	slashingConfig := storage.DefaultSlashingConfig()
 	slashingManager := NewSlashingManager(slashingConfig, worldState, nil)
 
-	validatorAddress := "tl1jhagm044kdavupen3e6"
+	// Using a standard Ethereum-style address (0x + 40 hex chars)
+	validatorAddress := "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
 	slashingManager.jailValidator(validatorAddress, types.DoubleVoting)
 
 	attestation := &types.Attestation{
@@ -184,7 +186,8 @@ func TestSlashingDoesNotDoubleSlash(t *testing.T) {
 	slashingConfig := storage.DefaultSlashingConfig()
 	slashingManager := NewSlashingManager(slashingConfig, worldState, nil)
 
-	validatorAddress := "tl1jhagm044kdavupen3e6"
+	// Using a standard Ethereum-style address (0x + 40 hex chars)
+	validatorAddress := "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
 
 	initialBalance, err := worldState.GetBalance(validatorAddress)
 	if err != nil {

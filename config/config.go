@@ -262,8 +262,9 @@ func Load() (*Config, error) {
 			Accounts: []GenesisAccount{
 				// Node developer/validator account - ALL 15M THRYLOS for testing
 				{
-					Address:      "tl1jhagm044kdavupen3e6", // Your consistent node address
-					Balance:      15000000 * BaseUnit,      // 15M THRYLOS (full genesis supply for testing)
+					// NNEDS TO BE GENERATED TO BE A REAL ADDRESS FOR PRODUCTION
+					Address:      "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", // Your consistent node address
+					Balance:      15000000 * BaseUnit,                          // 15M THRYLOS (full genesis supply for testing)
 					Purpose:      "Development node with full genesis supply for testing",
 					Locked:       false,
 					UnlockBlocks: 0,
