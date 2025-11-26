@@ -308,7 +308,11 @@ func (bc *Creator) calculateBlockHash(block *core.Block) (string, error) {
 	buf.Write(gasLimitBytes)
 
 	// Calculate Blake2b hash using crypto/hash
-	hashBytes := hash.HashData(buf.Bytes())
+	hashBytes, err := hash.HashData(buf.Bytes())
+	if err != nil {
+		return "", fmt.Errorf("failed to hash buffer: %w", err)
+	}
+
 	return fmt.Sprintf("%x", hashBytes), nil
 }
 
@@ -322,7 +326,10 @@ func (bc *Creator) SignBlock(block *core.Block, privateKey crypto.PrivateKey) er
 	}
 
 	// Create hash to sign using crypto/hash
-	hashToSign := hash.HashData([]byte(block.Hash))
+	hashToSign, err := hash.HashData([]byte(block.Hash))
+	if err != nil {
+		return fmt.Errorf("failed to hash block: %w", err)
+	}
 
 	// Sign
 	signature := privateKey.Sign(hashToSign)

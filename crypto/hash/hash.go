@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash"
+	"log"
 	"sync"
 
 	"golang.org/x/crypto/blake2b"
@@ -68,16 +69,22 @@ var blake2bHasherPool = sync.Pool{
 	New: func() interface{} {
 		hasher, err := blake2b.New256(nil)
 		if err != nil {
-			panic(err) // Proper error handling is essential, though panic should be avoided in production
+			// Log error and return nil, handle at call site
+			log.Fatalf("FATAL: Cannot initialize BLAKE2b hasher: %v", err)
+			return nil
 		}
 		return hasher
 	},
 }
 
-func HashData(data []byte) []byte {
-	hasher := blake2bHasherPool.Get().(hash.Hash)
-	defer blake2bHasherPool.Put(hasher)
-	hasher.Reset()
-	hasher.Write(data)
-	return hasher.Sum(nil) // Correct usage of Sum
+func HashData(data []byte) ([]byte, error) {
+	hasher := blake2bHasherPool.Get()
+	if hasher == nil {
+		return nil, fmt.Errorf("failed to get hasher from pool")
+	}
+	h := hasher.(hash.Hash)
+	defer blake2bHasherPool.Put(h)
+	h.Reset()
+	h.Write(data)
+	return h.Sum(nil), nil
 }

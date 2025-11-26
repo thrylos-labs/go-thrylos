@@ -87,7 +87,11 @@ func (v *Validator) CreateTransaction(
 	}
 
 	// Calculate hash
-	tx.Hash = v.CalculateTransactionHash(tx)
+	hash, err := v.CalculateTransactionHash(tx)
+	if err != nil {
+		return nil, err
+	}
+	tx.Hash = hash
 
 	return tx, nil
 }
@@ -120,7 +124,8 @@ func (v *Validator) CreateDelegateTransaction(from, validator string, amount, ga
 }
 
 // CalculateTransactionHash calculates the Blake2b hash of a transaction
-func (v *Validator) CalculateTransactionHash(tx *core.Transaction) string {
+func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, error) {
+
 	var buf bytes.Buffer
 
 	// Serialize transaction fields for hashing (excluding signature and hash)
@@ -162,8 +167,12 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) string {
 	buf.Write(tx.Data)
 
 	// Calculate Blake2b hash using crypto/hash
-	hashBytes := hash.HashData(buf.Bytes())
-	return fmt.Sprintf("%x", hashBytes)
+	hashBytes, err := hash.HashData(buf.Bytes())
+	if err != nil {
+		return "", fmt.Errorf("failed to hash buffer: %w", err)
+	}
+	return fmt.Sprintf("%x", hashBytes), nil
+
 }
 
 // SignTransaction signs a transaction with Ed25519
@@ -177,7 +186,10 @@ func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.Priv
 	}
 
 	// Calculate the hash to sign using crypto/hash
-	hashToSign := hash.HashData([]byte(tx.Hash))
+	hashToSign, err := hash.HashData([]byte(tx.Hash))
+	if err != nil {
+		return fmt.Errorf("failed to hash tx.Hash: %w", err)
+	}
 
 	// Sign with Ed25519
 	signature := privateKey.Sign(hashToSign)
@@ -204,7 +216,10 @@ func (v *Validator) VerifyTransactionSignature(tx *core.Transaction, publicKey c
 	}
 
 	// Recreate the hash that was signed using crypto/hash
-	hashToVerify := hash.HashData([]byte(tx.Hash))
+	hashToVerify, err := hash.HashData([]byte(tx.Hash))
+	if err != nil {
+		return fmt.Errorf("failed to hash tx.Hash: %w", err)
+	}
 
 	// Create signature object from bytes
 	signature, err := crypto.SignatureFromBytes(tx.Signature)
@@ -340,7 +355,10 @@ func (v *Validator) validateStructure(tx *core.Transaction) error {
 // validateHash validates that the transaction hash is correct
 func (v *Validator) validateHash(tx *core.Transaction) error {
 	// Recalculate hash
-	expectedHash := v.CalculateTransactionHash(tx)
+	expectedHash, err := v.CalculateTransactionHash(tx)
+	if err != nil {
+		return fmt.Errorf("failed to calculate transaction hash: %w", err)
+	}
 
 	if tx.Hash != expectedHash {
 		return fmt.Errorf("transaction hash mismatch: expected %s, got %s", expectedHash, tx.Hash)
