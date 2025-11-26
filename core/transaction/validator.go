@@ -185,10 +185,11 @@ func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.Priv
 		return fmt.Errorf("private key cannot be nil")
 	}
 
-	// Calculate the hash to sign using crypto/hash
-	hashToSign, err := hash.HashData([]byte(tx.Hash))
+	// Calculate the signable hash including chain ID and all context
+	// This must match what VerifyTransactionSignature uses
+	hashToSign, err := v.calculateSignableHash(tx)
 	if err != nil {
-		return fmt.Errorf("failed to hash transaction: %w", err)
+		return fmt.Errorf("failed to calculate signable hash: %v", err)
 	}
 
 	// Sign with Ed25519
@@ -199,6 +200,60 @@ func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.Priv
 
 	tx.Signature = signature.Bytes()
 	return nil
+}
+
+// calculateSignableHash creates a hash that includes chain ID and all transaction context
+// This prevents replay attacks across different chains and ensures complete transaction integrity
+func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// 1. Include chain ID to prevent cross-chain replay attacks
+	chainID := v.config.Network.ChainID
+	buf.WriteString(chainID)
+
+	// 2. Include protocol version for future upgrades
+	buf.WriteString("v1")
+
+	// 3. Include all transaction fields (same as hash calculation but with chain context)
+	buf.WriteString(tx.Id)
+	buf.WriteString(tx.From)
+	buf.WriteString(tx.To)
+
+	// Write amount as bytes
+	amountBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(amountBytes, uint64(tx.Amount))
+	buf.Write(amountBytes)
+
+	// Write gas as bytes
+	gasBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
+	buf.Write(gasBytes)
+
+	// Write gas price as bytes
+	gasPriceBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(gasPriceBytes, uint64(tx.GasPrice))
+	buf.Write(gasPriceBytes)
+
+	// Write nonce as bytes - CRITICAL for replay protection
+	nonceBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(nonceBytes, tx.Nonce)
+	buf.Write(nonceBytes)
+
+	// Write transaction type
+	typeBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(typeBytes, uint32(tx.Type))
+	buf.Write(typeBytes)
+
+	// Write timestamp
+	timestampBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(timestampBytes, uint64(tx.Timestamp))
+	buf.Write(timestampBytes)
+
+	// Write data
+	buf.Write(tx.Data)
+
+	// Hash the complete buffer
+	return hash.HashData(buf.Bytes())
 }
 
 // VerifyTransactionSignature verifies a transaction's signature
@@ -215,19 +270,36 @@ func (v *Validator) VerifyTransactionSignature(tx *core.Transaction, publicKey c
 		return fmt.Errorf("transaction signature is empty")
 	}
 
-	// Recreate the hash that was signed using crypto/hash
-	hashToVerify, err := hash.HashData([]byte(tx.Hash))
+	// 1. CRITICAL: Verify that the sender address matches the public key
+	// This prevents attackers from using someone else's signature
+	derivedAddress, err := account.GenerateAddress(publicKey)
 	if err != nil {
-		return fmt.Errorf("failed to hash transaction: %w", err)
+		return fmt.Errorf("failed to derive address from public key: %v", err)
 	}
 
-	// Create signature object from bytes
+	// Normalize both addresses for comparison
+	normalizedDerived := strings.ToLower(derivedAddress)
+	normalizedFrom := strings.ToLower(tx.From)
+
+	if normalizedDerived != normalizedFrom {
+		return fmt.Errorf("signature verification failed: sender address %s does not match public key address %s",
+			tx.From, derivedAddress)
+	}
+
+	// 2. Calculate the signable hash including chain ID and all context
+	// This prevents replay attacks across different chains and ensures transaction integrity
+	hashToVerify, err := v.calculateSignableHash(tx)
+	if err != nil {
+		return fmt.Errorf("failed to calculate signable hash: %v", err)
+	}
+
+	// 3. Create signature object from bytes
 	signature, err := crypto.SignatureFromBytes(tx.Signature)
 	if err != nil {
 		return fmt.Errorf("failed to parse signature: %v", err)
 	}
 
-	// Verify signature
+	// 4. Verify the signature against the calculated hash
 	err = publicKey.Verify(hashToVerify, &signature)
 	if err != nil {
 		return fmt.Errorf("signature verification failed: %v", err)
@@ -394,6 +466,84 @@ func (v *Validator) validateShard(tx *core.Transaction) error {
 	return nil
 }
 
+// validateNonce performs comprehensive nonce validation to prevent replay attacks
+func (v *Validator) validateNonce(txNonce, accountNonce uint64, address string) error {
+	// 1. Check if nonce is too low (already used transaction)
+	if txNonce < accountNonce {
+		return fmt.Errorf("nonce too low for address %s: account nonce is %d, transaction nonce is %d (transaction already processed or replay attack)",
+			address, accountNonce, txNonce)
+	}
+
+	// 2. Check if nonce is exactly the expected next nonce
+	if txNonce == accountNonce {
+		// Perfect - this is the next transaction to process
+		return nil
+	}
+
+	// 3. If nonce is higher than expected, check if it's within acceptable future range
+	// Allow a small gap for queued transactions in mempool, but not too large
+	const maxNonceGap = 1000 // Maximum allowed gap between current and future nonce
+
+	nonceGap := txNonce - accountNonce
+	if nonceGap > maxNonceGap {
+		return fmt.Errorf("nonce too high for address %s: account nonce is %d, transaction nonce is %d (gap of %d exceeds maximum allowed gap of %d)",
+			address, accountNonce, txNonce, nonceGap, maxNonceGap)
+	}
+
+	// 4. Nonce is in the future but within acceptable range
+	// This transaction can be queued for later processing
+	return fmt.Errorf("nonce gap detected for address %s: expected %d, got %d (transaction is for future processing, gap: %d)",
+		address, accountNonce, txNonce, nonceGap)
+}
+
+// ValidateForMempool validates a transaction for mempool inclusion
+// This allows future nonces within a reasonable range for queued transactions
+func (v *Validator) ValidateForMempool(tx *core.Transaction, accountManager *account.AccountManager) error {
+	// Get sender account
+	sender, err := accountManager.GetAccount(tx.From)
+	if err != nil {
+		return fmt.Errorf("failed to get sender account: %v", err)
+	}
+
+	// 1. Reject transactions with nonces that are too old
+	if tx.Nonce < sender.Nonce {
+		return fmt.Errorf("nonce too old: account nonce is %d, transaction nonce is %d",
+			sender.Nonce, tx.Nonce)
+	}
+
+	// 2. Allow current nonce and reasonable future nonces (for transaction queuing)
+	const maxMempoolNonceGap = 100 // Allow queuing up to 100 transactions ahead
+
+	if tx.Nonce > sender.Nonce+maxMempoolNonceGap {
+		return fmt.Errorf("nonce too far in future: account nonce is %d, transaction nonce is %d (max gap: %d)",
+			sender.Nonce, tx.Nonce, maxMempoolNonceGap)
+	}
+
+	// 3. Validate the transaction has sufficient balance for ALL pending transactions
+	// This prevents accepting transactions that will never be processable
+	return v.validateSufficientBalanceForNonce(tx, sender, accountManager)
+}
+
+// validateSufficientBalanceForNonce checks if the sender has enough balance
+// to process all transactions up to and including this nonce
+func (v *Validator) validateSufficientBalanceForNonce(tx *core.Transaction, sender *core.Account, accountManager *account.AccountManager) error {
+	// Calculate total cost of this transaction
+	totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
+	if err != nil {
+		return fmt.Errorf("failed to calculate total cost: %v", err)
+	}
+
+	// Check if sender has enough balance for this transaction
+	// Note: In a real implementation, you'd also check against other pending transactions
+	// in the mempool with lower nonces, but that's handled by the transaction pool
+	if sender.Balance < totalCost {
+		return fmt.Errorf("insufficient balance for transaction: have %d, need %d",
+			sender.Balance, totalCost)
+	}
+
+	return nil
+}
+
 // validateBusinessLogic validates transaction business logic
 func (v *Validator) validateBusinessLogic(tx *core.Transaction, accountManager *account.AccountManager) error {
 	// Get sender account
@@ -402,9 +552,9 @@ func (v *Validator) validateBusinessLogic(tx *core.Transaction, accountManager *
 		return fmt.Errorf("failed to get sender account: %v", err)
 	}
 
-	// Validate nonce
-	if sender.Nonce != tx.Nonce {
-		return fmt.Errorf("invalid nonce: expected %d, got %d", sender.Nonce, tx.Nonce)
+	// Comprehensive nonce validation to prevent replay attacks
+	if err := v.validateNonce(tx.Nonce, sender.Nonce, tx.From); err != nil {
+		return err
 	}
 
 	// Validate based on transaction type

@@ -8,6 +8,16 @@ import (
 const (
 	// === UTILITY-BASED TOKEN ECONOMICS WITH DYNAMIC INFLATION ===
 
+	// Chain ID
+	// MainnetChainID is the chain ID for production mainnet
+	MainnetChainID = "thrylos-1"
+
+	// TestnetChainID is the chain ID for public testnet
+	TestnetChainID = "thrylos-testnet-1"
+
+	// DevnetChainID is the chain ID for development
+	DevnetChainID = "thrylos-devnet-1"
+
 	// Token denomination (1 THRYLOS = 1e9 base units)
 	BaseUnit      = int64(1000000000) // 1 THRYLOS
 	TotalSupply   = int64(100000000)  // 100 million THRYLOS
@@ -52,6 +62,19 @@ const (
 	// Dynamic reward pool (60% of total supply for long-term rewards)
 	DynamicRewardPool = ValidatorRewardPool // 60M THRYLOS (60%) - distributed via inflation
 )
+
+func GetChainIDForEnvironment(env string) string {
+	switch env {
+	case "mainnet", "production":
+		return MainnetChainID
+	case "testnet":
+		return TestnetChainID
+	case "devnet", "development", "local":
+		return DevnetChainID
+	default:
+		return DevnetChainID // Default to devnet for safety
+	}
+}
 
 // GenesisAccount represents an initial account with balance
 type GenesisAccount struct {
@@ -115,6 +138,7 @@ type NetworkConfig struct {
 	MaxPeers       int           `json:"max_peers"`
 	PingInterval   time.Duration `json:"ping_interval"`
 	NetworkID      string        `json:"network_id"`
+	ChainID        string        `json:"chain_id"`
 }
 
 type ConsensusConfig struct {
@@ -242,7 +266,8 @@ func Load() (*Config, error) {
 			BootstrapPeers: []string{},
 			MaxPeers:       50,
 			PingInterval:   30 * time.Second,
-			NetworkID:      "thrylos-mainnet", // Keep this
+			NetworkID:      "testnet",      // Changed from "thrylos-mainnet"
+			ChainID:        TestnetChainID, // Add this - defaults to "thrylos-testnet-1"
 		},
 
 		Consensus: ConsensusConfig{
