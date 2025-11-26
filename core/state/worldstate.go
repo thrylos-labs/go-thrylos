@@ -133,13 +133,17 @@ func (ws *WorldState) InitializeFromConfig() error {
 	// Set total supply
 	ws.totalSupply = totalGenesisBalance
 
+	// Genesis block uses fixed timestamp for deterministic hash
+	// This ensures all nodes agree on genesis block hash
+	genesisTimestamp := int64(1700000000) // Nov 14, 2023 22:13:20 GMT
+
 	// Initialize genesis block (block 0)
 	genesisBlock := &core.Block{
 		Header: &core.BlockHeader{
 			Index:     0,
 			PrevHash:  "",
-			Timestamp: time.Now().Unix(),
-			Validator: "", // No validator for genesis
+			Timestamp: genesisTimestamp, // ✅ Always the same!
+			Validator: "",               // No validator for genesis
 			GasLimit:  ws.config.Consensus.MaxBlockSize,
 			GasUsed:   0,
 			StateRoot: "",
