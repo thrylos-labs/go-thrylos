@@ -40,19 +40,20 @@ func NewConsensusEngine(
 	nodeAddress, _ := account.GenerateAddress(nodePrivateKey.PublicKey())
 
 	engine := &ConsensusEngine{
-		config:           cfg,
-		worldState:       worldState,
-		nodePrivateKey:   nodePrivateKey,
-		nodeAddress:      nodeAddress,
-		broadcastChan:    broadcastChan,
-		receiveChan:      receiveChan,
-		proposalTimeout:  time.Duration(cfg.Consensus.BlockTime),
-		attestationPhase: time.Duration(cfg.Consensus.BlockTime) / 3,
-		attestations:     make(map[string]*types.Attestation),
-		votes:            make(map[string]*Vote),
-		currentEpoch:     0,
-		currentSlot:      0,
-		chainCache:       NewChainCache(),
+		config:            cfg,
+		worldState:        worldState,
+		nodePrivateKey:    nodePrivateKey,
+		nodeAddress:       nodeAddress,
+		broadcastChan:     broadcastChan,
+		receiveChan:       receiveChan,
+		proposalTimeout:   time.Duration(cfg.Consensus.BlockTime),
+		attestationPhase:  time.Duration(cfg.Consensus.BlockTime) / 3,
+		attestations:      make(map[string]*types.Attestation),
+		votes:             make(map[string]*Vote),
+		currentEpoch:      0,
+		currentSlot:       0,
+		chainCache:        NewChainCache(),
+		validatorActivity: make(map[string]*ValidatorActivity),
 	}
 
 	// Initialize validator management
@@ -170,6 +171,22 @@ func (ce *ConsensusEngine) processSlot() {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
 
+	// Check previous slot for withholding
+	if ce.currentSlot > 0 {
+		previousSlot := ce.currentSlot
+
+		// 1. Get the expected proposer for the previous slot
+		expectedProposer, err := ce.getSlotProposer(previousSlot)
+		if err == nil {
+			// 2. Check if a block was actually produced for that slot
+			currentBlock := ce.worldState.GetCurrentBlock()
+			wasBlockProduced := currentBlock != nil && currentBlock.Header.Slot == previousSlot
+
+			// 3. Update activity (Testable Logic)
+			ce.updateValidatorActivity(expectedProposer, wasBlockProduced)
+		}
+	}
+
 	ce.currentSlot++
 
 	// Calculate epoch (32 slots per epoch)
@@ -212,6 +229,40 @@ func (ce *ConsensusEngine) processSlot() {
 
 	// Update fork choice
 	ce.updateForkChoice()
+}
+
+func (ce *ConsensusEngine) updateValidatorActivity(validatorAddr string, wasBlockProduced bool) {
+	if ce.validatorActivity == nil {
+		ce.validatorActivity = make(map[string]*ValidatorActivity)
+	}
+
+	if ce.validatorActivity[validatorAddr] == nil {
+		ce.validatorActivity[validatorAddr] = &ValidatorActivity{}
+	}
+	activity := ce.validatorActivity[validatorAddr]
+
+	if wasBlockProduced {
+		// ✅ SUCCESS: Reset missed count
+		activity.MissedProposals = 0
+		activity.LastProposal = time.Now()
+	} else {
+		// ❌ FAILURE: Increment missed count
+		activity.MissedProposals++
+		fmt.Printf("⚠️ Validator %s missed proposal (Consecutive: %d)\n",
+			validatorAddr, activity.MissedProposals)
+
+		// Trigger Slashing if Threshold Exceeded (10 misses)
+		if activity.MissedProposals >= 10 {
+			// Apply Penalty
+			err := ce.slashingManager.ReportBlockWithholding(validatorAddr)
+			if err != nil {
+				fmt.Printf("Error reporting withholding: %v\n", err)
+			} else {
+				// Reset count after punishment to avoid looping penalties
+				activity.MissedProposals = 0
+			}
+		}
+	}
 }
 
 // proposeBlock creates and broadcasts a new block proposal

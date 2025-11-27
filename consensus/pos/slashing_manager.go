@@ -196,6 +196,57 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 	return nil
 }
 
+// ReportBlockWithholding penalizes a validator for consecutively failing to propose blocks
+func (sm *SlashingManager) ReportBlockWithholding(validatorAddr string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// 1. Check if already jailed to avoid double jeopardy
+	if sm.isValidatorJailed(validatorAddr) {
+		return nil
+	}
+
+	fmt.Printf("🚨 REPORT: Validator %s has withheld blocks (excessive missed proposals)\n", validatorAddr)
+
+	// 2. Get Validator Balance
+	balance, err := sm.worldState.GetBalance(validatorAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get validator balance: %v", err)
+	}
+
+	// 3. Define Penalty
+	// ✅ FIX: Use JailPenalty (which comes from config.SlashingDowntime) instead of MinorPenalty
+	penaltyPercent := sm.policy.JailPenalty
+	penaltyAmount := balance * penaltyPercent / 100
+
+	// 4. Create Evidence Structure
+	evidence := types.SlashingEvidence{
+		MissedSlots: []uint64{},
+	}
+
+	// 5. Create Slashing Record
+	record := &types.SlashingRecord{
+		ValidatorAddress: validatorAddr,
+		Condition:        types.Downtime,
+		Timestamp:        time.Now(),
+		Evidence:         evidence,
+		SlashedAmount:    penaltyAmount,
+		Reason:           "Block Withholding: Exceeded consecutive missed proposal limit",
+	}
+
+	// 6. Apply Slashing
+	if err := sm.applySlashing(record); err != nil {
+		return err
+	}
+
+	// 7. Jail the validator
+	sm.jailValidator(validatorAddr, types.Downtime)
+
+	fmt.Printf("⚖️  Slashed and Jailed validator %s for block withholding\n", validatorAddr)
+
+	return nil
+}
+
 // ProcessBlockProposal checks a block proposal for slashable offenses
 func (sm *SlashingManager) ProcessBlockProposal(proposal *BlockProposal) error {
 	sm.mu.Lock()

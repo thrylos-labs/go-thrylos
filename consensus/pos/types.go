@@ -25,6 +25,12 @@ type Vote struct {
 	Signature        []byte `json:"signature"`
 }
 
+// ValidatorActivity tracks a validator's proposal performance
+type ValidatorActivity struct {
+	LastProposal    time.Time
+	MissedProposals uint64 // Consecutive missed proposals
+}
+
 // Checkpoint represents a justified or finalized checkpoint
 type Checkpoint struct {
 	Epoch          uint64 `json:"epoch"`
@@ -100,6 +106,8 @@ type ConsensusEngine struct {
 	slashingManager *SlashingManager // ADD THIS LINE
 
 	evidenceTracker *EvidenceTracker
+
+	validatorActivity map[string]*ValidatorActivity
 }
 
 // ForkChoice implements fork choice with memory management
