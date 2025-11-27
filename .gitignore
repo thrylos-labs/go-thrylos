@@ -10,4 +10,5 @@ vm/:memory
 server.crt
 server.key
 
-
+# OS generated files
+.DS_Store
