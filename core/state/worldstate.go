@@ -15,10 +15,11 @@ import (
 	"sync"
 	"time"
 
+	math "github.com/thrylos-labs/go-thrylos/core/math"
+
 	"github.com/dgraph-io/badger/v3"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
-	safemath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/transaction"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
@@ -1338,7 +1339,7 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	// Check balance
+	// Basic sanity check
 	if delegator.Balance < amount {
 		return fmt.Errorf("insufficient balance: have %d, need %d", delegator.Balance, amount)
 	}
@@ -1348,35 +1349,85 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 	if !exists {
 		return fmt.Errorf("validator %s not found", validatorAddr)
 	}
-
 	if !validator.Active {
 		return fmt.Errorf("validator %s is not active", validatorAddr)
 	}
 
-	// Update delegator account
-	delegator.Balance -= amount
-	delegator.StakedAmount += amount
+	// ===== SafeMath updates =====
+
+	// delegator.Balance -= amount
+	newBalance, err := math.SafeSub(delegator.Balance, amount)
+	if err != nil {
+		return fmt.Errorf("delegation would underflow delegator balance: %v", err)
+	}
+
+	// delegator.StakedAmount += amount
+	newStakedAmount, err := math.SafeAdd(delegator.StakedAmount, amount)
+	if err != nil {
+		return fmt.Errorf("delegation would overflow delegator staked amount: %v", err)
+	}
+
 	if delegator.DelegatedTo == nil {
 		delegator.DelegatedTo = make(map[string]int64)
 	}
-	delegator.DelegatedTo[validatorAddr] += amount
 
-	// Update validator
-	validator.DelegatedStake += amount
-	validator.Stake += amount
+	// delegator.DelegatedTo[validatorAddr] += amount
+	currentDelegation := delegator.DelegatedTo[validatorAddr]
+	newDelegation, err := math.SafeAdd(currentDelegation, amount)
+	if err != nil {
+		return fmt.Errorf("delegation would overflow delegator->validator delegation: %v", err)
+	}
+
+	// validator.DelegatedStake += amount
+	newDelegatedStake, err := math.SafeAdd(validator.DelegatedStake, amount)
+	if err != nil {
+		return fmt.Errorf("delegation would overflow validator delegated stake: %v", err)
+	}
+
+	// validator.Stake += amount
+	newValidatorStake, err := math.SafeAdd(validator.Stake, amount)
+	if err != nil {
+		return fmt.Errorf("delegation would overflow validator total stake: %v", err)
+	}
+
 	if validator.Delegators == nil {
 		validator.Delegators = make(map[string]int64)
 	}
-	validator.Delegators[delegatorAddr] += amount
+
+	// validator.Delegators[delegatorAddr] += amount
+	currentValDelegation := validator.Delegators[delegatorAddr]
+	newValDelegation, err := math.SafeAdd(currentValDelegation, amount)
+	if err != nil {
+		return fmt.Errorf("delegation would overflow validator delegator entry: %v", err)
+	}
+
+	// ws.totalStaked += amount
+	newTotalStaked, err := math.SafeAdd(ws.totalStaked, amount)
+	if err != nil {
+		return fmt.Errorf("delegation would overflow total staked amount: %v", err)
+	}
+
+	// ===== Commit updates only after all checks passed =====
+
+	delegator.Balance = newBalance
+	delegator.StakedAmount = newStakedAmount
+	delegator.DelegatedTo[validatorAddr] = newDelegation
+
+	validator.DelegatedStake = newDelegatedStake
+	validator.Stake = newValidatorStake
+	validator.Delegators[delegatorAddr] = newValDelegation
 	validator.UpdatedAt = time.Now().Unix()
 
-	// Update accounts
+	ws.totalStaked = newTotalStaked
+
 	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
 		return fmt.Errorf("failed to update delegator account: %v", err)
 	}
 
-	// Update total staked
-	ws.totalStaked += amount
+	// Note: validator is kept in-memory; if you have UpdateValidatorWithStorage use that instead
+	if err := ws.UpdateValidator(validator); err != nil {
+		return fmt.Errorf("failed to update validator: %v", err)
+	}
 
 	return nil
 }
@@ -1401,7 +1452,6 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	// Check delegation exists
 	if delegator.DelegatedTo == nil {
 		return fmt.Errorf("no delegations found for account %s", delegatorAddr)
 	}
@@ -1417,35 +1467,81 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return fmt.Errorf("validator %s not found", validatorAddr)
 	}
 
-	// Update delegator account (with unbonding period)
-	delegator.StakedAmount -= amount
-	delegator.DelegatedTo[validatorAddr] -= amount
-	if delegator.DelegatedTo[validatorAddr] == 0 {
-		delete(delegator.DelegatedTo, validatorAddr)
+	// ===== SafeMath updates =====
+
+	// delegator.StakedAmount -= amount
+	newStakedAmount, err := math.SafeSub(delegator.StakedAmount, amount)
+	if err != nil {
+		return fmt.Errorf("undelegation would underflow delegator staked amount: %v", err)
 	}
 
-	// Update validator
-	validator.DelegatedStake -= amount
-	validator.Stake -= amount
-	if validator.Delegators != nil {
-		validator.Delegators[delegatorAddr] -= amount
-		if validator.Delegators[delegatorAddr] == 0 {
-			delete(validator.Delegators, delegatorAddr)
-		}
+	// current delegation minus amount
+	newDelegatedToVal, err := math.SafeSub(delegatedAmount, amount)
+	if err != nil {
+		return fmt.Errorf("undelegation would underflow delegator->validator delegation: %v", err)
+	}
+
+	// validator.DelegatedStake -= amount
+	newDelegatedStake, err := math.SafeSub(validator.DelegatedStake, amount)
+	if err != nil {
+		return fmt.Errorf("undelegation would underflow validator delegated stake: %v", err)
+	}
+
+	// validator.Stake -= amount
+	newValidatorStake, err := math.SafeSub(validator.Stake, amount)
+	if err != nil {
+		return fmt.Errorf("undelegation would underflow validator total stake: %v", err)
+	}
+
+	// validator.Delegators[delegatorAddr] -= amount
+	currentValDelegation := validator.Delegators[delegatorAddr]
+	newValDelegation, err := math.SafeSub(currentValDelegation, amount)
+	if err != nil {
+		return fmt.Errorf("undelegation would underflow validator delegator entry: %v", err)
+	}
+
+	// ws.totalStaked -= amount
+	newTotalStaked, err := math.SafeSub(ws.totalStaked, amount)
+	if err != nil {
+		return fmt.Errorf("undelegation would underflow total staked: %v", err)
+	}
+
+	// delegator.Balance += amount (instant unbonding in this implementation)
+	newBalance, err := math.SafeAdd(delegator.Balance, amount)
+	if err != nil {
+		return fmt.Errorf("undelegation would overflow delegator balance: %v", err)
+	}
+
+	// ===== Commit updates only after all checks passed =====
+
+	delegator.StakedAmount = newStakedAmount
+	delegator.Balance = newBalance
+
+	if newDelegatedToVal == 0 {
+		delete(delegator.DelegatedTo, validatorAddr)
+	} else {
+		delegator.DelegatedTo[validatorAddr] = newDelegatedToVal
+	}
+
+	validator.DelegatedStake = newDelegatedStake
+	validator.Stake = newValidatorStake
+
+	if newValDelegation == 0 {
+		delete(validator.Delegators, delegatorAddr)
+	} else {
+		validator.Delegators[delegatorAddr] = newValDelegation
 	}
 	validator.UpdatedAt = time.Now().Unix()
 
-	// Apply unbonding period (tokens will be available after period)
-	// For now, immediately return tokens (in production, implement unbonding queue)
-	delegator.Balance += amount
+	ws.totalStaked = newTotalStaked
 
-	// Update accounts
 	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
 		return fmt.Errorf("failed to update delegator account: %v", err)
 	}
 
-	// Update total staked
-	ws.totalStaked -= amount
+	if err := ws.UpdateValidator(validator); err != nil {
+		return fmt.Errorf("failed to update validator: %v", err)
+	}
 
 	return nil
 }
@@ -1467,124 +1563,121 @@ func (sm *StakingManager) DistributeRewards(totalRewards int64) error {
 
 	// Calculate total voting power
 	totalVotingPower := int64(0)
-	for _, v := range activeValidators {
-		var err error
-		totalVotingPower, err = safemath.SafeAdd(totalVotingPower, v.Stake)
+	for _, validator := range activeValidators {
+		tvp, err := math.SafeAdd(totalVotingPower, validator.Stake)
 		if err != nil {
-			return fmt.Errorf("voting power overflow while summing stakes: %w", err)
+			return fmt.Errorf("total voting power overflow: %v", err)
 		}
+		totalVotingPower = tvp
 	}
 
 	if totalVotingPower == 0 {
 		return fmt.Errorf("total voting power is zero")
 	}
 
-	for _, v := range activeValidators {
-		if v.Stake <= 0 {
-			continue
-		}
+	// Distribute rewards proportionally
+	for _, validator := range activeValidators {
+		// NOTE: This multiply/divide can still overflow if numbers are huge.
+		// If you add SafeMul later, use it here.
+		validatorReward := (totalRewards * validator.Stake) / totalVotingPower
 
-		// validatorReward = (totalRewards * v.Stake) / totalVotingPower
-		// (we keep the same formula; overflow here would mean absurdly large values)
-		validatorReward := (totalRewards * v.Stake) / totalVotingPower
+		// Calculate commission (commission is in basis points)
+		commission := (validatorReward * int64(validator.Commission)) / 10000
+		delegatorReward := validatorReward - commission
 
-		if validatorReward <= 0 {
-			continue
-		}
-
-		// Commission in basis points (0–10000)
-		commission := (validatorReward * int64(v.Commission)) / 10000
-
-		// delegatorReward = validatorReward - commission (SafeSub)
-		delegatorReward, err := safemath.SafeSub(validatorReward, commission)
-		if err != nil {
-			// Corrupted or misconfigured commission; skip this validator safely
-			return fmt.Errorf("commission/delegator reward underflow for validator %s: %w", v.Address, err)
-		}
-
-		// --- Validator account (commission) ---
-		validatorAccount, err := ws.accountManager.GetAccount(v.Address)
+		// Reward validator (commission)
+		validatorAccount, err := ws.accountManager.GetAccount(validator.Address)
 		if err != nil {
 			// Skip if validator account not found
 			continue
 		}
 
-		newValRewards, err := safemath.SafeAdd(validatorAccount.Rewards, commission)
+		// validatorAccount.Rewards += commission
+		newValidatorRewards, err := math.SafeAdd(validatorAccount.Rewards, commission)
 		if err != nil {
-			return fmt.Errorf("overflow adding commission to validator rewards for %s: %w", v.Address, err)
+			return fmt.Errorf("reward distribution would overflow validator rewards for %s: %v",
+				validator.Address, err)
 		}
 
-		newValBalance, err := safemath.SafeAdd(validatorAccount.Balance, commission)
+		// validatorAccount.Balance += commission
+		newValidatorBalance, err := math.SafeAdd(validatorAccount.Balance, commission)
 		if err != nil {
-			return fmt.Errorf("overflow adding commission to validator balance for %s: %w", v.Address, err)
+			return fmt.Errorf("reward distribution would overflow validator balance for %s: %v",
+				validator.Address, err)
 		}
 
-		validatorAccount.Rewards = newValRewards
-		validatorAccount.Balance = newValBalance
+		validatorAccount.Rewards = newValidatorRewards
+		validatorAccount.Balance = newValidatorBalance
 
 		if err := ws.accountManager.UpdateAccount(validatorAccount); err != nil {
-			return fmt.Errorf("failed to update validator account %s: %w", v.Address, err)
+			return fmt.Errorf("failed to update validator account %s: %v", validator.Address, err)
 		}
 
-		// --- Delegators ---
-		if v.DelegatedStake > 0 && len(v.Delegators) > 0 {
-			for delegatorAddr, delegatedAmount := range v.Delegators {
-				if delegatedAmount <= 0 {
-					continue
-				}
+		// Distribute remaining rewards to delegators proportionally
+		if validator.DelegatedStake > 0 && len(validator.Delegators) > 0 {
+			for delegatorAddr, delegatedAmount := range validator.Delegators {
+				delegatorShare := (delegatorReward * delegatedAmount) / validator.DelegatedStake
 
-				delegatorShare := (delegatorReward * delegatedAmount) / v.DelegatedStake
 				if delegatorShare <= 0 {
 					continue
 				}
 
 				delegatorAccount, err := ws.accountManager.GetAccount(delegatorAddr)
 				if err != nil {
-					// Skip missing delegator accounts
-					continue
+					continue // Skip if delegator account not found
 				}
 
-				newDelRewards, err := safemath.SafeAdd(delegatorAccount.Rewards, delegatorShare)
+				// delegatorAccount.Rewards += delegatorShare
+				newRewards, err := math.SafeAdd(delegatorAccount.Rewards, delegatorShare)
 				if err != nil {
-					return fmt.Errorf("overflow adding rewards for delegator %s: %w", delegatorAddr, err)
+					return fmt.Errorf("reward distribution would overflow rewards for delegator %s: %v",
+						delegatorAddr, err)
 				}
 
-				newDelBalance, err := safemath.SafeAdd(delegatorAccount.Balance, delegatorShare)
+				// delegatorAccount.Balance += delegatorShare
+				newBalance, err := math.SafeAdd(delegatorAccount.Balance, delegatorShare)
 				if err != nil {
-					return fmt.Errorf("overflow adding balance for delegator %s: %w", delegatorAddr, err)
+					return fmt.Errorf("reward distribution would overflow balance for delegator %s: %v",
+						delegatorAddr, err)
 				}
 
-				delegatorAccount.Rewards = newDelRewards
-				delegatorAccount.Balance = newDelBalance
+				delegatorAccount.Rewards = newRewards
+				delegatorAccount.Balance = newBalance
 
 				if err := ws.accountManager.UpdateAccount(delegatorAccount); err != nil {
-					return fmt.Errorf("failed to update delegator account %s: %w", delegatorAddr, err)
+					return fmt.Errorf("failed to update delegator account %s: %v", delegatorAddr, err)
 				}
 			}
 		} else {
-			// No delegators → validator gets delegatorReward as well
-			newValRewards2, err := safemath.SafeAdd(validatorAccount.Rewards, delegatorReward)
-			if err != nil {
-				return fmt.Errorf("overflow adding delegatorReward to validator rewards for %s: %w", v.Address, err)
-			}
+			// If no delegators, validator gets all rewards (delegatorReward)
+			if delegatorReward > 0 {
+				validatorAccount, err := ws.accountManager.GetAccount(validator.Address)
+				if err == nil {
+					newRewards, err := math.SafeAdd(validatorAccount.Rewards, delegatorReward)
+					if err != nil {
+						return fmt.Errorf("reward distribution would overflow validator rewards for %s: %v",
+							validator.Address, err)
+					}
 
-			newValBalance2, err := safemath.SafeAdd(validatorAccount.Balance, delegatorReward)
-			if err != nil {
-				return fmt.Errorf("overflow adding delegatorReward to validator balance for %s: %w", v.Address, err)
-			}
+					newBalance, err := math.SafeAdd(validatorAccount.Balance, delegatorReward)
+					if err != nil {
+						return fmt.Errorf("reward distribution would overflow validator balance for %s: %v",
+							validator.Address, err)
+					}
 
-			validatorAccount.Rewards = newValRewards2
-			validatorAccount.Balance = newValBalance2
-
-			if err := ws.accountManager.UpdateAccount(validatorAccount); err != nil {
-				return fmt.Errorf("failed to update validator account (no delegators) %s: %w", v.Address, err)
+					validatorAccount.Rewards = newRewards
+					validatorAccount.Balance = newBalance
+					if err := ws.accountManager.UpdateAccount(validatorAccount); err != nil {
+						return fmt.Errorf("failed to update validator account %s: %v", validator.Address, err)
+					}
+				}
 			}
 		}
 
-		// --- Total supply (minted rewards) ---
-		newTotalSupply, err := safemath.SafeAdd(ws.totalSupply, validatorReward)
+		// ws.totalSupply += validatorReward
+		newTotalSupply, err := math.SafeAdd(ws.totalSupply, validatorReward)
 		if err != nil {
-			return fmt.Errorf("overflow updating totalSupply with validator reward: %w", err)
+			return fmt.Errorf("reward distribution would overflow total supply: %v", err)
 		}
 		ws.totalSupply = newTotalSupply
 	}
@@ -2133,18 +2226,17 @@ func (sm *StakingManager) ClaimRewards(delegatorAddr string) error {
 		return fmt.Errorf("no rewards available to claim")
 	}
 
-	// Move rewards to balance (SafeMath)
 	claimedAmount := delegator.Rewards
 
-	newBalance, err := safemath.SafeAdd(delegator.Balance, claimedAmount)
+	// delegator.Balance += claimedAmount
+	newBalance, err := math.SafeAdd(delegator.Balance, claimedAmount)
 	if err != nil {
-		return fmt.Errorf("claim would overflow balance: %w", err)
+		return fmt.Errorf("claim would overflow balance: %v", err)
 	}
 
 	delegator.Balance = newBalance
 	delegator.Rewards = 0
 
-	// Update account
 	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
 		return fmt.Errorf("failed to update delegator account: %v", err)
 	}
