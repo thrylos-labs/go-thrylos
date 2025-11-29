@@ -130,8 +130,13 @@ func (ws *WorldState) InitializeFromConfig() error {
 		}
 
 		totalGenesisBalance += genesisAccount.Balance
-	}
 
+		newTotal, err := math.SafeAdd(totalGenesisBalance, genesisAccount.Balance)
+		if err != nil {
+			return fmt.Errorf("genesis total supply overflow: %v", err)
+		}
+		totalGenesisBalance = newTotal
+	}
 	// Set total supply
 	ws.totalSupply = totalGenesisBalance
 
@@ -1084,8 +1089,13 @@ func (csm *CrossShardManager) InitiateTransfer(from, to string, amount int64, no
 	hash := blake2b.Sum256(buf)
 	transfer.Hash = fmt.Sprintf("%x", hash)
 
-	// Debit sender account
-	senderAccount.Balance -= amount
+	newBalance, err := math.SafeSub(senderAccount.Balance, amount)
+	if err != nil {
+		return nil, fmt.Errorf("cross-shard debit would underflow sender balance: %v", err)
+	}
+	senderAccount.Balance = newBalance
+
+	// Nonce isn't money, so plain increment is fine
 	senderAccount.Nonce++
 
 	if err := csm.worldState.accountManager.UpdateAccount(senderAccount); err != nil {
@@ -1128,8 +1138,12 @@ func (csm *CrossShardManager) CompleteTransfer(transferHash string) error {
 		}
 	}
 
-	// Credit recipient account
-	recipientAccount.Balance += transfer.Amount
+	// Credit recipient account (SafeMath)
+	newBalance, err := math.SafeAdd(recipientAccount.Balance, transfer.Amount)
+	if err != nil {
+		return fmt.Errorf("cross-shard credit would overflow recipient balance: %v", err)
+	}
+	recipientAccount.Balance = newBalance
 
 	if err := csm.worldState.accountManager.UpdateAccount(recipientAccount); err != nil {
 		return fmt.Errorf("failed to update recipient account: %v", err)
@@ -1733,7 +1747,13 @@ func (ws *WorldState) UpdateTotalStaked() {
 
 	total := int64(0)
 	for _, validator := range ws.validators {
-		total += validator.Stake
+		newTotal, err := math.SafeAdd(total, validator.Stake)
+		if err != nil {
+			// This should never happen unless state is corrupted
+			fmt.Printf("⚠️ UpdateTotalStaked: overflow when summing stake: %v\n", err)
+			return
+		}
+		total = newTotal
 	}
 	ws.totalStaked = total
 }
@@ -1948,7 +1968,12 @@ func (ws *WorldState) SetStake(delegatorAddr, validatorAddr string, amount int64
 	// Set delegation
 	if amount > 0 {
 		delegator.DelegatedTo[validatorAddr] = amount
-		delegator.StakedAmount += amount // Update total staked amount
+
+		newStaked, err := math.SafeAdd(delegator.StakedAmount, amount)
+		if err != nil {
+			return fmt.Errorf("SetStake would overflow staked amount for %s: %v", delegatorAddr, err)
+		}
+		delegator.StakedAmount = newStaked
 	} else {
 		// Remove delegation if amount is 0
 		delete(delegator.DelegatedTo, validatorAddr)
@@ -2095,7 +2120,24 @@ func (ws *WorldState) LoadState() error {
 		if err := ws.accountManager.UpdateAccount(account); err != nil {
 			return fmt.Errorf("failed to restore account %s: %v", account.Address, err)
 		}
-		totalSupply += account.Balance + account.StakedAmount + account.Rewards
+
+		// account.Balance + account.StakedAmount
+		balPlusStake, err := math.SafeAdd(account.Balance, account.StakedAmount)
+		if err != nil {
+			return fmt.Errorf("account %s has invalid balance+stake overflow: %v", account.Address, err)
+		}
+
+		// (balance+stake) + rewards
+		accountTotal, err := math.SafeAdd(balPlusStake, account.Rewards)
+		if err != nil {
+			return fmt.Errorf("account %s has invalid total funds overflow: %v", account.Address, err)
+		}
+
+		// add into global totalSupply
+		totalSupply, err = math.SafeAdd(totalSupply, accountTotal)
+		if err != nil {
+			return fmt.Errorf("total supply overflow while summing accounts: %v", err)
+		}
 	}
 	ws.totalSupply = totalSupply
 
@@ -2487,19 +2529,25 @@ func (ws *WorldState) TransferAssetBalance(assetID, from, to string, amount int6
 		return fmt.Errorf("failed to get recipient balance: %v", err)
 	}
 
-	// Check for overflow
-	if toBalance > 0 && toBalance > (9223372036854775807-amount) {
-		return fmt.Errorf("transfer would cause balance overflow")
+	// SafeMath for balances
+	newFromBalance, err := math.SafeSub(fromBalance, amount)
+	if err != nil {
+		return fmt.Errorf("asset transfer would underflow sender balance: %v", err)
+	}
+
+	newToBalance, err := math.SafeAdd(toBalance, amount)
+	if err != nil {
+		return fmt.Errorf("asset transfer would overflow recipient balance: %v", err)
 	}
 
 	// Perform transfer
-	if err := ws.SetAssetBalance(assetID, from, fromBalance-amount); err != nil {
+	if err := ws.SetAssetBalance(assetID, from, newFromBalance); err != nil {
 		return fmt.Errorf("failed to update sender balance: %v", err)
 	}
 
-	if err := ws.SetAssetBalance(assetID, to, toBalance+amount); err != nil {
+	if err := ws.SetAssetBalance(assetID, to, newToBalance); err != nil {
 		// Rollback sender balance on failure
-		ws.SetAssetBalance(assetID, from, fromBalance)
+		_ = ws.SetAssetBalance(assetID, from, fromBalance)
 		return fmt.Errorf("failed to update recipient balance: %v", err)
 	}
 
@@ -2652,7 +2700,11 @@ func (ws *WorldState) GetAssetInfo(assetID string) (map[string]interface{}, erro
 	circulatingSupply := int64(0)
 	if ws.assetBalances != nil && ws.assetBalances[assetID] != nil {
 		for _, balance := range ws.assetBalances[assetID] {
-			circulatingSupply += balance
+			newSupply, err := math.SafeAdd(circulatingSupply, balance)
+			if err != nil {
+				return nil, fmt.Errorf("circulating supply overflow for asset %s: %v", assetID, err)
+			}
+			circulatingSupply = newSupply
 		}
 	}
 
@@ -2815,7 +2867,13 @@ func (ws *WorldState) GetAssetStatistics() map[string]interface{} {
 
 	for _, asset := range ws.assets {
 		assetTypes[asset.AssetType]++
-		totalSupply += asset.TotalSupply
+
+		newTotal, err := math.SafeAdd(totalSupply, asset.TotalSupply)
+		if err != nil {
+			fmt.Printf("⚠️ GetAssetStatistics: overflow while summing asset supply for %s: %v\n", asset.ID, err)
+			continue
+		}
+		totalSupply = newTotal
 
 		// Count holders for this asset
 		if ws.assetBalances != nil && ws.assetBalances[asset.ID] != nil {
@@ -2859,9 +2917,14 @@ func (ws *WorldState) ValidateAssetConsistency() error {
 					return fmt.Errorf("asset %s has negative balance for address %s: %d",
 						assetID, address, balance)
 				}
-				circulatingSupply += balance
 
-				// Validate address format
+				newSupply, err := math.SafeAdd(circulatingSupply, balance)
+				if err != nil {
+					return fmt.Errorf("asset %s circulating supply overflow while summing balances: %v",
+						assetID, err)
+				}
+				circulatingSupply = newSupply
+
 				if err := account.ValidateAddress(address); err != nil {
 					return fmt.Errorf("asset %s has invalid holder address %s: %v",
 						assetID, address, err)
