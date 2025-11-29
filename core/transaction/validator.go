@@ -200,6 +200,8 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, erro
 }
 
 // SignTransaction signs a transaction with Ed25519
+// SignTransaction signs a transaction with Ed25519
+// SignTransaction signs a transaction with Ed25519
 func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.PrivateKey) error {
 	if tx == nil {
 		return fmt.Errorf("transaction cannot be nil")
@@ -209,8 +211,27 @@ func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.Priv
 		return fmt.Errorf("private key cannot be nil")
 	}
 
+	// 🔹 Derive the public key from the private key
+	pubKey := privateKey.PublicKey() // ✅ this method exists on crypto.PrivateKey
+	if pubKey == nil {
+		return fmt.Errorf("failed to derive public key from private key")
+	}
+
+	// Derive address from the public key
+	derivedAddr, err := account.GenerateAddress(pubKey)
+	if err != nil {
+		return fmt.Errorf("failed to derive address from public key: %v", err)
+	}
+
+	// Normalize & sanity check that tx.From matches this key
+	if !strings.EqualFold(derivedAddr, tx.From) {
+		return fmt.Errorf("private key does not match tx.From (tx.From=%s, derived=%s)", tx.From, derivedAddr)
+	}
+
+	// 🔹 Store public key bytes into the transaction (so validators can reconstruct it)
+	tx.FromPubkey = pubKey.Bytes()
+
 	// Calculate the signable hash including chain ID and all context
-	// This must match what VerifyTransactionSignature uses
 	hashToSign, err := v.calculateSignableHash(tx)
 	if err != nil {
 		return fmt.Errorf("failed to calculate signable hash: %v", err)
@@ -237,13 +258,30 @@ func (v *Validator) SignTransactionWithReplayProtection(tx *core.Transaction, pr
 		return fmt.Errorf("private key cannot be nil")
 	}
 
+	// 🔹 Derive public key from private key
+	pubKey := privateKey.PublicKey()
+	if pubKey == nil {
+		return fmt.Errorf("failed to derive public key from private key")
+	}
+
+	derivedAddr, err := account.GenerateAddress(pubKey)
+	if err != nil {
+		return fmt.Errorf("failed to derive address from public key: %v", err)
+	}
+
+	if !strings.EqualFold(derivedAddr, tx.From) {
+		return fmt.Errorf("private key does not match tx.From (tx.From=%s, derived=%s)", tx.From, derivedAddr)
+	}
+
+	// 🔹 Store pubkey bytes on tx
+	tx.FromPubkey = pubKey.Bytes()
+
 	// Calculate the enhanced signable hash including finalized block
 	hashToSign, err := v.calculateSignableHashWithReplayProtection(tx, finalizedBlockHash)
 	if err != nil {
 		return fmt.Errorf("failed to calculate signable hash with replay protection: %v", err)
 	}
 
-	// Sign with Ed25519
 	signature := privateKey.Sign(hashToSign)
 	if signature == nil {
 		return fmt.Errorf("failed to sign transaction")
@@ -254,6 +292,30 @@ func (v *Validator) SignTransactionWithReplayProtection(tx *core.Transaction, pr
 
 	if finalizedBlockHash == "" {
 		v.metrics.TransactionsWithoutFinalized++
+	}
+
+	return nil
+}
+
+// validateSignature checks that the transaction is correctly signed by the sender.
+func (v *Validator) validateSignature(tx *core.Transaction) error {
+	// Basic presence checks
+	if len(tx.Signature) == 0 {
+		return fmt.Errorf("transaction signature cannot be empty")
+	}
+	if len(tx.FromPubkey) == 0 {
+		return fmt.Errorf("transaction from_pubkey cannot be empty")
+	}
+
+	// Recreate the public key from bytes
+	pubKey, err := crypto.NewPublicKeyFromBytes(tx.FromPubkey)
+	if err != nil {
+		return fmt.Errorf("invalid from_pubkey: %v", err)
+	}
+
+	// Delegate to existing verification logic (also checks address ↔ pubkey match)
+	if err := v.VerifyTransactionSignature(tx, pubKey); err != nil {
+		return err
 	}
 
 	return nil
@@ -510,6 +572,11 @@ func (v *Validator) ValidateTransaction(tx *core.Transaction, stateReader StateR
 		return fmt.Errorf("shard validation failed: %v", err)
 	}
 
+	// 🔐 NEW: Signature validation
+	if err := v.validateSignature(tx); err != nil {
+		return fmt.Errorf("signature validation failed: %v", err)
+	}
+
 	// Business logic validation
 	if err := v.validateBusinessLogic(tx, stateReader); err != nil {
 		return fmt.Errorf("business logic validation failed: %v", err)
@@ -689,6 +756,11 @@ func (v *Validator) validateNonce(txNonce, accountNonce uint64, address string) 
 // ValidateForMempool validates a transaction for mempool inclusion
 // This allows future nonces within a reasonable range for queued transactions
 func (v *Validator) ValidateForMempool(tx *core.Transaction, stateReader StateReader) error {
+	// First, ensure signature is valid
+	if err := v.validateSignature(tx); err != nil {
+		return fmt.Errorf("signature validation failed: %v", err)
+	}
+
 	// Get sender account
 	sender, err := stateReader.GetAccount(tx.From)
 	if err != nil {

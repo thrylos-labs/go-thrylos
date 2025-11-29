@@ -245,6 +245,7 @@ type Transaction struct {
 	Signature     []byte                 `protobuf:"bytes,10,opt,name=signature,proto3" json:"signature,omitempty"`
 	Hash          string                 `protobuf:"bytes,11,opt,name=hash,proto3" json:"hash,omitempty"`
 	Timestamp     int64                  `protobuf:"varint,12,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	FromPubkey    []byte                 `protobuf:"bytes,13,opt,name=from_pubkey,json=fromPubkey,proto3" json:"from_pubkey,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -361,6 +362,13 @@ func (x *Transaction) GetTimestamp() int64 {
 		return x.Timestamp
 	}
 	return 0
+}
+
+func (x *Transaction) GetFromPubkey() []byte {
+	if x != nil {
+		return x.FromPubkey
+	}
+	return nil
 }
 
 type Block struct {
@@ -804,7 +812,7 @@ const file_proto_account_proto_rawDesc = "" +
 	"\fstorage_root\x18\b \x01(\fR\vstorageRoot\x1a>\n" +
 	"\x10DelegatedToEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\xb5\x02\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\xd6\x02\n" +
 	"\vTransaction\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\tR\x04from\x12\x0e\n" +
@@ -818,7 +826,9 @@ const file_proto_account_proto_rawDesc = "" +
 	"\tsignature\x18\n" +
 	" \x01(\fR\tsignature\x12\x12\n" +
 	"\x04hash\x18\v \x01(\tR\x04hash\x12\x1c\n" +
-	"\ttimestamp\x18\f \x01(\x03R\ttimestamp\"\xab\x01\n" +
+	"\ttimestamp\x18\f \x01(\x03R\ttimestamp\x12\x1f\n" +
+	"\vfrom_pubkey\x18\r \x01(\fR\n" +
+	"fromPubkey\"\xab\x01\n" +
 	"\x05Block\x121\n" +
 	"\x06header\x18\x01 \x01(\v2\x19.thrylos.core.BlockHeaderR\x06header\x12=\n" +
 	"\ftransactions\x18\x02 \x03(\v2\x19.thrylos.core.TransactionR\ftransactions\x12\x12\n" +

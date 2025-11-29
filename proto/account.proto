@@ -1,4 +1,4 @@
-// protoc --go_out=. --go_opt=paths=source_relative proto/account.proto
+// protoc --go_out=. --go_opt=paths=source_relative proto/account.proto (remember to move into proto/core)
 
 syntax = "proto3";
 
@@ -18,19 +18,21 @@ message Account {
 }
 
 message Transaction {
-  string id = 1;
-  string from = 2;
-  string to = 3;
-  int64 amount = 4;
-  int64 gas = 5;
-  int64 gas_price = 6;
-  uint64 nonce = 7;
-  bytes data = 8;
+  string id           = 1;
+  string from         = 2;
+  string to           = 3;
+  int64  amount       = 4;
+  int64  gas          = 5;
+  int64  gas_price    = 6;
+  uint64 nonce        = 7;
+  bytes  data         = 8;
   TransactionType type = 9;
-  bytes signature = 10;
-  string hash = 11;
-  int64 timestamp = 12;
+  bytes  signature    = 10;
+  string hash         = 11;
+  int64  timestamp    = 12;
+  bytes  from_pubkey  = 13;
 }
+
 
 enum TransactionType {
   TRANSFER = 0;
