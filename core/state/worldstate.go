@@ -1026,6 +1026,7 @@ func NewCrossShardManager(worldState *WorldState) *CrossShardManager {
 }
 
 // InitiateTransfer initiates a cross-shard transfer
+// InitiateTransfer initiates a cross-shard transfer
 func (csm *CrossShardManager) InitiateTransfer(from, to string, amount int64, nonce uint64) (*CrossShardTransfer, error) {
 	csm.mu.Lock()
 	defer csm.mu.Unlock()
@@ -1089,13 +1090,12 @@ func (csm *CrossShardManager) InitiateTransfer(from, to string, amount int64, no
 	hash := blake2b.Sum256(buf)
 	transfer.Hash = fmt.Sprintf("%x", hash)
 
+	// Debit sender account (SafeMath)
 	newBalance, err := math.SafeSub(senderAccount.Balance, amount)
 	if err != nil {
 		return nil, fmt.Errorf("cross-shard debit would underflow sender balance: %v", err)
 	}
 	senderAccount.Balance = newBalance
-
-	// Nonce isn't money, so plain increment is fine
 	senderAccount.Nonce++
 
 	if err := csm.worldState.accountManager.UpdateAccount(senderAccount); err != nil {
@@ -1328,6 +1328,7 @@ func (ws *WorldState) GetStakingManager() *StakingManager {
 }
 
 // Delegate stakes tokens to a validator
+// Delegate stakes tokens to a validator
 func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount int64) error {
 	ws := sm.worldState
 	ws.mu.Lock()
@@ -1353,7 +1354,7 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	// Basic sanity check
+	// Basic sanity check (also protects SafeSub from obvious underflow)
 	if delegator.Balance < amount {
 		return fmt.Errorf("insufficient balance: have %d, need %d", delegator.Balance, amount)
 	}
@@ -1367,7 +1368,7 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		return fmt.Errorf("validator %s is not active", validatorAddr)
 	}
 
-	// ===== SafeMath updates =====
+	// ===== SafeMath calculations (no state mutations yet) =====
 
 	// delegator.Balance -= amount
 	newBalance, err := math.SafeSub(delegator.Balance, amount)
@@ -1438,7 +1439,6 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		return fmt.Errorf("failed to update delegator account: %v", err)
 	}
 
-	// Note: validator is kept in-memory; if you have UpdateValidatorWithStorage use that instead
 	if err := ws.UpdateValidator(validator); err != nil {
 		return fmt.Errorf("failed to update validator: %v", err)
 	}
@@ -1446,6 +1446,7 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 	return nil
 }
 
+// Undelegate unstakes tokens from a validator
 // Undelegate unstakes tokens from a validator
 func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount int64) error {
 	ws := sm.worldState
@@ -1481,7 +1482,7 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return fmt.Errorf("validator %s not found", validatorAddr)
 	}
 
-	// ===== SafeMath updates =====
+	// ===== SafeMath calculations (no state mutations yet) =====
 
 	// delegator.StakedAmount -= amount
 	newStakedAmount, err := math.SafeSub(delegator.StakedAmount, amount)
@@ -1520,7 +1521,7 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return fmt.Errorf("undelegation would underflow total staked: %v", err)
 	}
 
-	// delegator.Balance += amount (instant unbonding in this implementation)
+	// delegator.Balance += amount (instant unbonding)
 	newBalance, err := math.SafeAdd(delegator.Balance, amount)
 	if err != nil {
 		return fmt.Errorf("undelegation would overflow delegator balance: %v", err)
@@ -2509,6 +2510,7 @@ func (ws *WorldState) GetAssetBalance(assetID, address string) (int64, error) {
 }
 
 // TransferAssetBalance transfers asset tokens between addresses
+// TransferAssetBalance transfers asset tokens between addresses
 func (ws *WorldState) TransferAssetBalance(assetID, from, to string, amount int64) error {
 	if amount <= 0 {
 		return fmt.Errorf("transfer amount must be positive")
@@ -2529,7 +2531,7 @@ func (ws *WorldState) TransferAssetBalance(assetID, from, to string, amount int6
 		return fmt.Errorf("failed to get recipient balance: %v", err)
 	}
 
-	// SafeMath for balances
+	// SafeMath versions of fromBalance-amount and toBalance+amount
 	newFromBalance, err := math.SafeSub(fromBalance, amount)
 	if err != nil {
 		return fmt.Errorf("asset transfer would underflow sender balance: %v", err)
@@ -2540,13 +2542,13 @@ func (ws *WorldState) TransferAssetBalance(assetID, from, to string, amount int6
 		return fmt.Errorf("asset transfer would overflow recipient balance: %v", err)
 	}
 
-	// Perform transfer
+	// Perform transfer (commit)
 	if err := ws.SetAssetBalance(assetID, from, newFromBalance); err != nil {
 		return fmt.Errorf("failed to update sender balance: %v", err)
 	}
 
 	if err := ws.SetAssetBalance(assetID, to, newToBalance); err != nil {
-		// Rollback sender balance on failure
+		// Best-effort rollback on failure
 		_ = ws.SetAssetBalance(assetID, from, fromBalance)
 		return fmt.Errorf("failed to update recipient balance: %v", err)
 	}
