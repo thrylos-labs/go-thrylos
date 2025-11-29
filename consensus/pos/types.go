@@ -108,6 +108,9 @@ type ConsensusEngine struct {
 	evidenceTracker *EvidenceTracker
 
 	validatorActivity map[string]*ValidatorActivity
+
+	// Time synchronization and drift monitoring
+	timeValidator *TimeValidator
 }
 
 // ForkChoice implements fork choice with memory management

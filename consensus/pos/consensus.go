@@ -107,6 +107,10 @@ func NewConsensusEngine(
 	log.Println("✅ Slashing evidence tracker initialized")
 	// ============================================================================
 
+	// Initialize time validator for timestamp validation and drift monitoring
+	engine.timeValidator = NewTimeValidator()
+	log.Println("✅ Time drift monitoring initialized")
+
 	return engine
 }
 
@@ -119,6 +123,11 @@ func (ce *ConsensusEngine) Start() error {
 	if err := ce.initializeValidatorSet(); err != nil {
 		return fmt.Errorf("failed to initialize validator set: %v", err)
 	}
+
+	// Start time drift monitoring (critical for preventing time manipulation attacks)
+	stopChan := make(chan struct{})
+	go ce.timeValidator.StartDriftMonitoring(stopChan)
+	log.Println("✅ Time drift monitoring started")
 
 	// Start consensus loop
 	go ce.consensusLoop()
@@ -755,6 +764,10 @@ func (ce *ConsensusEngine) GetStats() map[string]interface{} {
 		stats["finalized_stake_percentage"] = float64(finalized.AttestingStake) / float64(finalized.TotalStake) * 100
 	}
 
+	// Add time synchronization status
+	stats["time_sync"] = ce.timeValidator.GetTimeDriftStatus()
+	stats["time_sync_healthy"] = ce.timeValidator.IsTimeSyncHealthy()
+
 	return stats
 }
 
@@ -843,23 +856,25 @@ func (bv *BlockValidator) validateBlockStructure(block *core.Block) error {
 			len(block.Transactions), cfg.MaxTxPerBlock)
 	}
 
-	// CHANGED: Use Config values for Timestamp Validation
-	currentTime := time.Now().Unix()
-
-	// 1. Future Check
-	if block.Header.Timestamp > currentTime+int64(cfg.MaxFutureBlockTime.Seconds()) {
-		return fmt.Errorf("block timestamp %d too far in future (max drift: %s)",
-			block.Header.Timestamp, cfg.MaxFutureBlockTime)
+	// Enhanced timestamp validation with time drift protection
+	var previousBlockTimestamp int64
+	currentBlock := bv.consensusEngine.worldState.GetCurrentBlock()
+	if currentBlock != nil {
+		previousBlockTimestamp = currentBlock.Header.Timestamp
 	}
 
-	// 2. Past Check
-	if block.Header.Timestamp < currentTime-int64(cfg.MaxPastBlockTime.Seconds()) {
-		return fmt.Errorf("block timestamp %d too old (max age: %s)",
-			block.Header.Timestamp, cfg.MaxPastBlockTime)
+	// Use TimeValidator for comprehensive timestamp validation
+	err := bv.consensusEngine.timeValidator.ValidateBlockTimestamp(
+		block.Header.Timestamp,
+		previousBlockTimestamp,
+		cfg.MaxFutureBlockTime,
+		cfg.MaxPastBlockTime,
+	)
+	if err != nil {
+		return fmt.Errorf("block timestamp validation failed: %v", err)
 	}
 
 	// Validate chain continuity (Previous Block Check)
-	currentBlock := bv.consensusEngine.worldState.GetCurrentBlock()
 	if currentBlock != nil {
 		if block.Header.Index != currentBlock.Header.Index+1 {
 			return fmt.Errorf("invalid block index: expected %d, got %d",
@@ -868,11 +883,6 @@ func (bv *BlockValidator) validateBlockStructure(block *core.Block) error {
 
 		if block.Header.PrevHash != currentBlock.Hash {
 			return fmt.Errorf("invalid previous hash")
-		}
-
-		// 3. Monotonic Time Check
-		if block.Header.Timestamp <= currentBlock.Header.Timestamp {
-			return fmt.Errorf("block timestamp must be strictly greater than previous block")
 		}
 	}
 
