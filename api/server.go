@@ -183,7 +183,12 @@ func (s *Server) setupRoutes() {
 	// ========== STRICT RATE LIMITING (1 req/sec) ==========
 	strict := api.PathPrefix("").Subrouter()
 	strict.Use(s.RateLimitMiddleware("strict"))
-	strict.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
+
+	// Only expose /fund in dev/testnet
+	if isDevEnvironment() {
+		strict.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
+	}
+
 	strict.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
 
 	// ========== STANDARD RATE LIMITING (10 req/sec) ==========
@@ -669,17 +674,15 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 func isDevEnvironment() bool {
 	env := os.Getenv("THRYLOS_ENVIRONMENT")
 
-	// Allow in: development, devnet, testnet
-	// Block in: production, mainnet
 	switch env {
 	case "development", "dev", "devnet", "testnet", "test":
 		return true
 	case "production", "prod", "mainnet":
 		return false
 	default:
-		// Default to development for safety during testing
-		// In production, explicitly set THRYLOS_ENVIRONMENT=production
-		return true
+		// Safer default: treat unknown/empty as production
+		log.Printf("WARNING: THRYLOS_ENVIRONMENT=%q (unknown); treating as PRODUCTION (faucet disabled)", env)
+		return false
 	}
 }
 
