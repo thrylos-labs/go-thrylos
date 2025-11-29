@@ -139,6 +139,13 @@ type P2PConfig struct {
 	MaxPeers       int      `json:"max_peers" yaml:"max_peers"`
 	EnableMDNS     bool     `json:"enable_mdns" yaml:"enable_mdns"`
 	EnableDHT      bool     `json:"enable_dht" yaml:"enable_dht"`
+	// Message validation
+	MaxMessageSize     int64         `json:"max_message_size" yaml:"max_message_size"`         // 10MB default
+	MaxBlockRangeSize  int           `json:"max_block_range_size" yaml:"max_block_range_size"` // 100 blocks
+	StreamReadTimeout  time.Duration `json:"stream_read_timeout" yaml:"stream_read_timeout"`   // 30s
+	StreamWriteTimeout time.Duration `json:"stream_write_timeout" yaml:"stream_write_timeout"` // 30s
+	RequestRateLimit   int           `json:"request_rate_limit" yaml:"request_rate_limit"`     // requests/min per peer
+	MaxPendingRequests int           `json:"max_pending_requests" yaml:"max_pending_requests"` // 100 per peer
 }
 
 type NetworkConfig struct {
@@ -404,12 +411,18 @@ func Load() (*Config, error) {
 		// },
 
 		P2P: P2PConfig{
-			Enabled:        true,
-			ListenPort:     9000,
-			BootstrapPeers: []string{},
-			MaxPeers:       50,
-			EnableMDNS:     false, // Change to false for production
-			EnableDHT:      true,
+			Enabled:            true,
+			ListenPort:         9000,
+			BootstrapPeers:     []string{},
+			MaxPeers:           50,
+			EnableMDNS:         false, // Change to false for production
+			EnableDHT:          true,
+			MaxMessageSize:     10 * 1024 * 1024, // 10MB
+			MaxBlockRangeSize:  100,              // 100 blocks
+			StreamReadTimeout:  30 * time.Second,
+			StreamWriteTimeout: 30 * time.Second,
+			RequestRateLimit:   60,  // 60 req/min
+			MaxPendingRequests: 100, // 100 pending
 		},
 	}, nil
 }

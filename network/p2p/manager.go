@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -202,6 +203,8 @@ type Manager struct {
 
 	// Synchronization
 	mu sync.RWMutex
+
+	validator *MessageValidator
 }
 
 // ConnectionState tracks the state of peer connections
@@ -216,6 +219,13 @@ type ConnectionState struct {
 type Config struct {
 	ListenPort     int
 	BootstrapPeers []string
+	EnableMDNS     bool
+
+	// CRITICAL-4: Message validation config
+	MaxMessageSize     int64         // 10MB default
+	MaxBlockRangeSize  int           // 100 blocks default
+	StreamReadTimeout  time.Duration // 30s default
+	StreamWriteTimeout time.Duration // 30s default
 }
 
 // NewManager initializes a new libp2p manager for Thrylos
@@ -269,6 +279,29 @@ func NewManager(config *Config) (*Manager, error) {
 		return nil, fmt.Errorf("failed to bootstrap DHT: %w", err)
 	}
 
+	// CRITICAL-4: Initialize message validator with safe defaults
+	maxMessageSize := int64(10 * 1024 * 1024) // 10MB
+	if config.MaxMessageSize > 0 {
+		maxMessageSize = config.MaxMessageSize
+	}
+
+	maxBlockRange := 100
+	if config.MaxBlockRangeSize > 0 {
+		maxBlockRange = config.MaxBlockRangeSize
+	}
+
+	readTimeout := 30 * time.Second
+	if config.StreamReadTimeout > 0 {
+		readTimeout = config.StreamReadTimeout
+	}
+
+	writeTimeout := 30 * time.Second
+	if config.StreamWriteTimeout > 0 {
+		writeTimeout = config.StreamWriteTimeout
+	}
+
+	validator := NewMessageValidator(maxMessageSize, maxBlockRange, readTimeout, writeTimeout)
+
 	manager := &Manager{
 		Host:                h,
 		Ctx:                 ctx,
@@ -283,6 +316,7 @@ func NewManager(config *Config) (*Manager, error) {
 		rateLimiter:         rate.NewLimiter(rate.Limit(100), 200), // 100 msgs/sec with burst of 200
 		connectionStates:    make(map[peer.ID]*ConnectionState),
 		metrics:             &NetworkMetrics{},
+		validator:           validator, // ADD THIS LINE
 	}
 
 	return manager, nil
@@ -802,27 +836,39 @@ func (m *Manager) SetEventHandlers(
 // handleBlockRangeRequest handles incoming block range requests
 func (m *Manager) handleBlockRangeRequest(s network.Stream) {
 	defer s.Close()
-	stdlog.Printf("Received block range request from %s", s.Conn().RemotePeer().String())
 
-	reader := NewJSONStreamReader(s)
+	peerID := s.Conn().RemotePeer() // GET peerID at the top
+	stdlog.Printf("Received block range request from %s", peerID.String())
+
+	// CRITICAL-4: Rate limit check
+	if err := m.validator.CheckRateLimit(peerID); err != nil {
+		stdlog.Printf("⚠️  Rate limit exceeded for peer %s: %v", peerID, err)
+		return
+	}
+	defer m.validator.ReleaseRequest(peerID)
+
+	// CRITICAL-4: Validate stream and limit message size
+	limitedReader, err := m.validator.ValidateStream(s)
+	if err != nil {
+		stdlog.Printf("⚠️  Stream validation failed: %v", err)
+		return
+	}
+
+	reader := NewJSONStreamReader(limitedReader)
 	writer := NewJSONStreamWriter(s)
 
 	// Read request
 	var request BlockRangeRequest
 	if err := reader.ReadJSON(&request); err != nil {
-		stdlog.Printf("Error reading block range request: %v", err)
+		stdlog.Printf("⚠️  Error reading block range request from %s: %v", peerID, err)
 		writer.WriteJSON(&BlockRangeResponse{Error: "invalid request"})
 		return
 	}
 
-	// Validate request
-	if request.StartHeight > request.EndHeight {
-		writer.WriteJSON(&BlockRangeResponse{Error: "invalid height range"})
-		return
-	}
-
-	if request.EndHeight-request.StartHeight > 100 { // Limit to 100 blocks
-		writer.WriteJSON(&BlockRangeResponse{Error: "range too large"})
+	// CRITICAL-4: Validate request parameters BEFORE processing
+	if err := m.validator.ValidateBlockRangeRequest(request.StartHeight, request.EndHeight); err != nil {
+		stdlog.Printf("⚠️  Invalid block range from %s: %v", peerID, err)
+		writer.WriteJSON(&BlockRangeResponse{Error: err.Error()})
 		return
 	}
 
@@ -854,22 +900,35 @@ func (m *Manager) handleBlockRangeRequest(s network.Stream) {
 		return
 	}
 
-	stdlog.Printf("Sent %d blocks to peer %s", len(blocks), s.Conn().RemotePeer().String())
+	stdlog.Printf("Sent %d blocks to peer %s", len(blocks), peerID.String())
 }
 
 // handleHeightRequest handles incoming height requests
 func (m *Manager) handleHeightRequest(s network.Stream) {
 	defer s.Close()
-	stdlog.Printf("Received height request from %s", s.Conn().RemotePeer().String())
 
-	reader := NewJSONStreamReader(s)
+	peerID := s.Conn().RemotePeer()
+
+	// CRITICAL-4: Rate limit check
+	if err := m.validator.CheckRateLimit(peerID); err != nil {
+		log.Printf("⚠️  Rate limit exceeded for peer %s: %v", peerID, err)
+		return
+	}
+	defer m.validator.ReleaseRequest(peerID)
+
+	// CRITICAL-4: Validate stream
+	limitedReader, err := m.validator.ValidateStream(s)
+	if err != nil {
+		log.Printf("⚠️  Stream validation failed: %v", err)
+		return
+	}
+
+	reader := NewJSONStreamReader(limitedReader)
 	writer := NewJSONStreamWriter(s)
 
-	// Read request (empty request)
 	var request HeightRequest
 	if err := reader.ReadJSON(&request); err != nil {
-		stdlog.Printf("Error reading height request: %v", err)
-		writer.WriteJSON(&HeightResponse{Error: "invalid request"})
+		log.Printf("⚠️  Invalid height request from %s: %v", peerID, err)
 		return
 	}
 
@@ -907,16 +966,30 @@ func (m *Manager) handleHeightRequest(s network.Stream) {
 // handleStateSnapshotRequest handles incoming state snapshot requests
 func (m *Manager) handleStateSnapshotRequest(s network.Stream) {
 	defer s.Close()
-	stdlog.Printf("Received state snapshot request from %s", s.Conn().RemotePeer().String())
 
-	reader := NewJSONStreamReader(s)
+	peerID := s.Conn().RemotePeer()
+
+	// CRITICAL-4: Rate limit check
+	if err := m.validator.CheckRateLimit(peerID); err != nil {
+		log.Printf("⚠️  Rate limit exceeded for peer %s: %v", peerID, err)
+		return
+	}
+	defer m.validator.ReleaseRequest(peerID)
+
+	// CRITICAL-4: Validate stream
+	limitedReader, err := m.validator.ValidateStream(s)
+	if err != nil {
+		log.Printf("⚠️  Stream validation failed: %v", err)
+		return
+	}
+
+	reader := NewJSONStreamReader(limitedReader)
 	writer := NewJSONStreamWriter(s)
 
-	// Read request
 	var request StateSnapshotRequest
 	if err := reader.ReadJSON(&request); err != nil {
-		stdlog.Printf("Error reading state snapshot request: %v", err)
-		writer.WriteJSON(&StateSnapshotResponse{Error: "invalid request"})
+		log.Printf("⚠️  Invalid state snapshot request from %s: %v", peerID, err)
+		writer.WriteJSON(&StateSnapshotResponse{Error: "invalid request format"})
 		return
 	}
 
@@ -950,4 +1023,9 @@ func (m *Manager) handleStateSnapshotRequest(s network.Stream) {
 
 	stdlog.Printf("Sent state snapshot at height %d to peer %s",
 		snapshot.Height, s.Conn().RemotePeer().String())
+}
+
+// GetValidationMetrics returns P2P message validation metrics
+func (m *Manager) GetValidationMetrics() map[string]interface{} {
+	return m.validator.GetMetrics()
 }
