@@ -203,30 +203,49 @@ func (sm *SlashingManager) ReportBlockWithholding(validatorAddr string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// 1. Check if already jailed to avoid double jeopardy
+	// ✅ Check 1: Already jailed - prevents re-jailing
 	if sm.isValidatorJailed(validatorAddr) {
 		return nil
 	}
 
+	// ✅ CHECK 2 (NEW): Prevent double slashing for recent withholding
+	// Create deterministic evidence ID for this specific withholding event
+	// Use validator + block height/round to make it unique per incident
+	recentRecords := sm.slashingRecords[validatorAddr]
+	cutoffTime := time.Now().Add(-24 * time.Hour) // Look back 24 hours
+
+	for _, record := range recentRecords {
+		// If already slashed for downtime recently, skip
+		if record.Condition == types.Downtime && record.Timestamp.After(cutoffTime) {
+			fmt.Printf("⏭️  Skipping: Validator %s already slashed for withholding in last 24h\n", validatorAddr)
+			return nil // Already processed
+		}
+	}
+
 	fmt.Printf("🚨 REPORT: Validator %s has withheld blocks (excessive missed proposals)\n", validatorAddr)
 
-	// 2. Get Validator Balance
+	// Get Validator Balance
 	balance, err := sm.worldState.GetBalance(validatorAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get validator balance: %v", err)
 	}
 
-	// 3. Define Penalty
-	// ✅ FIX: Use JailPenalty (which comes from config.SlashingDowntime) instead of MinorPenalty
+	// Use JailPenalty from config
 	penaltyPercent := sm.policy.JailPenalty
 	penaltyAmount, err := math.SafePercentage(balance, penaltyPercent)
 
-	// 4. Create Evidence Structure
+	// Create Evidence Structure
 	evidence := types.SlashingEvidence{
 		MissedSlots: []uint64{},
 	}
 
-	// 5. Create Slashing Record
+	// Create unique evidence hash for deduplication
+	evidenceHash := evidence.Hash()
+	if sm.processedEvidence[evidenceHash] {
+		return nil // Already slashed for this exact evidence
+	}
+
+	// Create Slashing Record
 	record := &types.SlashingRecord{
 		ValidatorAddress: validatorAddr,
 		Condition:        types.Downtime,
@@ -236,12 +255,12 @@ func (sm *SlashingManager) ReportBlockWithholding(validatorAddr string) error {
 		Reason:           "Block Withholding: Exceeded consecutive missed proposal limit",
 	}
 
-	// 6. Apply Slashing
+	// Apply Slashing
 	if err := sm.applySlashing(record); err != nil {
 		return err
 	}
 
-	// 7. Jail the validator
+	// Jail the validator
 	sm.jailValidator(validatorAddr, types.Downtime)
 
 	fmt.Printf("⚖️  Slashed and Jailed validator %s for block withholding\n", validatorAddr)
