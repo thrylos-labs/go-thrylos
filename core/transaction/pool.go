@@ -27,6 +27,9 @@ type Pool struct {
 	byAddress map[string]map[uint64]*core.Transaction // address -> nonce -> tx
 	byHash    map[string]*core.Transaction            // hash -> tx for quick lookup
 
+	// Maps address -> {nonce -> true} for nonces in flight
+	nonceReservations map[string]map[uint64]bool
+
 	// Dependencies
 	accountManager *account.AccountManager
 
@@ -58,14 +61,15 @@ type PoolStats struct {
 // NewPool creates a new transaction pool for a shard
 func NewPool(shardID account.ShardID, totalShards int, maxTxs int, minGasPrice int64, am *account.AccountManager) *Pool {
 	return &Pool{
-		pending:        make(map[string]*TransactionEntry), // Updated type
-		byAddress:      make(map[string]map[uint64]*core.Transaction),
-		byHash:         make(map[string]*core.Transaction),
-		accountManager: am,
-		shardID:        shardID,
-		totalShards:    totalShards,
-		maxTxs:         maxTxs,
-		minGasPrice:    minGasPrice,
+		pending:           make(map[string]*TransactionEntry),
+		byAddress:         make(map[string]map[uint64]*core.Transaction),
+		byHash:            make(map[string]*core.Transaction),
+		nonceReservations: make(map[string]map[uint64]bool),
+		accountManager:    am,
+		shardID:           shardID,
+		totalShards:       totalShards,
+		maxTxs:            maxTxs,
+		minGasPrice:       minGasPrice,
 	}
 }
 
@@ -86,11 +90,22 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 		return fmt.Errorf("transaction with hash %s already exists in pool", tx.Hash)
 	}
 
+	// 🔴 FIX-2: Initialize sender nonce reservation map if needed
+	if _, exists := p.nonceReservations[tx.From]; !exists {
+		p.nonceReservations[tx.From] = make(map[uint64]bool)
+	}
+
 	// 2. Initialize sender map if needed
 	senderTxs, exists := p.byAddress[tx.From]
 	if !exists {
 		senderTxs = make(map[uint64]*core.Transaction)
 		p.byAddress[tx.From] = senderTxs
+	}
+
+	// 🔴 FIX-3: Check for nonce collision BEFORE Replace-by-Fee logic
+	// This prevents race where two concurrent requests get same nonce
+	if p.nonceReservations[tx.From][tx.Nonce] {
+		return fmt.Errorf("nonce %d is reserved for address %s (concurrent request in progress)", tx.Nonce, tx.From)
 	}
 
 	// 3. Check for Duplicate Nonce (Replace-by-Fee logic)
@@ -114,8 +129,16 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 		}
 	}
 
+	// 🔴 FIX-4: Reserve nonce BEFORE adding to pool to atomically prevent race
+	p.nonceReservations[tx.From][tx.Nonce] = true
+	defer func() {
+		// Clean up reservation if we bail out after this point
+		if len(p.pending) == 0 || p.pending[tx.Id] == nil {
+			delete(p.nonceReservations[tx.From], tx.Nonce)
+		}
+	}()
+
 	// 6. Add to all indices
-	// CHANGED: Wrap transaction in TransactionEntry
 	p.pending[tx.Id] = &TransactionEntry{
 		Transaction: tx,
 		ReceivedAt:  time.Now(),
@@ -139,20 +162,49 @@ func (p *Pool) CleanupExpired() {
 
 	now := time.Now()
 	expiredCount := 0
+	orphanedCount := 0
 
-	// Iterate over pending transactions
+	// 🔴 FIX-8a: Iterate over a snapshot to avoid modifying map during iteration
+	var entriesToRemove []*core.Transaction
 	for _, entry := range p.pending {
 		if now.Sub(entry.ReceivedAt) > config.TransactionPoolTTL {
-			// We use removeInternal to ensure indices (byHash, byAddress) are also cleared
-			p.removeInternal(entry.Transaction)
-			expiredCount++
-			log.Printf("Removed expired transaction: %s (Age: %v)",
-				entry.Transaction.Id, now.Sub(entry.ReceivedAt))
+			entriesToRemove = append(entriesToRemove, entry.Transaction)
+		}
+	}
+
+	// Remove expired transactions
+	for _, tx := range entriesToRemove {
+		p.removeInternal(tx) // This also cleans up nonce reservations (FIX-6)
+		expiredCount++
+		log.Printf("Removed expired transaction: %s (Age: %v)",
+			tx.Id, now.Sub(time.Unix(0, 0).Add(time.Duration(tx.Timestamp)*time.Second)))
+	}
+
+	// 🔴 FIX-8b: Clean up orphaned reservations (reserved but not in pool)
+	// This handles edge case where reservation succeeds but AddTransaction fails mid-process
+	for address := range p.nonceReservations {
+		for nonce := range p.nonceReservations[address] {
+			// Check if this reserved nonce is actually in the pool
+			senderTxs, exists := p.byAddress[address]
+			txExists := exists && senderTxs[nonce] != nil
+
+			if !txExists {
+				// Reserved nonce is orphaned - check if it's stale
+				// If we can't determine age, assume it's orphaned after max age
+				delete(p.nonceReservations[address], nonce)
+				orphanedCount++
+				log.Printf("⚠️  Cleaned up orphaned nonce %d for address %s", nonce, address)
+			}
+		}
+
+		// Clean up empty address reservation maps
+		if len(p.nonceReservations[address]) == 0 {
+			delete(p.nonceReservations, address)
 		}
 	}
 
 	if expiredCount > 0 {
-		log.Printf("CleanupExpired: Removed %d stale transactions", expiredCount)
+		log.Printf("CleanupExpired: Removed %d stale transactions, %d orphaned reservations", expiredCount, orphanedCount)
 	}
 }
 
@@ -198,6 +250,14 @@ func (p *Pool) removeInternal(tx *core.Transaction) {
 			delete(p.byAddress, tx.From)
 		}
 	}
+
+	if reservations, exists := p.nonceReservations[tx.From]; exists {
+		delete(reservations, tx.Nonce)
+		if len(reservations) == 0 {
+			delete(p.nonceReservations, tx.From)
+		}
+	}
+
 	p.totalRemoved++
 }
 
@@ -539,11 +599,27 @@ func (p *Pool) GetNextNonce(address string, currentNonce uint64) uint64 {
 
 	senderTxs, exists := p.byAddress[address]
 	if !exists {
+		// Check reservations even if no transactions yet
+		reservations := p.nonceReservations[address]
+		for nonce := range reservations {
+			if nonce == currentNonce {
+				return currentNonce + 1 // Skip reserved nonce
+			}
+		}
 		return currentNonce
 	}
 
 	highestNonce := currentNonce - 1
+
+	// Check both pending transactions and reservations
 	for nonce := range senderTxs {
+		if nonce > highestNonce {
+			highestNonce = nonce
+		}
+	}
+
+	reservations := p.nonceReservations[address]
+	for nonce := range reservations {
 		if nonce > highestNonce {
 			highestNonce = nonce
 		}
