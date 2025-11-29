@@ -20,6 +20,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -672,16 +673,20 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 // isDevEnvironment checks if we're running in a development environment
 // Ethereum/Solana approach: environment-based, not authentication-based
 func isDevEnvironment() bool {
-	env := os.Getenv("THRYLOS_ENVIRONMENT")
+	env := strings.ToLower(os.Getenv("THRYLOS_ENVIRONMENT"))
 
 	switch env {
 	case "development", "dev", "devnet", "testnet", "test":
 		return true
 	case "production", "prod", "mainnet":
 		return false
+	case "":
+		// No env set: BE SAFE, not permissive
+		log.Println("⚠️  THRYLOS_ENVIRONMENT is not set, assuming PRODUCTION (dev-only features disabled)")
+		return false
 	default:
-		// Safer default: treat unknown/empty as production
-		log.Printf("WARNING: THRYLOS_ENVIRONMENT=%q (unknown); treating as PRODUCTION (faucet disabled)", env)
+		// Unknown environment string: also be safe
+		log.Printf("⚠️  Unknown THRYLOS_ENVIRONMENT=%q, assuming PRODUCTION (dev-only features disabled)\n", env)
 		return false
 	}
 }

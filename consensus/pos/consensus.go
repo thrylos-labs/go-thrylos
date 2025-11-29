@@ -282,7 +282,12 @@ func (ce *ConsensusEngine) proposeBlock() error {
 		return fmt.Errorf("failed to create block: %v", err)
 	}
 
-	// Validate our own block
+	// 🔐 NEW: sign the block with this validator's key
+	if err := ce.signBlock(result.Block); err != nil {
+		return fmt.Errorf("failed to sign block: %v", err)
+	}
+
+	// Validate our own block (now includes signature checks, see below)
 	if err := ce.blockValidator.ValidateBlock(result.Block); err != nil {
 		return fmt.Errorf("block validation failed: %v", err)
 	}
@@ -292,32 +297,21 @@ func (ce *ConsensusEngine) proposeBlock() error {
 		return fmt.Errorf("failed to add block to world state: %v", err)
 	}
 
-	// ============================================================================
-	// CHANGED SECTION - Sign the proposal before broadcasting
-	// ============================================================================
-
-	// Create the block proposal
+	// --- existing proposal-signing + broadcast logic stays as-is ---
 	proposal := &BlockProposal{
 		Block:     result.Block,
 		Proposer:  ce.nodeAddress,
 		Slot:      ce.currentSlot,
 		Epoch:     ce.currentEpoch,
-		Signature: nil, // Will be set by signBlockProposal
+		Signature: nil,
 	}
 
-	// Sign the proposal
 	if err := ce.signBlockProposal(proposal); err != nil {
 		return fmt.Errorf("failed to sign block proposal: %v", err)
 	}
 
-	// Broadcast block with signature
 	ce.broadcastChan <- proposal
 
-	// ============================================================================
-	// END CHANGED SECTION
-	// ============================================================================
-
-	// Log block construction metrics
 	fmt.Printf("Proposed block %s by validator %s with %d txs, gas: %d, fees: %d, construction time: %v, score: %.2f\n",
 		result.Block.Hash,
 		result.Block.Header.Validator,
@@ -566,6 +560,61 @@ func (ce *ConsensusEngine) updateForkChoice() {
 				head[:8], quorumPercentage)
 		}
 	}
+}
+
+// computeBlockSigningHash creates the hash that validators sign / verify for a block.
+func (ce *ConsensusEngine) computeBlockSigningHash(block *core.Block) ([]byte, error) {
+	if block == nil || block.Header == nil {
+		return nil, fmt.Errorf("block or header cannot be nil")
+	}
+	if block.Hash == "" {
+		return nil, fmt.Errorf("block hash must be set before signing")
+	}
+
+	// Domain separation + chain binding
+	data := fmt.Sprintf(
+		"%s|block-v1|%s|%d",
+		ce.config.Network.ChainID, // e.g. "thrylos-testnet-1"
+		block.Hash,
+		block.Header.Index,
+	)
+
+	h := blake2b.Sum256([]byte(data))
+	return h[:], nil
+}
+
+// signBlock signs the block with this node's validator key.
+func (ce *ConsensusEngine) signBlock(block *core.Block) error {
+	if block == nil || block.Header == nil {
+		return fmt.Errorf("block or header cannot be nil")
+	}
+
+	// Safety: make sure hash is what we expect
+	expectedHash := ce.blockProposer.calculateBlockHash(block)
+	if block.Hash != expectedHash {
+		return fmt.Errorf("cannot sign block: hash mismatch (got %s, expected %s)",
+			block.Hash, expectedHash)
+	}
+
+	// Safety: this node must actually be the proposer in the header
+	if block.Header.Validator != ce.nodeAddress {
+		return fmt.Errorf("cannot sign block: header.Validator=%s, node=%s",
+			block.Header.Validator, ce.nodeAddress)
+	}
+
+	msg, err := ce.computeBlockSigningHash(block)
+	if err != nil {
+		return err
+	}
+
+	sig := ce.nodePrivateKey.Sign(msg)
+	if sig == nil {
+		return fmt.Errorf("failed to sign block: signature is nil")
+	}
+
+	// Assumes core.Block has `Signature []byte`
+	block.Signature = sig.Bytes()
+	return nil
 }
 
 // signAttestation signs an attestation with the node's private key
@@ -827,6 +876,11 @@ func (bv *BlockValidator) ValidateBlock(block *core.Block) error {
 		return fmt.Errorf("block hash validation failed: %v", err)
 	}
 
+	// 🔐 NEW: validate block signature
+	if err := bv.validateBlockSignature(block); err != nil {
+		return fmt.Errorf("block signature validation failed: %v", err)
+	}
+
 	// Validate transactions
 	if err := bv.validateBlockTransactions(block); err != nil {
 		return fmt.Errorf("block transactions validation failed: %v", err)
@@ -840,6 +894,71 @@ func (bv *BlockValidator) ValidateBlock(block *core.Block) error {
 	// Validate proposer
 	if err := bv.validateProposer(block); err != nil {
 		return fmt.Errorf("proposer validation failed: %v", err)
+	}
+
+	return nil
+}
+
+func (bv *BlockValidator) validateBlockSignature(block *core.Block) error {
+	// Skip genesis – it’s unsigned and created by InitializeFromConfig
+	if block.Header.Index == 0 {
+		return nil
+	}
+
+	if len(block.Signature) == 0 {
+		return fmt.Errorf("block signature cannot be empty")
+	}
+
+	valAddr := block.Header.Validator
+	if valAddr == "" {
+		return fmt.Errorf("block header has empty validator address")
+	}
+
+	// Look up validator in world state
+	validator, err := bv.consensusEngine.worldState.GetValidator(valAddr)
+	if err != nil {
+		return fmt.Errorf("failed to load validator %s: %v", valAddr, err)
+	}
+
+	if !validator.Active {
+		return fmt.Errorf("validator %s is not active", valAddr)
+	}
+	if validator.JailUntil > time.Now().Unix() {
+		return fmt.Errorf("validator %s is jailed until %d", valAddr, validator.JailUntil)
+	}
+
+	if len(validator.Pubkey) == 0 {
+		return fmt.Errorf("validator %s has empty pubkey", valAddr)
+	}
+
+	// Rebuild public key from bytes
+	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
+	if err != nil {
+		return fmt.Errorf("invalid validator pubkey for %s: %v", valAddr, err)
+	}
+
+	// Extra safety: pubkey → address must match header.Validator
+	derivedAddr, err := account.GenerateAddress(pubKey)
+	if err != nil {
+		return fmt.Errorf("failed to derive address from validator pubkey: %v", err)
+	}
+	if derivedAddr != valAddr {
+		return fmt.Errorf("validator address/pubkey mismatch: header=%s, derived=%s", valAddr, derivedAddr)
+	}
+
+	// Use the same domain-separated signing hash as the proposer
+	msg, err := bv.consensusEngine.computeBlockSigningHash(block)
+	if err != nil {
+		return err
+	}
+
+	sig, err := crypto.SignatureFromBytes(block.Signature)
+	if err != nil {
+		return fmt.Errorf("failed to parse block signature: %v", err)
+	}
+
+	if err := pubKey.Verify(msg, &sig); err != nil {
+		return fmt.Errorf("block signature verification failed: %v", err)
 	}
 
 	return nil

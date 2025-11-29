@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"sync"
 
+	safemath "github.com/thrylos-labs/go-thrylos/core/math"
+
 	// Add this line
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/crypto/address"
@@ -291,18 +293,31 @@ func (am *AccountManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	if delegator.Balance < amount {
-		return fmt.Errorf("insufficient balance for delegation: have %d, need %d", delegator.Balance, amount)
+	// Use SafeSub to move from balance → staked
+	newBalance, err := safemath.SafeSub(delegator.Balance, amount)
+	if err != nil {
+		return fmt.Errorf("insufficient balance for delegation (underflow): %w", err)
 	}
 
-	// Move balance to staked amount and add delegation
-	delegator.Balance -= amount
-	delegator.StakedAmount += amount
+	newStaked, err := safemath.SafeAdd(delegator.StakedAmount, amount)
+	if err != nil {
+		return fmt.Errorf("staked amount overflow: %w", err)
+	}
 
 	if delegator.DelegatedTo == nil {
 		delegator.DelegatedTo = make(map[string]int64)
 	}
-	delegator.DelegatedTo[validatorAddr] += amount
+
+	currentDelegation := delegator.DelegatedTo[validatorAddr]
+	newDelegation, err := safemath.SafeAdd(currentDelegation, amount)
+	if err != nil {
+		return fmt.Errorf("delegation overflow for validator %s: %w", validatorAddr, err)
+	}
+
+	// Apply updates only after all checks pass
+	delegator.Balance = newBalance
+	delegator.StakedAmount = newStaked
+	delegator.DelegatedTo[validatorAddr] = newDelegation
 
 	return am.UpdateAccount(delegator)
 }

@@ -269,3 +269,30 @@ func AddressTransactionKey(address, txHash string) []byte {
 func AddressTransactionPrefix(address string) []byte {
 	return []byte(fmt.Sprintf("addr_tx:%s:", address))
 }
+
+func (db *DB) SaveBlockByHeight(block *core.Block) error {
+	if block == nil || block.Header == nil {
+		return fmt.Errorf("block or header is nil")
+	}
+
+	data, err := json.Marshal(block) // or proto.Marshal if you're using protobuf
+	if err != nil {
+		return fmt.Errorf("failed to marshal block: %w", err)
+	}
+
+	return db.storage.Set(BlockHeightKey(block.Header.Index), data)
+}
+
+func (db *DB) GetBlockByHeight(height int64) (*core.Block, error) {
+	data, err := db.storage.Get(BlockHeightKey(height))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block by height %d: %w", height, err)
+	}
+
+	var block core.Block
+	if err := json.Unmarshal(data, &block); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal block by height %d: %w", height, err)
+	}
+
+	return &block, nil
+}
