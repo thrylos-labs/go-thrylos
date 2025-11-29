@@ -34,6 +34,10 @@ type Validator struct {
 	shardID     account.ShardID
 	totalShards int
 	config      *config.Config
+
+	// Replay protection
+	replayConfig *ReplayProtectionConfig
+	metrics      *ReplayProtectionMetrics
 }
 
 // --- ADD THIS INTERFACE ---
@@ -46,9 +50,22 @@ type StateReader interface {
 // NewValidator creates a new transaction validator
 func NewValidator(shardID account.ShardID, totalShards int, cfg *config.Config) *Validator {
 	return &Validator{
-		shardID:     shardID,
-		totalShards: totalShards,
-		config:      cfg,
+		shardID:      shardID,
+		totalShards:  totalShards,
+		config:       cfg,
+		replayConfig: DefaultReplayProtectionConfig(),
+		metrics:      &ReplayProtectionMetrics{},
+	}
+}
+
+// NewValidatorWithReplayConfig creates a validator with custom replay protection config
+func NewValidatorWithReplayConfig(shardID account.ShardID, totalShards int, cfg *config.Config, replayConfig *ReplayProtectionConfig) *Validator {
+	return &Validator{
+		shardID:      shardID,
+		totalShards:  totalShards,
+		config:       cfg,
+		replayConfig: replayConfig,
+		metrics:      &ReplayProtectionMetrics{},
 	}
 }
 
@@ -209,6 +226,39 @@ func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.Priv
 	return nil
 }
 
+// SignTransactionWithReplayProtection signs a transaction with enhanced replay protection
+// This includes the finalized block hash to prevent post-reorg replay attacks
+func (v *Validator) SignTransactionWithReplayProtection(tx *core.Transaction, privateKey crypto.PrivateKey, finalizedBlockHash string) error {
+	if tx == nil {
+		return fmt.Errorf("transaction cannot be nil")
+	}
+
+	if privateKey == nil {
+		return fmt.Errorf("private key cannot be nil")
+	}
+
+	// Calculate the enhanced signable hash including finalized block
+	hashToSign, err := v.calculateSignableHashWithReplayProtection(tx, finalizedBlockHash)
+	if err != nil {
+		return fmt.Errorf("failed to calculate signable hash with replay protection: %v", err)
+	}
+
+	// Sign with Ed25519
+	signature := privateKey.Sign(hashToSign)
+	if signature == nil {
+		return fmt.Errorf("failed to sign transaction")
+	}
+
+	tx.Signature = signature.Bytes()
+	v.metrics.TransactionsWithReplayProtection++
+
+	if finalizedBlockHash == "" {
+		v.metrics.TransactionsWithoutFinalized++
+	}
+
+	return nil
+}
+
 // calculateSignableHash creates a hash that includes chain ID and all transaction context
 // This prevents replay attacks across different chains and ensures complete transaction integrity
 func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) {
@@ -222,6 +272,68 @@ func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) 
 	buf.WriteString("v1")
 
 	// 3. Include all transaction fields (same as hash calculation but with chain context)
+	buf.WriteString(tx.Id)
+	buf.WriteString(tx.From)
+	buf.WriteString(tx.To)
+
+	// Write amount as bytes
+	amountBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(amountBytes, uint64(tx.Amount))
+	buf.Write(amountBytes)
+
+	// Write gas as bytes
+	gasBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
+	buf.Write(gasBytes)
+
+	// Write gas price as bytes
+	gasPriceBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(gasPriceBytes, uint64(tx.GasPrice))
+	buf.Write(gasPriceBytes)
+
+	// Write nonce as bytes - CRITICAL for replay protection
+	nonceBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(nonceBytes, tx.Nonce)
+	buf.Write(nonceBytes)
+
+	// Write transaction type
+	typeBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(typeBytes, uint32(tx.Type))
+	buf.Write(typeBytes)
+
+	// Write timestamp
+	timestampBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(timestampBytes, uint64(tx.Timestamp))
+	buf.Write(timestampBytes)
+
+	// Write data
+	buf.Write(tx.Data)
+
+	// Hash the complete buffer
+	return hash.HashData(buf.Bytes())
+}
+
+// calculateSignableHashWithReplayProtection creates a hash with finalized block for replay protection
+// This is the ENHANCED version that includes finalized block hash to prevent post-reorg replay
+func (v *Validator) calculateSignableHashWithReplayProtection(tx *core.Transaction, finalizedBlockHash string) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// 1. Include chain ID to prevent cross-chain replay attacks
+	chainID := v.config.Network.ChainID
+	buf.WriteString(chainID)
+
+	// 2. Include protocol version (v2 for enhanced replay protection)
+	buf.WriteString("v2")
+
+	// 3. ✅ CRITICAL: Include finalized block hash for post-reorg replay protection
+	// This binds the transaction to a specific finalized state
+	if finalizedBlockHash != "" {
+		buf.WriteString(finalizedBlockHash)
+	} else if v.replayConfig.RequireFinalizedBlock && !v.replayConfig.AllowEmptyFinalizedBlock {
+		return nil, fmt.Errorf("finalized block hash required for replay protection")
+	}
+
+	// 4. Include all transaction fields
 	buf.WriteString(tx.Id)
 	buf.WriteString(tx.From)
 	buf.WriteString(tx.To)
@@ -313,6 +425,69 @@ func (v *Validator) VerifyTransactionSignature(tx *core.Transaction, publicKey c
 	}
 
 	return nil
+}
+
+// VerifyTransactionSignatureWithReplayProtection verifies a transaction signature with enhanced replay protection
+// This verifies against the finalized block hash to detect replay attempts after chain reorgs
+func (v *Validator) VerifyTransactionSignatureWithReplayProtection(tx *core.Transaction, publicKey crypto.PublicKey, finalizedBlockHash string) error {
+	if tx == nil {
+		return fmt.Errorf("transaction cannot be nil")
+	}
+
+	if publicKey == nil {
+		return fmt.Errorf("public key cannot be nil")
+	}
+
+	if len(tx.Signature) == 0 {
+		return fmt.Errorf("transaction signature is empty")
+	}
+
+	// 1. CRITICAL: Verify that the sender address matches the public key
+	derivedAddress, err := account.GenerateAddress(publicKey)
+	if err != nil {
+		return fmt.Errorf("failed to derive address from public key: %v", err)
+	}
+
+	// Normalize both addresses for comparison
+	normalizedDerived := strings.ToLower(derivedAddress)
+	normalizedFrom := strings.ToLower(tx.From)
+
+	if normalizedDerived != normalizedFrom {
+		return fmt.Errorf("signature verification failed: sender address %s does not match public key address %s",
+			tx.From, derivedAddress)
+	}
+
+	// 2. Calculate the signable hash with replay protection (includes finalized block)
+	hashToVerify, err := v.calculateSignableHashWithReplayProtection(tx, finalizedBlockHash)
+	if err != nil {
+		return fmt.Errorf("failed to calculate signable hash with replay protection: %v", err)
+	}
+
+	// 3. Create signature object from bytes
+	signature, err := crypto.SignatureFromBytes(tx.Signature)
+	if err != nil {
+		return fmt.Errorf("failed to parse signature: %v", err)
+	}
+
+	// 4. Verify the signature against the calculated hash
+	err = publicKey.Verify(hashToVerify, &signature)
+	if err != nil {
+		// This could be a replay attempt - record it
+		v.metrics.RecordReplayAttempt()
+		return fmt.Errorf("signature verification failed (possible replay attack): %v", err)
+	}
+
+	return nil
+}
+
+// GetReplayProtectionMetrics returns current replay protection metrics
+func (v *Validator) GetReplayProtectionMetrics() map[string]interface{} {
+	return v.metrics.GetMetrics()
+}
+
+// SetReplayProtectionConfig updates the replay protection configuration
+func (v *Validator) SetReplayProtectionConfig(config *ReplayProtectionConfig) {
+	v.replayConfig = config
 }
 
 func (v *Validator) ValidateTransaction(tx *core.Transaction, stateReader StateReader) error {
