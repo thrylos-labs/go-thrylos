@@ -14,6 +14,7 @@ import (
 	"fmt"
 
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
@@ -142,9 +143,19 @@ func (e *Executor) executeTransfer(tx *core.Transaction, accountManager *account
 	}
 
 	// Update balances
-	sender.Balance -= totalCost
+	newSenderBalance, err := math.SafeSub(sender.Balance, totalCost)
+	if err != nil {
+		return fmt.Errorf("sender balance update failed: %v", err)
+	}
+
+	newReceiverBalance, err := math.SafeAdd(receiver.Balance, tx.Amount)
+	if err != nil {
+		return fmt.Errorf("receiver balance update failed: %v", err)
+	}
+
+	sender.Balance = newSenderBalance
 	sender.Nonce++
-	receiver.Balance += tx.Amount
+	receiver.Balance = newReceiverBalance
 
 	// Save accounts
 	if err := accountManager.UpdateAccount(sender); err != nil {
@@ -185,9 +196,20 @@ func (e *Executor) executeStake(tx *core.Transaction, accountManager *account.Ac
 		return fmt.Errorf("invalid nonce: expected %d, got %d", account.Nonce, tx.Nonce)
 	}
 
-	// Update account (liquid staking - immediate)
-	account.Balance -= totalCost
-	account.StakedAmount += tx.Amount
+	// Update account (liquid staking - immediate) with overflow protection
+	newBalance, err := math.SafeSub(account.Balance, totalCost)
+	if err != nil {
+		return fmt.Errorf("balance update failed: %v", err)
+	}
+
+	newStakedAmount, err := math.SafeAdd(account.StakedAmount, tx.Amount)
+	if err != nil {
+		return fmt.Errorf("staked amount update failed: %v", err)
+	}
+
+	// Apply the updates
+	account.Balance = newBalance
+	account.StakedAmount = newStakedAmount
 	account.Nonce++
 
 	return accountManager.UpdateAccount(account)
@@ -224,10 +246,25 @@ func (e *Executor) executeUnstake(tx *core.Transaction, accountManager *account.
 		return fmt.Errorf("invalid nonce: expected %d, got %d", account.Nonce, tx.Nonce)
 	}
 
-	// Update account (liquid unstaking - immediate)
-	account.Balance -= gasCost
-	account.Balance += tx.Amount
-	account.StakedAmount -= tx.Amount
+	// Update account (liquid unstaking - immediate) with overflow protection
+	newBalance, err := math.SafeSub(account.Balance, gasCost)
+	if err != nil {
+		return fmt.Errorf("gas deduction failed: %v", err)
+	}
+
+	newBalance, err = math.SafeAdd(newBalance, tx.Amount)
+	if err != nil {
+		return fmt.Errorf("balance update after unstake failed: %v", err)
+	}
+
+	newStakedAmount, err := math.SafeSub(account.StakedAmount, tx.Amount)
+	if err != nil {
+		return fmt.Errorf("staked amount update failed: %v", err)
+	}
+
+	// Actually apply the updates ← YOU WERE MISSING THIS!
+	account.Balance = newBalance
+	account.StakedAmount = newStakedAmount
 	account.Nonce++
 
 	return accountManager.UpdateAccount(account)
@@ -266,16 +303,33 @@ func (e *Executor) executeDelegate(tx *core.Transaction, accountManager *account
 		return fmt.Errorf("validator address cannot be empty for delegation")
 	}
 
-	// Update delegator account
-	delegator.Balance -= totalCost
-	delegator.StakedAmount += tx.Amount
+	// Update delegator account with overflow protection
+	newBalance, err := math.SafeSub(delegator.Balance, totalCost)
+	if err != nil {
+		return fmt.Errorf("balance update failed: %v", err)
+	}
+
+	newStakedAmount, err := math.SafeAdd(delegator.StakedAmount, tx.Amount)
+	if err != nil {
+		return fmt.Errorf("staked amount update failed: %v", err)
+	}
+
+	// Apply balance updates
+	delegator.Balance = newBalance
+	delegator.StakedAmount = newStakedAmount
 	delegator.Nonce++
 
-	// Update delegation mapping
+	// Update delegation mapping with overflow protection
 	if delegator.DelegatedTo == nil {
 		delegator.DelegatedTo = make(map[string]int64)
 	}
-	delegator.DelegatedTo[validatorAddr] += tx.Amount
+
+	currentDelegation := delegator.DelegatedTo[validatorAddr] // ← GET current value first!
+	newDelegation, err := math.SafeAdd(currentDelegation, tx.Amount)
+	if err != nil {
+		return fmt.Errorf("delegation update failed: %v", err)
+	}
+	delegator.DelegatedTo[validatorAddr] = newDelegation // ← ASSIGN it back!
 
 	return accountManager.UpdateAccount(delegator)
 }
@@ -328,14 +382,35 @@ func (e *Executor) executeUndelegate(tx *core.Transaction, accountManager *accou
 		return fmt.Errorf("insufficient staked amount: have %d, need %d", delegator.StakedAmount, tx.Amount)
 	}
 
-	// Update delegator account (liquid undelegation - immediate)
-	delegator.Balance -= gasCost
-	delegator.Balance += tx.Amount
-	delegator.StakedAmount -= tx.Amount
+	// Update delegator account (liquid undelegation - immediate) with overflow protection
+	newBalance, err := math.SafeSub(delegator.Balance, gasCost)
+	if err != nil {
+		return fmt.Errorf("gas deduction failed: %v", err)
+	}
+
+	newBalance, err = math.SafeAdd(newBalance, tx.Amount)
+	if err != nil {
+		return fmt.Errorf("balance update after undelegate failed: %v", err)
+	}
+
+	newStakedAmount, err := math.SafeSub(delegator.StakedAmount, tx.Amount)
+	if err != nil {
+		return fmt.Errorf("staked amount update failed: %v", err)
+	}
+
+	// Apply balance updates
+	delegator.Balance = newBalance
+	delegator.StakedAmount = newStakedAmount
 	delegator.Nonce++
 
-	// Update delegation mapping
-	delegator.DelegatedTo[validatorAddr] -= tx.Amount
+	// Update delegation mapping with overflow protection
+	currentDelegation := delegator.DelegatedTo[validatorAddr] // ← GET it first!
+	newDelegation, err := math.SafeSub(currentDelegation, tx.Amount)
+	if err != nil {
+		return fmt.Errorf("delegation update failed: %v", err)
+	}
+
+	delegator.DelegatedTo[validatorAddr] = newDelegation // ← ASSIGN it back!
 	if delegator.DelegatedTo[validatorAddr] == 0 {
 		delete(delegator.DelegatedTo, validatorAddr)
 	}
@@ -376,8 +451,8 @@ func (e *Executor) executeClaimRewards(tx *core.Transaction, accountManager *acc
 
 	// Update account - claim all available rewards
 	claimableRewards := account.Rewards
-	account.Balance -= gasCost
-	account.Balance += claimableRewards
+	newBalance, err := math.SafeSub(account.Balance, gasCost)
+	newBalance, err = math.SafeAdd(newBalance, claimableRewards)
 	account.Rewards = 0
 	account.Nonce++
 

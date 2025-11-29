@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thrylos-labs/go-thrylos/core/math"
+
 	"github.com/thrylos-labs/go-thrylos/storage"
 	"github.com/thrylos-labs/go-thrylos/types"
 )
@@ -217,7 +219,7 @@ func (sm *SlashingManager) ReportBlockWithholding(validatorAddr string) error {
 	// 3. Define Penalty
 	// ✅ FIX: Use JailPenalty (which comes from config.SlashingDowntime) instead of MinorPenalty
 	penaltyPercent := sm.policy.JailPenalty
-	penaltyAmount := balance * penaltyPercent / 100
+	penaltyAmount, err := math.SafePercentage(balance, penaltyPercent)
 
 	// 4. Create Evidence Structure
 	evidence := types.SlashingEvidence{
@@ -441,7 +443,7 @@ func (sm *SlashingManager) slashDoubleVoting(att *types.Attestation, first, seco
 	fmt.Printf("💰 Current balance: %d\n", balance)
 
 	// Calculate penalty (most severe)
-	penaltyAmount := balance * int64(sm.config.DoubleVotingPenalty) / 100
+	penaltyAmount, err := math.SafePercentage(balance, int64(sm.config.DoubleVotingPenalty))
 	fmt.Printf("⚖️  Penalty amount: %d (%d%%)\n", penaltyAmount, sm.config.DoubleVotingPenalty)
 
 	// Create slashing record
@@ -487,7 +489,7 @@ func (sm *SlashingManager) slashDowntime(validatorAddress string, history *stora
 	}
 
 	// ✅ FIX: Use SlashingDowntime instead of DowntimePenalty
-	penaltyAmount := balance * int64(sm.config.SlashingDowntime) / 100
+	penaltyAmount, err := math.SafePercentage(balance, int64(sm.config.SlashingDowntime))
 
 	// Create slashing record
 	record := &types.SlashingRecord{
@@ -524,7 +526,7 @@ func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 		return fmt.Errorf("failed to get validator balance: %w", err)
 	}
 
-	newBalance := currentBalance - record.SlashedAmount
+	newBalance, err := math.SafeSub(currentBalance, record.SlashedAmount)
 	if newBalance < 0 {
 		newBalance = 0
 	}
