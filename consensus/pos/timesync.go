@@ -83,7 +83,6 @@ func (tv *TimeValidator) CheckSystemTimeDrift() (time.Duration, error) {
 	// 4. Alert if drift exceeds thresholds
 
 	// For now, we'll implement a basic check
-	// TODO: Implement actual NTP synchronization check
 
 	drift := time.Duration(0)
 
