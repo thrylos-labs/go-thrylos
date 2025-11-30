@@ -129,6 +129,12 @@ type Config struct {
 
 	// P2P networking configuration
 	P2P P2PConfig `json:"p2p" yaml:"p2p"`
+
+	// Environment (mainnet, testnet, devnet, production, development)
+	Environment string `json:"environment"`
+
+	// Validator key configuration (used by production entrypoint)
+	Validator ValidatorKeyConfig `json:"validator"`
 }
 
 // P2PConfig represents P2P networking configuration
@@ -262,13 +268,29 @@ type APIConfig struct {
 	EnableCORS    bool `json:"enable_cors"`
 	RateLimit     int  `json:"rate_limit"`
 	EnableMetrics bool `json:"enable_metrics"`
+
+	// Faucet / funding endpoint
+	EnableFaucet bool `json:"enable_faucet"`
+}
+
+// ValidatorKeyConfig controls how the node loads its validator key in production.
+type ValidatorKeyConfig struct {
+	Enabled     bool   `json:"enabled"`
+	KeyFilePath string `json:"key_file_path"`
 }
 
 func Load() (*Config, error) {
 	return &Config{
 		NodeID:   "thrylos-v2-node",
-		DataDir:  "/home/thrylos/data", // Instead of "./data"
+		DataDir:  "/home/thrylos/data",
 		LogLevel: "info",
+
+		Environment: "development", // default; overridden by main_prod.go
+
+		Validator: ValidatorKeyConfig{
+			Enabled:     false,
+			KeyFilePath: "", // production will set this explicitly
+		},
 
 		// Genesis token allocation
 		Genesis: GenesisAllocation{
@@ -389,13 +411,14 @@ func Load() (*Config, error) {
 
 		API: APIConfig{
 			EnableAPI:     true,
-			RESTAddr:      ":8080", // Keep this for now
-			EnableTLS:     false,   // We'll add SSL later
-			CertFile:      "/home/thrylos/certs/server.crt",
-			KeyFile:       "/home/thrylos/certs/server.key",
+			RESTAddr:      ":8080",
+			EnableTLS:     false,
+			CertFile:      "",
+			KeyFile:       "",
 			EnableCORS:    true,
-			RateLimit:     1000,
+			RateLimit:     10,
 			EnableMetrics: true,
+			EnableFaucet:  true, // dev default; main_prod.go will override to false in prod env
 		},
 
 		// For production, you'd change to:

@@ -42,6 +42,9 @@ type Server struct {
 	certFile  string
 	keyFile   string
 
+	// Faucet control
+	enableFaucet bool
+
 	// Rate limiting
 	rateLimiter     *RateLimiter
 	rateLimitConfig *RateLimitConfig
@@ -49,10 +52,11 @@ type Server struct {
 
 // ServerConfig represents server configuration
 type ServerConfig struct {
-	Port      int
-	EnableTLS bool
-	CertFile  string
-	KeyFile   string
+	Port         int
+	EnableTLS    bool
+	CertFile     string
+	KeyFile      string
+	EnableFaucet bool
 }
 
 // Response structures for account-based system
@@ -97,6 +101,7 @@ func NewServer(worldState *state.WorldState, port int) *Server {
 		worldState:      worldState,
 		port:            port,
 		rateLimitConfig: DefaultRateLimitConfig(),
+		enableFaucet:    isDevEnvironment(), // HTTP-only dev server
 	}
 
 	server.rateLimiter = NewRateLimiter(server.rateLimitConfig)
@@ -111,6 +116,7 @@ func NewServerWithServerConfig(worldState *state.WorldState, serverConfig *Serve
 		enableTLS:       serverConfig.EnableTLS,
 		certFile:        serverConfig.CertFile,
 		keyFile:         serverConfig.KeyFile,
+		enableFaucet:    serverConfig.EnableFaucet,
 		rateLimitConfig: DefaultRateLimitConfig(),
 	}
 
@@ -186,7 +192,8 @@ func (s *Server) setupRoutes() {
 	strict.Use(s.RateLimitMiddleware("strict"))
 
 	// Only expose /fund in dev/testnet
-	if isDevEnvironment() {
+	// Only expose /fund when both the build config and environment say it's safe
+	if s.enableFaucet && isDevEnvironment() {
 		strict.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
 	}
 

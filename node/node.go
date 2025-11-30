@@ -222,26 +222,23 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		cancelFunc:        cancelFunc,
 		genesisValidators: nodeConfig.GenesisValidators,
 	}
-
 	if nodeConfig.EnableAPI {
-		// Get port from config
 		apiPort := nodeConfig.APIPort
 		if apiPort == 0 {
 			apiPort = parsePortFromAddr(nodeConfig.Config.API.RESTAddr)
 		}
 
-		// Use your existing API system with full config support
 		if nodeConfig.Config.API.EnableTLS {
-			// Production HTTPS setup using your existing APIManagerWithConfig
 			apiConfig := &api.APIManagerConfig{
-				Port:      apiPort,
-				EnableTLS: true,
-				CertFile:  nodeConfig.Config.API.CertFile,
-				KeyFile:   nodeConfig.Config.API.KeyFile,
+				Port:         apiPort,
+				EnableTLS:    true,
+				CertFile:     nodeConfig.Config.API.CertFile,
+				KeyFile:      nodeConfig.Config.API.KeyFile,
+				EnableFaucet: nodeConfig.Config.API.EnableFaucet,
 			}
 			node.apiManager = api.NewAPIManagerWithConfig(worldState, apiConfig)
 		} else {
-			// Development HTTP setup using your existing NewAPIManager
+			// Dev HTTP: NewServer uses isDevEnvironment() to decide faucet
 			node.apiManager = api.NewAPIManager(worldState, apiPort)
 		}
 	}

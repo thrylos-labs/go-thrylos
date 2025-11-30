@@ -202,15 +202,29 @@ func (tv *TimeValidator) ValidateBlockTimestamp(
 	maxFutureDrift time.Duration,
 	maxPastDrift time.Duration,
 ) error {
-	// 1. Check against current system time
+	// 1. Check against current system time (always enforced)
 	if err := tv.ValidateTimestamp(blockTimestamp, maxFutureDrift, maxPastDrift); err != nil {
 		return fmt.Errorf("timestamp validation failed: %v", err)
 	}
 
+	// Special case: no previous block timestamp known yet
+	// This is typical for the first block, or if the node has no prior chain view.
+	if previousBlockTimestamp == 0 {
+		// We *only* enforce absolute drift vs wall-clock in this case.
+		// Relative monotonicity and increment checks don't make sense without a baseline.
+		if !tv.IsTimeSyncHealthy() {
+			// Soft warning – don't fail block, but surface potential misconfig
+			fmt.Printf("⚠️  WARNING: Validating first block without previous timestamp and unhealthy time sync status\n")
+		}
+		return nil
+	}
+
 	// 2. Check monotonic increase from previous block
 	if blockTimestamp <= previousBlockTimestamp {
-		return fmt.Errorf("block timestamp %d must be greater than previous block timestamp %d",
-			blockTimestamp, previousBlockTimestamp)
+		return fmt.Errorf(
+			"block timestamp %d must be greater than previous block timestamp %d",
+			blockTimestamp, previousBlockTimestamp,
+		)
 	}
 
 	// 3. Check reasonable increment (not too far ahead of previous)
@@ -218,8 +232,10 @@ func (tv *TimeValidator) ValidateBlockTimestamp(
 	maxReasonableIncrement := int64(3600) // 1 hour
 	increment := blockTimestamp - previousBlockTimestamp
 	if increment > maxReasonableIncrement {
-		return fmt.Errorf("block timestamp increment %d seconds too large (max: %d seconds)",
-			increment, maxReasonableIncrement)
+		return fmt.Errorf(
+			"block timestamp increment %d seconds too large (max: %d seconds)",
+			increment, maxReasonableIncrement,
+		)
 	}
 
 	// 4. Warn if system time drift is unhealthy

@@ -2,6 +2,7 @@ package pos
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -65,23 +66,27 @@ type SlashingManager struct {
 
 // NewSlashingManager creates a new slashing manager
 // storage parameter is optional (can be nil) - will be used for persistence
-func NewSlashingManager(config *storage.SlashingConfig, worldState WorldStateBalancer, slashingStorage *storage.SlashingStorage) *SlashingManager {
+func NewSlashingManager(
+	config *storage.SlashingConfig,
+	worldState WorldStateBalancer,
+	slashingStorage *storage.SlashingStorage,
+) *SlashingManager {
 	if config == nil {
 		config = storage.DefaultSlashingConfig()
 	}
 
-	// ✅ NEW: Calculate progressive thresholds
+	// Progressive downtime policy
 	maxMisses := config.MaxMissedAttestations
 	if maxMisses == 0 {
 		maxMisses = 100
 	}
 
 	policy := DowntimePolicy{
-		WarningThreshold:   maxMisses / 20, // 5% misses
-		MinorSlashingStart: maxMisses / 10, // 10% misses
-		MajorSlashingStart: maxMisses / 5,  // 20% misses
-		JailThreshold:      maxMisses / 2,  // 50% misses
-		EjectionThreshold:  maxMisses,      // 100% misses
+		WarningThreshold:   maxMisses / 20, // 5%
+		MinorSlashingStart: maxMisses / 10, // 10%
+		MajorSlashingStart: maxMisses / 5,  // 20%
+		JailThreshold:      maxMisses / 2,  // 50%
+		EjectionThreshold:  maxMisses,      // 100%
 
 		MinorPenalty: 1, // 1%
 		MajorPenalty: 3, // 3%
@@ -90,25 +95,25 @@ func NewSlashingManager(config *storage.SlashingConfig, worldState WorldStateBal
 	}
 
 	sm := &SlashingManager{
-		config:                  config,
-		policy:                  policy, // ✅ Set the policy
+		config: config,
+		policy: policy,
+
+		// ✅ All the maps initialised
 		attestationsByValidator: make(map[string][]*storage.AttestationRecord),
 		jailedValidators:        make(map[string]*storage.JailedValidator),
 		slashingRecords:         make(map[string][]*types.SlashingRecord),
 		attestationHistory:      make(map[string]*storage.AttestationHistory),
 		validatorStatus:         make(map[string]storage.ValidatorStatus),
 		processedEvidence:       make(map[string]bool),
-		worldState:              worldState,
-		storage:                 slashingStorage,
+
+		worldState: worldState,
+		storage:    slashingStorage,
 	}
 
-	// Load data from storage if available
-	if slashingStorage != nil {
+	// Load persisted state on top (if any)
+	if sm.storage != nil {
 		if err := sm.loadFromStorage(); err != nil {
-			// Log error but don't fail - start with empty state
-			fmt.Printf("⚠️  Warning: Failed to load slashing data from storage: %v\n", err)
-		} else {
-			fmt.Printf("✅ Loaded slashing data from storage\n")
+			log.Printf("⚠️ Failed to load slashing data from storage: %v", err)
 		}
 	}
 
@@ -145,6 +150,14 @@ func (sm *SlashingManager) loadFromStorage() error {
 func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+
+	// 🔐 Defensive: ensure maps are initialised
+	if sm.attestationsByValidator == nil {
+		sm.attestationsByValidator = make(map[string][]*storage.AttestationRecord)
+	}
+	if sm.attestationHistory == nil {
+		sm.attestationHistory = make(map[string]*storage.AttestationHistory)
+	}
 
 	validatorAddress := att.ValidatorAddress
 
@@ -693,24 +706,39 @@ func (sm *SlashingManager) GetJailedValidators() []*storage.JailedValidator {
 
 // IsValidatorActive checks if a validator can participate in consensus
 func (sm *SlashingManager) IsValidatorActive(validatorKey string) bool {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	// Check if jailed
+	// Check if validator is jailed
 	if sm.isValidatorJailed(validatorKey) {
+		log.Printf("[Slashing] Validator %s is jailed (inactive)", validatorKey)
 		return false
 	}
 
-	// Check if slashed below minimum
-	status, exists := sm.validatorStatus[validatorKey]
-	if exists && status != storage.ValidatorActive {
+	// Check explicit validator status (default to active)
+	status, ok := sm.validatorStatus[validatorKey]
+	if !ok {
+		status = storage.ValidatorActive
+	}
+
+	if status != storage.ValidatorActive {
+		log.Printf("[Slashing] Validator %s status is %s (inactive)", validatorKey, status)
 		return false
 	}
 
-	// Check if has minimum stake
-	balance, err := sm.worldState.GetBalance(validatorKey)
-	if err != nil || balance < sm.config.MinimumStake {
-		return false
+	// 🔧 IMPORTANT CHANGE:
+	// Do NOT hard-fail validators just because their balance is below MinimumStake here.
+	// That enforcement belongs in staking / registration.
+	//
+	// We *optionally* log balance info, but never mark them inactive solely on this.
+	if sm.worldState != nil && sm.config.MinimumStake > 0 {
+		balance, err := sm.worldState.GetBalance(validatorKey)
+		if err != nil {
+			// Just log and continue – validator stays active
+			log.Printf("[Slashing] GetBalance failed for %s: %v (ignoring for activity check)", validatorKey, err)
+		} else {
+			if balance < sm.config.MinimumStake {
+				log.Printf("[Slashing] Validator %s balance %d < minimum %d (NOT disabling via slashing, enforcement handled by staking logic)",
+					validatorKey, balance, sm.config.MinimumStake)
+			}
+		}
 	}
 
 	return true

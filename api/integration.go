@@ -30,10 +30,11 @@ type APIManager struct {
 
 // APIManagerConfig represents API manager configuration
 type APIManagerConfig struct {
-	Port      int
-	EnableTLS bool
-	CertFile  string
-	KeyFile   string
+	Port         int
+	EnableTLS    bool
+	CertFile     string
+	KeyFile      string
+	EnableFaucet bool
 }
 
 // NewAPIManager creates a new API manager (HTTP only - for development)
@@ -53,14 +54,15 @@ func NewAPIManagerWithConfig(worldState *state.WorldState, config *APIManagerCon
 	ctx, cancel := context.WithCancel(context.Background())
 
 	serverConfig := &ServerConfig{
-		Port:      config.Port,
-		EnableTLS: config.EnableTLS,
-		CertFile:  config.CertFile,
-		KeyFile:   config.KeyFile,
+		Port:         config.Port,
+		EnableTLS:    config.EnableTLS,
+		CertFile:     config.CertFile,
+		KeyFile:      config.KeyFile,
+		EnableFaucet: config.EnableFaucet,
 	}
 
 	return &APIManager{
-		server:     NewServerWithServerConfig(worldState, serverConfig), // Use the new function
+		server:     NewServerWithServerConfig(worldState, serverConfig),
 		worldState: worldState,
 		ctx:        ctx,
 		cancel:     cancel,

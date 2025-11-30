@@ -8,9 +8,9 @@
 * **Networking:** Robust P2P layer built on **libp2p** using GossipSub for message propagation and Kademlia DHT for peer discovery.
 * **Storage:** High-performance persistence using **BadgerDB v3**.
 * **Security:**
-    * **Slashing:** Automated penalties for double-voting, surround-voting, and downtime.
-    * **Replay Protection:** Nonce-based and finalized-block-hash protection.
-    * **Cryptography:** Ed25519 signatures and Blake2b hashing.
+  * **Slashing:** Automated penalties for double-voting, surround-voting, and downtime.
+  * **Replay Protection:** Nonce-based and finalized-block-hash protection.
+  * **Cryptography:** Ed25519 signatures and Blake2b hashing.
 * **Tokenomics:** Dynamic inflation model targeting a specific bonding ratio, with separate pools for validators, liquidity, and development.
 * **Compatibility:** Uses standard **Ethereum 0x addresses** (20 bytes) for wallet compatibility.
 * **Sharding:** Native support for sharded state management and cross-shard transfers.
@@ -23,9 +23,9 @@ Before building Thrylos, ensure you have the following installed:
 
 * **Go**: Version 1.24.0 or higher.
 * **Protocol Buffers**: Required for generating gRPC code.
-    * `protoc` compiler.
-    * `protoc-gen-go` plugin.
-* **OpenSSL**: For generating TLS certificates (optional, for secure API).
+  * `protoc` compiler.
+  * `protoc-gen-go` plugin.
+* **OpenSSL**: For generating TLS certificates (needed if you want to run the API in secure (HTTPS) mode in production-style setups).
 
 ---
 
@@ -42,67 +42,233 @@ Before building Thrylos, ensure you have the following installed:
    make deps
    ```
 
-3. **🔐 Generate Development Certificates:**
-   
-   If you plan to run the API server with TLS enabled (HTTPS), you must generate self-signed certificates. This is required for the node to start in secure mode.
-   
-   ```bash
-   openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"
-   ```
-
-4. **Generate Protocol Buffers:**
+3. **Generate Protocol Buffers:**
    ```bash
    make proto
    ```
 
-5. **Build the Binary:**
+4. **Build Binaries**
+
+   You now have two distinct build modes:
+
+   **Development build (devnet, deterministic keys, faucet)**
+
+   The dev build uses deterministic validator keys and auto-creates a small 3-validator genesis for local testing. It is never meant for real networks.
+
    ```bash
-   make build
+   go build -tags dev -o bin/thrylos-dev ./cmd/thrylos
    ```
-   
-   The binary will be output to `./bin/thrylos`.
+
+   **Production build (no dev shortcuts, no faucet, TLS-enforced API)**
+
+   The production build has:
+   - No deterministic keys compiled in.
+   - No auto-genesis of validators.
+   - No faucet endpoint, even if configured.
+   - Enforced TLS if the HTTP API is enabled in production-like environments.
+
+   ```bash
+   go build -o bin/thrylos ./cmd/thrylos
+   ```
+
+5. **🔐 TLS Certificates (for prod-style API)**
+
+   If you plan to run the API server with TLS enabled (HTTPS), you must generate certificates, for example:
+
+   ```bash
+   openssl req -x509 -newkey rsa:4096 \
+     -keyout server.key \
+     -out server.crt \
+     -days 365 -nodes \
+     -subj "/CN=localhost"
+   ```
+
+   You'll then point the API config to `server.crt` and `server.key`.
 
 ---
 
 ## 🏃‍♂️ Running the Node
 
-### Quick Start (Multi-Node Simulation)
+Thrylos now has two entrypoints:
+- `bin/thrylos-dev` – development build (with `-tags dev`)
+- `bin/thrylos` – production build (default Go build)
 
-For development, you can spin up a local 3-node cluster using the included debug script:
+### 1. Development Mode (local devnet)
 
-```bash
-./debug-multi-nodes.sh
-```
+Development mode is designed for local testing:
+- Uses deterministic validator keys.
+- Auto-creates a 3-validator genesis.
+- Can enable the faucet (`/api/v1/fund`).
+- Runs HTTP API without TLS.
+- Protected by `THRYLOS_ENVIRONMENT=development`.
 
-This will start:
-* **Node 1 (Bootstrap)**: Port 9001
-* **Node 2**: Port 9002 (Peered with Node 1)
-* **Node 3**: Port 9003 (Peered with Node 1)
-
-### Manual Start
-
-To run a single node manually:
+#### Start a single dev node
 
 ```bash
-./bin/thrylos --node=1 --port=9000 --validator=true
+THRYLOS_ENVIRONMENT=development \
+bin/thrylos-dev -node 1 -p2p-port 9001
 ```
 
-### Command Line Flags
+This will:
+- Use a deterministic key for node 1.
+- Create a local data directory: `./data-node1`.
+- Start P2P on port 9001.
+- Start the HTTP API on port 8080.
+- Initialize a small devnet genesis with 3 validators.
+
+You should then be able to query:
+
+```bash
+curl http://127.0.0.1:8080/api/v1/status
+curl http://127.0.0.1:8080/api/v1/health
+```
+
+#### Multi-node devnet (3 validators)
+
+You can run three nodes with deterministic keys:
+
+```bash
+# Node 1 (bootstrap)
+THRYLOS_ENVIRONMENT=development \
+bin/thrylos-dev -node 1 -p2p-port 9001
+
+# Node 2
+THRYLOS_ENVIRONMENT=development \
+bin/thrylos-dev -node 2 -p2p-port 9002 -bootstrap /ip4/127.0.0.1/tcp/9001/p2p/<node1-peer-id>
+
+# Node 3
+THRYLOS_ENVIRONMENT=development \
+bin/thrylos-dev -node 3 -p2p-port 9003 -bootstrap /ip4/127.0.0.1/tcp/9001/p2p/<node1-peer-id>
+```
+
+**Note:** by default, all nodes try to use API port 8080. For multi-node setups on one machine, you should either:
+- Run only one node with the API enabled, or
+- Adjust API ports in config per node.
+
+#### Dev-only Faucet
+
+In development builds with `THRYLOS_ENVIRONMENT=development` and `api.enable_faucet = true` in config, the `/api/v1/fund` endpoint is enabled:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/fund \
+  -H 'Content-Type: application/json' \
+  -d '{"address":"0xYourAddressHere","amount":1000000000}'
+```
+
+The faucet is never available in production builds, even if enabled in config.
+
+#### Dev CLI Flags
+
+`bin/thrylos-dev` supports the following dev-oriented flags:
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--node` | Node ID (integer, usually 1, 2, or 3 for dev). | 1 |
-| `--port` | P2P listening port. | 9000 |
-| `--data` | Data directory path. | `../data-nodeN` |
-| `--bootstrap` | Comma-separated list of bootstrap peer addresses. | "" |
-| `--validator` | Run as an active validator. | true |
-| `--api-port` | Port for the HTTP JSON-RPC API. | 8080 |
+| `-node` | Node ID (1, 2, or 3) for deterministic dev keys | 1 |
+| `-p2p-port` | P2P TCP port | 9000 |
+| `-data` | Data directory | `./data-nodeN` |
+| `-bootstrap` | Comma-separated bootstrap peers | "" |
+| `-validator` | Run as an active validator | true |
+
+(Plus standard Go logging flags like `-logtostderr`, `-v`, etc.)
+
+### 2. Production Mode (testnet / mainnet-style)
+
+Production builds are meant for any non-local, non-ephemeral network:
+- No dev-only deterministic validator keys.
+- No auto-generated validator set – you must explicitly provide validator keys and genesis config.
+- No faucet (`/fund` route is disabled in prod builds, even if config says otherwise).
+- If `THRYLOS_ENVIRONMENT` is a production-like value (`production`, `prod`, `mainnet`), and the HTTP API is enabled, TLS is required.
+
+#### Quick "headless" prod node (no API)
+
+The simplest way to start a prod-style node is with the API disabled in config:
+
+In your config (e.g. `config/mainnet.json`), set:
+
+```json
+"api": {
+  "enable_api": false,
+  ...
+}
+```
+
+Start the node:
+
+```bash
+THRYLOS_ENVIRONMENT=production \
+bin/thrylos \
+  -validator \
+  -validator-key /path/to/validator.key
+```
+
+Where `/path/to/validator.key` is a hex-encoded private key understood by Thrylos.
+
+#### Prod node with HTTPS API
+
+To run a production node with an HTTPS API:
+
+1. Configure the API in config:
+
+   ```json
+   "api": {
+     "enable_api": true,
+     "rest_addr": ":8080",
+     "enable_tls": true,
+     "cert_file": "/path/to/server.crt",
+     "key_file": "/path/to/server.key",
+     "enable_faucet": false
+   }
+   ```
+
+2. Start the node:
+
+   ```bash
+   THRYLOS_ENVIRONMENT=production \
+   bin/thrylos \
+     -validator \
+     -validator-key /path/to/validator.key \
+     -env production
+   ```
+
+3. Query status over HTTPS:
+
+   ```bash
+   curl -k https://127.0.0.1:8080/api/v1/status
+   ```
+
+If you try to run in production/mainnet with:
+- `api.enable_api = true`
+- `api.enable_tls = false`
+
+the node will refuse to start with a clear log message:
+
+```
+API is enabled but TLS is disabled in "production" environment; aborting startup
+```
+
+#### Prod CLI Flags
+
+`bin/thrylos` (production binary) supports:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-data` | Data directory (overrides config) | from config |
+| `-p2p-port` | P2P listen port | 9000 |
+| `-bootstrap` | Comma-separated bootstrap peers | config P2P peers |
+| `-validator` | Run this node as a validator | false |
+| `-validator-key` | Path to hex-encoded validator private key file | required if `-validator` is true |
+| `-env` | Environment override (mainnet, testnet, devnet, production, etc.) | `$THRYLOS_ENVIRONMENT` or config |
+| `-logtostderr` | Log to stderr instead of files | |
+| `-alsologtostderr` | Log to stderr as well as files | |
+| `-v`, `-vmodule` | Go logging verbosity controls | |
+
+**Important:** Production builds do not contain any of the dev-only deterministic key / debug genesis logic. You must provide real keys and a proper genesis configuration.
 
 ---
 
 ## 🔌 API Documentation
 
-Thrylos exposes a RESTful JSON API (default port 8080).
+Thrylos exposes a RESTful JSON API (default `rest_addr` is `:8080` in config).
 
 ### Node Status
 
@@ -118,12 +284,22 @@ Thrylos exposes a RESTful JSON API (default port 8080).
 
 * `GET /api/v1/transaction/{hash}`: Get transaction details and status.
 * `POST /api/v1/transaction/broadcast`: Submit a signed transaction.
-* `POST /api/v1/fund`: (DevNet only) Faucet to fund an address.
+
+### Faucet (DevNet only)
+
+* `POST /api/v1/fund`: Faucet to fund an address.
+
+This endpoint is only active when:
+- You are running the dev build (`thrylos-dev`), and
+- `THRYLOS_ENVIRONMENT` is a development-like value (e.g. `development`), and
+- `api.enable_faucet = true` in the config.
+
+In production builds, `/fund` is always disabled, regardless of config.
 
 ### Staking
 
 * `GET /api/v1/validators`: List all registered validators.
-* `GET /api/v1/staking/stats`: Global staking statistics (Total staked, APY).
+* `GET /api/v1/staking/stats`: Global staking statistics (total staked, APY, etc).
 
 ---
 
@@ -131,8 +307,8 @@ Thrylos exposes a RESTful JSON API (default port 8080).
 
 ### Folder Structure
 
-* `cmd/thrylos`: Entry point (main.go).
-* `consensus/`: PoS logic, fork choice rules, and slashing evidence.
+* `cmd/thrylos`: Entrypoints (`main_dev.go` and `main_prod.go` via build tags).
+* `consensus/`: PoS logic, fork choice rules, slashing evidence, time validation.
 * `core/`: Core blockchain primitives (Blocks, Transactions, State).
 * `network/`: P2P networking layer (Libp2p implementation).
 * `storage/`: BadgerDB implementation and database abstractions.
@@ -144,9 +320,22 @@ Thrylos exposes a RESTful JSON API (default port 8080).
 * **Total Supply**: 100,000,000 THRYLOS.
 * **Base Unit**: 1 THRYLOS = 1,000,000,000 nano.
 * **Inflation**: Dynamic (targeting ~4% annually), adjusting based on the staking ratio.
-* **Slashing**:
-    * Double Sign: 5% penalty.
-    * Downtime: 1% penalty.
+* **Slashing** (configurable):
+    * Double Sign: configurable % penalty.
+    * Downtime: progressive penalties and jailing based on missed attestations.
+
+---
+
+## 🔒 Security Invariants
+
+Thrylos enforces the following security guarantees across build modes:
+
+* **Production API requires TLS**: If `THRYLOS_ENVIRONMENT` is set to a production-like value (`production`, `prod`, `mainnet`) and the API is enabled, TLS must be configured. The node will refuse to start otherwise.
+* **Deterministic keys never in production**: The development build's deterministic validator keys are compile-time excluded from production binaries via build tags. Production nodes must always use explicitly provided validator keys.
+* **No faucet in production**: The `/api/v1/fund` faucet endpoint is disabled at compile-time in production builds, regardless of configuration settings.
+* **Environment-based protections**: Critical features (faucet, non-TLS API) are gated by `THRYLOS_ENVIRONMENT` checks to prevent accidental misconfiguration.
+
+These invariants ensure that production validators cannot accidentally run with insecure configurations or development-only features.
 
 ---
 
