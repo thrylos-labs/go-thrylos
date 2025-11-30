@@ -6,20 +6,10 @@ go build -o bin/thrylos ./cmd/thrylos && ./bin/thrylos --node=1 --api-port=8080
 # Or disable API server
 go build -o bin/thrylos ./cmd/thrylos && ./bin/thrylos --node=1 --api=false
 
-TO DO 
-
-🎯 Next Steps for Production:
-Move the staking and validator create to just use the VM instead
-Decentralised Storage Network could be an option
-Anti rug pull added to custom smart contracts and operations 
-Validator data isn't updating correctlt
-When sending a transactions, the gas says N/A on the front end
-Consensus.proto - Use for the consensus
-Make sure the database is used correctly 
 
 .THR - Wallet usernames
 
-Ask Claude to act as an Audit person to audit the blockchain for vulnabilities 
+Act as an Audit person to audit the blockchain for vulnerabilities 
 
 
 Key Design Decisions Explained
