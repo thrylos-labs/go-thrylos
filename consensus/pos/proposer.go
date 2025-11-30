@@ -12,7 +12,6 @@
 package pos
 
 import (
-	"encoding/binary"
 	"fmt"
 	"sort"
 	"time"
@@ -519,32 +518,12 @@ func (bp *BlockProposer) calculateMerkleRoot(transactions []*core.Transaction) s
 
 // calculateBlockHash calculates the hash of a block - made public for use by validator
 func (bp *BlockProposer) calculateBlockHash(block *core.Block) string {
-	var data []byte
-
-	// Combine header fields for hashing using actual protobuf fields
-	indexBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(indexBytes, uint64(block.Header.Index))
-	data = append(data, indexBytes...)
-
-	timestampBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(timestampBytes, uint64(block.Header.Timestamp))
-	data = append(data, timestampBytes...)
-
-	data = append(data, []byte(block.Header.PrevHash)...)
-	data = append(data, []byte(block.Header.TxRoot)...)
-	data = append(data, []byte(block.Header.StateRoot)...)
-	data = append(data, []byte(block.Header.Validator)...)
-
-	gasUsedBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(gasUsedBytes, uint64(block.Header.GasUsed))
-	data = append(data, gasUsedBytes...)
-
-	gasLimitBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(gasLimitBytes, uint64(block.Header.GasLimit))
-	data = append(data, gasLimitBytes...)
-
-	hash := blake2b.Sum256(data)
-	return fmt.Sprintf("%x", hash)
+	hash, err := core.CanonicalBlockHash(block) // ✅ use the function in proto/core
+	if err != nil {
+		// This should never happen in normal operation; treat as programmer error.
+		panic(fmt.Sprintf("calculateBlockHash: %v", err))
+	}
+	return hash
 }
 
 // updateMetrics updates proposer performance metrics
