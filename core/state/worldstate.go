@@ -218,7 +218,7 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 	db := storage.NewDB(badgerStorage)
 	stateStorage := storage.NewStateStorage(badgerStorage)
 
-	acctMgr := account.NewAccountManager(shardID, totalShards)
+	acctMgr := account.NewAccountManager(stateStorage, shardID, totalShards)
 
 	ws := &WorldState{
 		config:         cfg,
@@ -1277,7 +1277,7 @@ func (ws *WorldState) RestoreFromSnapshot(snapshot *StateSnapshot) error {
 	}
 
 	// Clear current state
-	ws.accountManager = account.NewAccountManager(ws.shardID, ws.totalShards)
+	ws.accountManager = account.NewAccountManager(ws.state, ws.shardID, ws.totalShards)
 	ws.validators = make(map[string]*core.Validator)
 
 	// Restore accounts
@@ -1873,7 +1873,7 @@ func (ws *WorldState) Clear() error {
 	defer ws.mu.Unlock()
 
 	// Reset account manager
-	ws.accountManager = account.NewAccountManager(ws.shardID, ws.totalShards)
+	ws.accountManager = account.NewAccountManager(ws.state, ws.shardID, ws.totalShards)
 
 	// Clear validators
 	ws.validators = make(map[string]*core.Validator)
@@ -2105,7 +2105,7 @@ func (ws *WorldState) LoadState() error {
 	fmt.Printf("🔍 LoadState: Found %d accounts\n", len(accounts))
 
 	// Reset account manager and load accounts
-	ws.accountManager = account.NewAccountManager(ws.shardID, ws.totalShards)
+	ws.accountManager = account.NewAccountManager(ws.state, ws.shardID, ws.totalShards)
 	totalSupply := int64(0)
 	for _, account := range accounts {
 		if err := ws.accountManager.UpdateAccount(account); err != nil {

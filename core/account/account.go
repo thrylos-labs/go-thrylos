@@ -11,11 +11,11 @@ package account
 import (
 	"encoding/binary"
 	"fmt"
-	"sync"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	safemath "github.com/thrylos-labs/go-thrylos/core/math"
+	"github.com/thrylos-labs/go-thrylos/storage"
 
-	// Add this line
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/crypto/address"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
@@ -29,7 +29,7 @@ const (
 	// BeaconShardID represents the beacon chain (shard -1)
 	BeaconShardID ShardID = -1
 
-	// Minimum balance thresholds (from config - these should be imported from config)
+	// Minimum balance thresholds
 	MinimumStakeAmount    = int64(1000000000)  // 1 THRYLOS minimum stake
 	MinimumBalance        = int64(1000000)     // 0.001 THRYLOS minimum balance
 	MinimumDelegation     = int64(100000000)   // 0.1 THRYLOS minimum delegation
@@ -37,36 +37,25 @@ const (
 	MinimumValidatorStake = int64(32000000000) // 32 THRYLOS minimum validator stake
 )
 
-// AccountManager handles account operations with shard awareness
+// AccountManager handles account operations with DB backing and LRU caching
 type AccountManager struct {
-	accounts    map[string]*core.Account
+	db          *storage.StateStorage
+	cache       *lru.Cache[string, *core.Account] // Thread-safe LRU cache
 	shardID     ShardID
 	totalShards int
-	mu          sync.RWMutex
 }
 
-// NewAccountManager creates a new account manager for a specific shard
-func NewAccountManager(shardID ShardID, totalShards int) *AccountManager {
+// NewAccountManager creates a manager with DB connection and 50k item cache
+func NewAccountManager(db *storage.StateStorage, shardID ShardID, totalShards int) *AccountManager {
+	// Initialize LRU cache (holds approx 10-20MB of hot accounts)
+	cache, _ := lru.New[string, *core.Account](50000)
+
 	return &AccountManager{
-		accounts:    make(map[string]*core.Account),
+		db:          db,
+		cache:       cache,
 		shardID:     shardID,
 		totalShards: totalShards,
 	}
-}
-
-// This is primarily used for Genesis setup and Testing to inject state
-// without strict validation checks (like shard ownership).
-
-func (am *AccountManager) SetAccount(addr string, account *core.Account) {
-	am.mu.Lock()
-	defer am.mu.Unlock()
-
-	// Ensure the address key matches the account address
-	if account.Address != addr {
-		account.Address = addr
-	}
-
-	am.accounts[addr] = account
 }
 
 // CalculateShardID determines which shard an address belongs to
@@ -94,9 +83,18 @@ func (am *AccountManager) BelongsToShard(addr string) bool {
 	return addressShard == am.shardID
 }
 
-// GetAccount retrieves an account, creating a new one if it doesn't exist
+// SetAccount is primarily used for Genesis/Testing. It bypasses validation.
+func (am *AccountManager) SetAccount(addr string, account *core.Account) error {
+	// Ensure the address key matches the account address
+	if account.Address != addr {
+		account.Address = addr
+	}
+	// Direct save to DB + Cache update
+	return am.UpdateAccount(account)
+}
+
+// GetAccount retrieves an account from Cache -> DB -> New (if not found)
 func (am *AccountManager) GetAccount(addr string) (*core.Account, error) {
-	// Validate address format using the dedicated address package
 	if err := address.Validate(addr); err != nil {
 		return nil, fmt.Errorf("invalid address format: %v", err)
 	}
@@ -106,35 +104,32 @@ func (am *AccountManager) GetAccount(addr string) (*core.Account, error) {
 			addr, CalculateShardID(addr, am.totalShards), am.shardID)
 	}
 
-	am.mu.RLock()
-	if account, exists := am.accounts[addr]; exists {
-		am.mu.RUnlock()
-		return account, nil
-	}
-	am.mu.RUnlock()
-
-	// Create new account
-	am.mu.Lock()
-	defer am.mu.Unlock()
-
-	// Double-check after acquiring write lock
-	if account, exists := am.accounts[addr]; exists {
-		return account, nil
+	// 1. Check Cache
+	if acc, ok := am.cache.Get(addr); ok {
+		return acc, nil
 	}
 
-	newAccount := &core.Account{
-		Address:      addr,
-		Balance:      0,
-		Nonce:        0,
-		StakedAmount: 0,
-		DelegatedTo:  make(map[string]int64),
-		Rewards:      0,
-		CodeHash:     nil, // For future smart contract support
-		StorageRoot:  nil, // For future contract storage
+	// 2. Check Database
+	acc, err := am.db.GetAccount(addr)
+	if err != nil {
+		return nil, err
 	}
 
-	am.accounts[addr] = newAccount
-	return newAccount, nil
+	// 3. If not found in DB, return new empty account (standard blockchain behavior)
+	if acc == nil {
+		return &core.Account{
+			Address:      addr,
+			Balance:      0,
+			Nonce:        0,
+			StakedAmount: 0,
+			DelegatedTo:  make(map[string]int64),
+			Rewards:      0,
+		}, nil
+	}
+
+	// 4. Update Cache
+	am.cache.Add(addr, acc)
+	return acc, nil
 }
 
 // GetAccountReadOnly retrieves an account without creating a new one
@@ -143,20 +138,29 @@ func (am *AccountManager) GetAccountReadOnly(addr string) (*core.Account, bool) 
 		return nil, false
 	}
 
-	am.mu.RLock()
-	defer am.mu.RUnlock()
+	// Check Cache
+	if acc, ok := am.cache.Get(addr); ok {
+		return acc, true
+	}
 
-	account, exists := am.accounts[addr]
-	return account, exists
+	// Check DB
+	acc, err := am.db.GetAccount(addr)
+	if err != nil || acc == nil {
+		return nil, false
+	}
+
+	// Cache it since we found it
+	am.cache.Add(addr, acc)
+	return acc, true
 }
 
-// AccountExists checks if an account exists without creating it
+// AccountExists checks if an account exists in DB/Cache
 func (am *AccountManager) AccountExists(addr string) bool {
 	_, exists := am.GetAccountReadOnly(addr)
 	return exists
 }
 
-// UpdateAccount updates an existing account
+// UpdateAccount persists changes to DB and updates Cache
 func (am *AccountManager) UpdateAccount(account *core.Account) error {
 	if account == nil {
 		return fmt.Errorf("account cannot be nil")
@@ -171,10 +175,13 @@ func (am *AccountManager) UpdateAccount(account *core.Account) error {
 			account.Address, CalculateShardID(account.Address, am.totalShards), am.shardID)
 	}
 
-	am.mu.Lock()
-	defer am.mu.Unlock()
+	// Write to DB (Persist immediately)
+	if err := am.db.SaveAccount(account); err != nil {
+		return err
+	}
 
-	am.accounts[account.Address] = account
+	// Update Cache
+	am.cache.Add(account.Address, account)
 	return nil
 }
 
@@ -184,7 +191,6 @@ func (am *AccountManager) ValidateAccount(account *core.Account) error {
 		return fmt.Errorf("account cannot be nil")
 	}
 
-	// Use the dedicated address validation
 	if err := address.Validate(account.Address); err != nil {
 		return fmt.Errorf("invalid account address: %v", err)
 	}
@@ -201,7 +207,6 @@ func (am *AccountManager) ValidateAccount(account *core.Account) error {
 		return fmt.Errorf("rewards cannot be negative: %d", account.Rewards)
 	}
 
-	// Validate delegations
 	totalDelegated := int64(0)
 	for validator, amount := range account.DelegatedTo {
 		if err := address.Validate(validator); err != nil {
@@ -213,7 +218,6 @@ func (am *AccountManager) ValidateAccount(account *core.Account) error {
 		totalDelegated += amount
 	}
 
-	// Ensure delegated amounts don't exceed staked amount
 	if totalDelegated > account.StakedAmount {
 		return fmt.Errorf("total delegated amount (%d) exceeds staked amount (%d)",
 			totalDelegated, account.StakedAmount)
@@ -258,7 +262,6 @@ func (am *AccountManager) Unstake(addr string, amount int64) error {
 		return fmt.Errorf("insufficient staked amount: have %d, need %d", account.StakedAmount, amount)
 	}
 
-	// Check that unstaking doesn't violate delegations
 	totalDelegated := int64(0)
 	for _, delegated := range account.DelegatedTo {
 		totalDelegated += delegated
@@ -293,7 +296,7 @@ func (am *AccountManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	// Use SafeSub to move from balance → staked
+	// Use SafeSub to move from balance -> staked
 	newBalance, err := safemath.SafeSub(delegator.Balance, amount)
 	if err != nil {
 		return fmt.Errorf("insufficient balance for delegation (underflow): %w", err)
@@ -314,7 +317,6 @@ func (am *AccountManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		return fmt.Errorf("delegation overflow for validator %s: %w", validatorAddr, err)
 	}
 
-	// Apply updates only after all checks pass
 	delegator.Balance = newBalance
 	delegator.StakedAmount = newStaked
 	delegator.DelegatedTo[validatorAddr] = newDelegation
@@ -343,7 +345,6 @@ func (am *AccountManager) Undelegate(delegatorAddr, validatorAddr string, amount
 			validatorAddr, currentDelegation, amount)
 	}
 
-	// Remove delegation and return to balance
 	delegator.DelegatedTo[validatorAddr] -= amount
 	if delegator.DelegatedTo[validatorAddr] == 0 {
 		delete(delegator.DelegatedTo, validatorAddr)
@@ -398,7 +399,6 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 		return fmt.Errorf("cannot transfer to self")
 	}
 
-	// Validate addresses using the dedicated address package
 	if err := address.Validate(fromAddr); err != nil {
 		return fmt.Errorf("invalid sender address: %v", err)
 	}
@@ -406,18 +406,17 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 		return fmt.Errorf("invalid recipient address: %v", err)
 	}
 
-	// Get sender account
 	fromAccount, err := am.GetAccount(fromAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get sender account: %v", err)
 	}
 
-	// Check balance
 	if fromAccount.Balance < amount {
 		return fmt.Errorf("insufficient balance: have %d, need %d", fromAccount.Balance, amount)
 	}
 
-	// Get receiver account (may need cross-shard handling)
+	// We only handle same-shard transfers here for simplicity logic
+	// Cross-shard logic is usually in Executor, but if called directly, we validate destination
 	var toAccount *core.Account
 	if am.BelongsToShard(toAddr) {
 		toAccount, err = am.GetAccount(toAddr)
@@ -425,16 +424,13 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 			return fmt.Errorf("failed to get receiver account: %v", err)
 		}
 	} else {
-		// Cross-shard transfer - this would typically be handled by the consensus layer
 		return fmt.Errorf("cross-shard transfer to %s not implemented at account level", toAddr)
 	}
 
-	// Perform transfer
 	fromAccount.Balance -= amount
 	fromAccount.Nonce++
 	toAccount.Balance += amount
 
-	// Update accounts
 	if err := am.UpdateAccount(fromAccount); err != nil {
 		return fmt.Errorf("failed to update sender account: %v", err)
 	}
@@ -489,7 +485,6 @@ func (am *AccountManager) GetDelegations(addr string) (map[string]int64, error) 
 		return nil, err
 	}
 
-	// Return a copy to prevent external modification
 	delegations := make(map[string]int64)
 	for validator, amount := range account.DelegatedTo {
 		delegations[validator] = amount
@@ -508,37 +503,43 @@ func (am *AccountManager) GetDelegationToValidator(delegatorAddr, validatorAddr 
 	return account.DelegatedTo[validatorAddr], nil
 }
 
-// GetTotalStakedInShard returns total staked amount across all accounts in this shard
+// GetTotalStakedInShard returns total staked amount using DB iterator
 func (am *AccountManager) GetTotalStakedInShard() int64 {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
+	accounts, err := am.db.GetAllAccounts()
+	if err != nil {
+		return 0
+	}
 
 	total := int64(0)
-	for _, account := range am.accounts {
+	for _, account := range accounts {
 		total += account.StakedAmount
 	}
 	return total
 }
 
-// GetTotalBalanceInShard returns total balance across all accounts in this shard
+// GetTotalBalanceInShard returns total balance using DB iterator
 func (am *AccountManager) GetTotalBalanceInShard() int64 {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
+	accounts, err := am.db.GetAllAccounts()
+	if err != nil {
+		return 0
+	}
 
 	total := int64(0)
-	for _, account := range am.accounts {
+	for _, account := range accounts {
 		total += account.Balance
 	}
 	return total
 }
 
-// GetTotalRewardsInShard returns total unclaimed rewards across all accounts in this shard
+// GetTotalRewardsInShard returns total unclaimed rewards using DB iterator
 func (am *AccountManager) GetTotalRewardsInShard() int64 {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
+	accounts, err := am.db.GetAllAccounts()
+	if err != nil {
+		return 0
+	}
 
 	total := int64(0)
-	for _, account := range am.accounts {
+	for _, account := range accounts {
 		total += account.Rewards
 	}
 	return total
@@ -546,17 +547,19 @@ func (am *AccountManager) GetTotalRewardsInShard() int64 {
 
 // GetAccountStats returns statistics about accounts in this shard
 func (am *AccountManager) GetAccountStats() map[string]interface{} {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
+	accounts, err := am.db.GetAllAccounts()
+	if err != nil {
+		return map[string]interface{}{"error": err.Error()}
+	}
 
-	totalAccounts := len(am.accounts)
+	totalAccounts := len(accounts)
 	totalBalance := int64(0)
 	totalStaked := int64(0)
 	totalRewards := int64(0)
 	accountsWithStake := 0
 	accountsWithDelegations := 0
 
-	for _, account := range am.accounts {
+	for _, account := range accounts {
 		totalBalance += account.Balance
 		totalStaked += account.StakedAmount
 		totalRewards += account.Rewards
@@ -570,7 +573,6 @@ func (am *AccountManager) GetAccountStats() map[string]interface{} {
 		}
 	}
 
-	// Calculate participation rates safely
 	var stakingParticipation float64
 	var delegationParticipation float64
 
@@ -593,25 +595,20 @@ func (am *AccountManager) GetAccountStats() map[string]interface{} {
 	}
 }
 
-// GetAllAccounts returns all accounts in this shard (for debugging/admin)
+// GetAllAccounts returns all accounts via DB iterator
 func (am *AccountManager) GetAllAccounts() map[string]*core.Account {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-
-	// Return a copy to prevent external modification
-	accounts := make(map[string]*core.Account)
-	for addr, account := range am.accounts {
-		accounts[addr] = account
+	accounts, err := am.db.GetAllAccounts()
+	if err != nil {
+		// In a read-only context where we can't fail, return empty
+		return make(map[string]*core.Account)
 	}
-
 	return accounts
 }
 
-// GetAccountCount returns the number of accounts in this shard
+// GetAccountCount returns the number of accounts
 func (am *AccountManager) GetAccountCount() int {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-	return len(am.accounts)
+	accounts, _ := am.db.GetAllAccounts()
+	return len(accounts)
 }
 
 // CreateGenesisAccount creates the genesis account for a shard
@@ -628,7 +625,7 @@ func (am *AccountManager) CreateGenesisAccount(genesisAddr string, initialSupply
 		return fmt.Errorf("genesis address %s does not belong to shard %d", genesisAddr, am.shardID)
 	}
 
-	// Check if genesis account already exists
+	// Check if genesis account already exists (checking DB)
 	if am.AccountExists(genesisAddr) {
 		return fmt.Errorf("genesis account %s already exists", genesisAddr)
 	}
@@ -644,11 +641,8 @@ func (am *AccountManager) CreateGenesisAccount(genesisAddr string, initialSupply
 		StorageRoot:  nil,
 	}
 
-	am.mu.Lock()
-	defer am.mu.Unlock()
-
-	am.accounts[genesisAddr] = genesisAccount
-	return nil
+	// Directly persist
+	return am.UpdateAccount(genesisAccount)
 }
 
 // Utility function for max
@@ -659,62 +653,47 @@ func max(a, b int64) int64 {
 	return b
 }
 
-// Wrapper functions to expose address package functionality
-// These provide a convenient API for other packages without importing crypto/address directly
-
-// GenerateAddress generates a new Thrylos address from a public key
+// Wrappers for crypto address functions
 func GenerateAddress(pubKey crypto.PublicKey) (string, error) {
-	// Use the Address() method from the crypto.PublicKey interface
 	addr, err := pubKey.Address()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate address: %v", err)
 	}
-
-	// Convert the address.Address to string
 	return addr.String(), nil
 }
 
-// ValidateAddress checks if an address has the correct format
 func ValidateAddress(addr string) error {
 	return address.Validate(addr)
 }
 
-// IsValidAddress is a convenience function for address validation
 func IsValidAddress(addr string) bool {
 	return address.IsValid(addr)
 }
 
-// NormalizeAddress converts address to lowercase
 func NormalizeAddress(addr string) (string, error) {
 	return address.NormalizeAddress(addr)
 }
 
-// FormatAddress formats raw bytes as a Thrylos address
 func FormatAddress(addressBytes []byte) (string, error) {
 	return address.FormatAddress(addressBytes)
 }
 
-// AddressToBytes converts a string address to bytes
 func AddressToBytes(addr string) ([]byte, error) {
 	return address.AddressToBytes(addr)
 }
 
-// GetAddressPrefix returns the address prefix for Thrylos
 func GetAddressPrefix() string {
 	return address.GetAddressPrefix()
 }
 
-// GetAddressByteLength returns the byte length of Thrylos addresses
 func GetAddressByteLength() int {
 	return address.GetAddressByteLength()
 }
 
-// EstimateAddressLength estimates the string length of a Thrylos address
 func EstimateAddressLength() int {
 	return address.EstimateAddressLength()
 }
 
-// AddressMetrics provides information about the address format
 func AddressMetrics() map[string]interface{} {
 	return address.AddressMetrics()
 }
