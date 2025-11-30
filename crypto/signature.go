@@ -1,53 +1,40 @@
-// signature.go
 package crypto
 
 import (
 	"bytes"
-	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"fmt"
-
-	"github.com/fxamacker/cbor/v2"
 )
 
 type signature struct {
 	sig []byte
 }
 
-const Ed25519SignatureSize = ed25519.SignatureSize
+// Ethereum signatures are 65 bytes (R + S + V)
+const SignatureSize = 65
 
-var _ Signature = (*signature)(nil) // Interface assertion
+var _ Signature = (*signature)(nil)
 
-// NewSignature constructor matches provided code, returns interface
 func NewSignature(sigBytes []byte) Signature {
-	if len(sigBytes) != ed25519.SignatureSize {
-		// How to handle error if constructor must return Signature?
-		// Option 1: Return nil interface (caller must check)
-		// Option 2: Panic (less idiomatic)
-		// Let's return nil interface for now.
-		fmt.Printf("Error: NewSignature received invalid size %d, expected %d\n", len(sigBytes), ed25519.SignatureSize) // Log error
+	if len(sigBytes) != SignatureSize {
+		fmt.Printf("Error: NewSignature received invalid size %d, expected %d\n", len(sigBytes), SignatureSize)
 		return nil
 	}
-	s := make([]byte, ed25519.SignatureSize)
+	s := make([]byte, SignatureSize)
 	copy(s, sigBytes)
 	return &signature{sig: s}
 }
 
 func SignatureFromBytes(sigBytes []byte) (Signature, error) {
-	return NewSignatureWithError(sigBytes)
-}
-
-// NewSignatureWithError is an alternative constructor if errors are preferred
-func NewSignatureWithError(sigBytes []byte) (Signature, error) {
-	if len(sigBytes) != ed25519.SignatureSize {
-		return nil, fmt.Errorf("invalid signature length: got %d, want %d", len(sigBytes), ed25519.SignatureSize)
+	if len(sigBytes) != SignatureSize {
+		return nil, fmt.Errorf("invalid signature length: got %d, want %d", len(sigBytes), SignatureSize)
 	}
-	s := make([]byte, ed25519.SignatureSize)
+	s := make([]byte, SignatureSize)
 	copy(s, sigBytes)
 	return &signature{sig: s}, nil
 }
 
-// Bytes returns a copy of the signature bytes.
 func (s *signature) Bytes() []byte {
 	if s.sig == nil {
 		return nil
@@ -57,123 +44,51 @@ func (s *signature) Bytes() []byte {
 	return b
 }
 
-// Verify takes a pointer to a PublicKey interface value. Returns nil error on success.
+// Verify delegates verification to the PublicKey implementation
+// This avoids type casting circular dependency issues
 func (s *signature) Verify(pubKey *PublicKey, data []byte) error {
-	// 1. Check interface pointer
-	if pubKey == nil {
-		return errors.New("public key argument (pointer) cannot be nil")
-	}
-	// 2. Dereference pointer
-	pubKeyInt := *pubKey
-	if pubKeyInt == nil {
-		return errors.New("public key interface value cannot be nil")
-	}
-	// 3. Check underlying signature data
-	if s.sig == nil {
-		return errors.New("cannot verify with nil signature data")
+	if pubKey == nil || *pubKey == nil {
+		return errors.New("public key cannot be nil")
 	}
 
-	// 4. Type assert the dereferenced interface value
-	ed25519PubKey, ok := pubKeyInt.(*publicKey)
-	if !ok {
-		return fmt.Errorf("invalid public key type: expected *crypto.publicKey, got %T", pubKeyInt)
-	}
-	if ed25519PubKey.pubKey == nil {
-		return errors.New("underlying public key is nil")
-	}
-
-	sigBytes := s.Bytes() // Use Bytes() method
-	if len(sigBytes) != ed25519.SignatureSize {
-		return fmt.Errorf("invalid signature size: got %d, want %d", len(sigBytes), ed25519.SignatureSize)
-	}
-
-	// Ed25519 verification
-	isValid := ed25519.Verify(ed25519PubKey.pubKey, data, sigBytes)
-
-	if !isValid {
-		return errors.New("invalid signature: ed25519 verification failed")
-	}
-	return nil // Success
+	// Use the interface method on the key to verify this signature
+	// We cast 's' (this signature) to the interface type Signature
+	var sigInterface Signature = s
+	return (*pubKey).Verify(data, &sigInterface)
 }
 
-// VerifyWithSalt takes a pointer to a PublicKey interface value. Returns nil error on success.
-// Note: Ed25519 doesn't use salt/context in the same way as ML-DSA44, but we maintain
-// the interface for compatibility. The salt parameter is ignored for Ed25519.
 func (s *signature) VerifyWithSalt(pubKey *PublicKey, data, salt []byte) error {
-	// 1. Check interface pointer
-	if pubKey == nil {
-		return errors.New("public key argument (pointer) cannot be nil")
-	}
-	// 2. Dereference pointer
-	pubKeyInt := *pubKey
-	if pubKeyInt == nil {
-		return errors.New("public key interface value cannot be nil")
-	}
-	// 3. Check underlying signature data
-	if s.sig == nil {
-		return errors.New("cannot verify with nil signature data")
-	}
-
-	// 4. Type assert the dereferenced interface value
-	ed25519PubKey, ok := pubKeyInt.(*publicKey)
-	if !ok {
-		return fmt.Errorf("invalid public key type: expected *crypto.publicKey, got %T", pubKeyInt)
-	}
-	if ed25519PubKey.pubKey == nil {
-		return errors.New("underlying public key is nil")
-	}
-
-	sigBytes := s.Bytes() // Use Bytes() method
-	if len(sigBytes) != ed25519.SignatureSize {
-		return fmt.Errorf("invalid signature size: got %d, want %d", len(sigBytes), ed25519.SignatureSize)
-	}
-
-	// Ed25519 verification (salt is ignored as Ed25519 doesn't use context)
-	// If you need to incorporate salt, you could hash data+salt before verification
-	isValid := ed25519.Verify(ed25519PubKey.pubKey, data, sigBytes)
-
-	if !isValid {
-		return errors.New("invalid signature: ed25519 verification failed")
-	}
-	return nil // Success
+	// Ethereum/Secp256k1 doesn't use salt, so we ignore it and call standard verify
+	return s.Verify(pubKey, data)
 }
 
-// String returns a hex-encoded representation.
 func (s *signature) String() string {
 	if s.sig == nil {
 		return "Signature(nil)"
 	}
-	return fmt.Sprintf("SigHex:%x", s.sig) // Use internal slice ok here
+	return hex.EncodeToString(s.sig)
 }
 
 func (s *signature) Marshal() ([]byte, error) {
 	if s.sig == nil {
 		return nil, errors.New("cannot marshal nil signature")
 	}
-	return cbor.Marshal(s.sig)
+	// Return raw bytes directly for compatibility
+	return s.Bytes(), nil
 }
 
 func (s *signature) Unmarshal(data []byte) error {
-	var sigData []byte
-	err := cbor.Unmarshal(data, &sigData) // Use pointer to slice
-	if err != nil {
-		return fmt.Errorf("cbor unmarshal failed: %w", err)
+	if len(data) != SignatureSize {
+		return fmt.Errorf("invalid signature size: got %d, want %d", len(data), SignatureSize)
 	}
-	if len(sigData) == 0 {
-		return errors.New("unmarshaled signature data is empty")
-	}
-	if len(sigData) != ed25519.SignatureSize {
-		return fmt.Errorf("invalid signature size after cbor unmarshal: got %d, want %d", len(sigData), ed25519.SignatureSize)
-	}
-	s.sig = sigData // Assign the unmarshaled data
+	s.sig = make([]byte, SignatureSize)
+	copy(s.sig, data)
 	return nil
 }
 
-// Equal takes a Signature interface value.
 func (s *signature) Equal(other Signature) bool {
 	if other == nil {
-		return false // s (receiver) is not nil
+		return false
 	}
-	// Compare bytes via Bytes() method
 	return bytes.Equal(s.Bytes(), other.Bytes())
 }
