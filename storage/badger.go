@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/dgraph-io/badger/v3"
@@ -101,13 +102,25 @@ func NewBadgerStorage(dataDir string) (*BadgerStorage, error) {
 	}
 	fmt.Printf("✅ Directory created/verified: %s\n", dataDir)
 
-	// Use simplified configuration that we know works (from our test)
-	opts := badger.DefaultOptions(dataDir).
-		WithLogger(nil).         // Disable BadgerDB logging
-		WithSyncWrites(false).   // Disable sync writes for testing
-		WithNumVersionsToKeep(1) // Keep only latest version
+	// Determine environment to set safety flags
+	env := strings.ToLower(os.Getenv("THRYLOS_ENVIRONMENT"))
+	isProduction := env == "production" || env == "mainnet"
 
-	fmt.Printf("🔍 Opening BadgerDB with simplified config for %s...\n", dataDir)
+	// Configure BadgerDB options
+	opts := badger.DefaultOptions(dataDir).
+		WithLogger(nil).
+		WithNumVersionsToKeep(1)
+
+	// CRITICAL: Enable SyncWrites in production to prevent data loss/corruption on power failure
+	if isProduction {
+		fmt.Println("🔒 PRODUCTION MODE: Enabling SyncWrites for data integrity")
+		opts = opts.WithSyncWrites(true)
+	} else {
+		fmt.Println("⚠️  DEV MODE: SyncWrites disabled for speed (unsafe for production)")
+		opts = opts.WithSyncWrites(false)
+	}
+
+	fmt.Printf("🔍 Opening BadgerDB with config for %s...\n", dataDir)
 	db, err := badger.Open(opts)
 	if err != nil {
 		delete(badgerInstances, dataDir)
