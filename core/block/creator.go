@@ -2,8 +2,6 @@
 package block
 
 import (
-	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -311,50 +309,7 @@ func (bc *Creator) calculateGasUsed(transactions []*core.Transaction) int64 {
 
 // calculateBlockHash calculates the Blake2b hash of a block
 func (bc *Creator) calculateBlockHash(block *core.Block) (string, error) {
-	var buf bytes.Buffer
-
-	// Serialize block header fields
-	header := block.Header
-
-	// Index
-	indexBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(indexBytes, uint64(header.Index))
-	buf.Write(indexBytes)
-
-	// Previous hash
-	buf.WriteString(header.PrevHash)
-
-	// Timestamp
-	timestampBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(timestampBytes, uint64(header.Timestamp))
-	buf.Write(timestampBytes)
-
-	// Validator
-	buf.WriteString(header.Validator)
-
-	// Transaction root
-	buf.WriteString(header.TxRoot)
-
-	// State root
-	buf.WriteString(header.StateRoot)
-
-	// Gas used
-	gasUsedBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(gasUsedBytes, uint64(header.GasUsed))
-	buf.Write(gasUsedBytes)
-
-	// Gas limit
-	gasLimitBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(gasLimitBytes, uint64(header.GasLimit))
-	buf.Write(gasLimitBytes)
-
-	// Calculate Blake2b hash using crypto/hash
-	hashBytes, err := hash.HashData(buf.Bytes())
-	if err != nil {
-		return "", fmt.Errorf("failed to hash buffer: %w", err)
-	}
-
-	return fmt.Sprintf("%x", hashBytes), nil
+	return CanonicalBlockHash(block)
 }
 
 // SignBlock signs a block with the validator's private key

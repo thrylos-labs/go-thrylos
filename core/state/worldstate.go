@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thrylos-labs/go-thrylos/core/block"
 	math "github.com/thrylos-labs/go-thrylos/core/math"
 
 	"github.com/dgraph-io/badger/v3"
@@ -90,6 +91,14 @@ type AssetToken struct {
 	ExpirationDate   *int64 `json:"expiration_date"`   // Optional expiration
 	RegulatoryInfo   string `json:"regulatory_info"`   // Compliance metadata
 	CreatedAt        int64  `json:"created_at"`
+}
+
+func (ws *WorldState) calculateBlockHash(b *core.Block) string {
+	hash, err := block.CanonicalBlockHash(b)
+	if err != nil {
+		panic(fmt.Sprintf("worldstate.calculateBlockHash: %v", err))
+	}
+	return hash
 }
 
 // InitializeFromConfig initializes the world state with config-driven genesis data
@@ -193,25 +202,6 @@ func (ws *WorldState) InitializeFromConfig() error {
 	fmt.Printf("   - State root: %s\n", ws.stateRoot)
 
 	return nil
-}
-
-// calculateBlockHash calculates the hash of a block
-func (ws *WorldState) calculateBlockHash(block *core.Block) string {
-	// Simple hash calculation for genesis block
-	var buf []byte
-	buf = append(buf, []byte(fmt.Sprintf("%d", block.Header.Index))...)
-	buf = append(buf, []byte(block.Header.PrevHash)...)
-	buf = append(buf, []byte(fmt.Sprintf("%d", block.Header.Timestamp))...)
-	buf = append(buf, []byte(block.Header.Validator)...)
-	buf = append(buf, []byte(fmt.Sprintf("%d", block.Header.GasUsed))...)
-
-	// Add transaction hashes
-	for _, tx := range block.Transactions {
-		buf = append(buf, []byte(tx.Hash)...)
-	}
-
-	hash := blake2b.Sum256(buf)
-	return fmt.Sprintf("%x", hash)
 }
 
 // NewWorldState creates a new world state for a shard with config-driven initialization

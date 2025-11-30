@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
+	block2 "github.com/thrylos-labs/go-thrylos/core/block"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"golang.org/x/crypto/blake2b"
@@ -518,7 +519,7 @@ func (bp *BlockProposer) calculateMerkleRoot(transactions []*core.Transaction) s
 
 // calculateBlockHash calculates the hash of a block - made public for use by validator
 func (bp *BlockProposer) calculateBlockHash(block *core.Block) string {
-	hash, err := core.CanonicalBlockHash(block) // ✅ use the function in proto/core
+	hash, err := block2.CanonicalBlockHash(block)
 	if err != nil {
 		// This should never happen in normal operation; treat as programmer error.
 		panic(fmt.Sprintf("calculateBlockHash: %v", err))
