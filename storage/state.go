@@ -26,6 +26,7 @@ import (
 	"fmt"
 
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/types"
 )
 
 // StateStorage handles blockchain state persistence
@@ -310,4 +311,17 @@ func (ss *StateStorage) GetTotalTransactions() (int64, error) {
 
 	count := int64(binary.BigEndian.Uint64(data))
 	return count, nil
+}
+
+// SaveConsensusVote persists a vote to prevent double-voting after restart
+func (ss *StateStorage) SaveConsensusVote(vote *types.Vote) error {
+	key := []byte(fmt.Sprintf("consensus:vote:%d:%s", vote.TargetEpoch, vote.ValidatorAddress))
+	data, _ := json.Marshal(vote) // Import encoding/json
+	return ss.storage.Set(key, data)
+}
+
+// HasVoted checks if we already voted for a specific epoch
+func (ss *StateStorage) HasVoted(epoch uint64, validatorAddr string) (bool, error) {
+	key := []byte(fmt.Sprintf("consensus:vote:%d:%s", epoch, validatorAddr))
+	return ss.storage.Has(key)
 }

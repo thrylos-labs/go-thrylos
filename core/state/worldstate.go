@@ -15,12 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thrylos-labs/go-thrylos/core/block"
-	math "github.com/thrylos-labs/go-thrylos/core/math"
-
 	"github.com/dgraph-io/badger/v3"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	"github.com/thrylos-labs/go-thrylos/core/block"
+	math "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/transaction"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
@@ -205,11 +204,6 @@ func (ws *WorldState) InitializeFromConfig() error {
 }
 
 // NewWorldState creates a new world state for a shard with config-driven initialization
-// NewWorldState creates a new world state for a shard with config-driven initialization
-// Simplified version without debug - just add the storage parameter:
-
-// Replace your NewWorldState function with this updated version:
-
 func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg *config.Config, badgerStorage *storage.BadgerStorage) (*WorldState, error) {
 	fmt.Printf("🔍 NewWorldState: Using existing BadgerStorage (no creation needed)\n")
 
@@ -218,19 +212,20 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 	db := storage.NewDB(badgerStorage)
 	stateStorage := storage.NewStateStorage(badgerStorage)
 
+	// Pass stateStorage to AccountManager for DB backing
 	acctMgr := account.NewAccountManager(stateStorage, shardID, totalShards)
 
 	ws := &WorldState{
 		config:         cfg,
 		db:             db,
 		state:          stateStorage,
-		accountManager: acctMgr, // Use the variable here
+		accountManager: acctMgr,
 		txPool: transaction.NewPool(
 			shardID,
 			totalShards,
 			cfg.Consensus.MaxTxPerBlock,
 			cfg.Consensus.MinGasPrice,
-			acctMgr, // <--- Add this variable
+			acctMgr,
 		),
 
 		txValidator:       transaction.NewValidator(shardID, totalShards, cfg),
@@ -245,7 +240,7 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 		assets:            make(map[string]*AssetToken),
 		assetBalances:     make(map[string]map[string]int64),
 		assetRegistry:     make(map[string]string),
-		totalTransactions: 0, // ADD THIS
+		totalTransactions: 0,
 		badgerStorage:     badgerStorage,
 	}
 
@@ -275,7 +270,7 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 		ws.totalSupply = cfg.Economics.GenesisSupply
 		ws.totalStaked = 0
 
-		// *** CRITICAL FIX: Initialize from config ***
+		// Initialize from config
 		if err := ws.InitializeFromConfig(); err != nil {
 			return nil, fmt.Errorf("failed to initialize genesis from config: %v", err)
 		}
@@ -290,6 +285,11 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 	ws.crossShardManager = NewCrossShardManager(ws)
 
 	return ws, nil
+}
+
+// GetStateStorage returns the state storage handler (needed for consensus persistence)
+func (ws *WorldState) GetStateStorage() *storage.StateStorage {
+	return ws.state
 }
 
 func (ws *WorldState) GetBadgerDB() *badger.DB {
@@ -364,7 +364,6 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 		ws.txPool.RemoveTransaction(tx.Id)
 	}
 
-	// *** IMPORTANT CHANGE HERE: don't rely on ws.blocks as the source of truth ***
 	ws.blocks = append(ws.blocks, block)
 	ws.currentHash = block.Hash
 	ws.height = block.Header.Index
@@ -1016,7 +1015,6 @@ func NewCrossShardManager(worldState *WorldState) *CrossShardManager {
 }
 
 // InitiateTransfer initiates a cross-shard transfer
-// InitiateTransfer initiates a cross-shard transfer
 func (csm *CrossShardManager) InitiateTransfer(from, to string, amount int64, nonce uint64) (*CrossShardTransfer, error) {
 	csm.mu.Lock()
 	defer csm.mu.Unlock()
@@ -1277,6 +1275,7 @@ func (ws *WorldState) RestoreFromSnapshot(snapshot *StateSnapshot) error {
 	}
 
 	// Clear current state
+	// Pass existing state storage to account manager
 	ws.accountManager = account.NewAccountManager(ws.state, ws.shardID, ws.totalShards)
 	ws.validators = make(map[string]*core.Validator)
 
@@ -1317,7 +1316,6 @@ func (ws *WorldState) GetStakingManager() *StakingManager {
 	return &StakingManager{worldState: ws}
 }
 
-// Delegate stakes tokens to a validator
 // Delegate stakes tokens to a validator
 func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount int64) error {
 	ws := sm.worldState
@@ -1436,7 +1434,6 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 	return nil
 }
 
-// Undelegate unstakes tokens from a validator
 // Undelegate unstakes tokens from a validator
 func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount int64) error {
 	ws := sm.worldState
@@ -1705,7 +1702,7 @@ func (sm *StakingManager) GetDelegations(delegatorAddr string) (map[string]int64
 		return make(map[string]int64), nil
 	}
 
-	// Return copy to prevent external modification
+	// Return a copy to prevent external modification
 	delegations := make(map[string]int64)
 	for validator, amount := range account.DelegatedTo {
 		delegations[validator] = amount
@@ -1872,7 +1869,7 @@ func (ws *WorldState) Clear() error {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 
-	// Reset account manager
+	// Reset account manager with proper state storage injection
 	ws.accountManager = account.NewAccountManager(ws.state, ws.shardID, ws.totalShards)
 
 	// Clear validators
@@ -2499,7 +2496,6 @@ func (ws *WorldState) GetAssetBalance(assetID, address string) (int64, error) {
 	return balance, nil
 }
 
-// TransferAssetBalance transfers asset tokens between addresses
 // TransferAssetBalance transfers asset tokens between addresses
 func (ws *WorldState) TransferAssetBalance(assetID, from, to string, amount int64) error {
 	if amount <= 0 {

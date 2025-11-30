@@ -24,7 +24,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
-	"github.com/thrylos-labs/go-thrylos/types"
+	"github.com/thrylos-labs/go-thrylos/types" // Import types package for persistence
 	"golang.org/x/crypto/blake2b"
 )
 
@@ -274,7 +274,7 @@ func (ce *ConsensusEngine) updateValidatorActivity(validatorAddr string, wasBloc
 	}
 }
 
-// proposeBlock creates and broadcasts a new block proposal
+// proposeBlock creates and broadcast a new block proposal
 func (ce *ConsensusEngine) proposeBlock() error {
 	// Use the dedicated block proposer
 	result, err := ce.blockProposer.ProposeBlock(ce.currentSlot, ce.currentEpoch)
@@ -731,13 +731,37 @@ func (ce *ConsensusEngine) handleVote(vote *Vote) {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
 
+	// 1. Persistence Check (Prevent Double Voting)
+	hasVoted, _ := ce.worldState.GetStateStorage().HasVoted(vote.TargetEpoch, vote.ValidatorAddress)
+	if hasVoted {
+		fmt.Printf("⚠️ Duplicate vote detected for validator %s at epoch %d\n", vote.ValidatorAddress, vote.TargetEpoch)
+		return
+	}
+
 	// Validate vote
 	if err := ce.validateVote(vote); err != nil {
 		fmt.Printf("Invalid vote: %v\n", err)
 		return
 	}
 
-	// Store vote
+	// 2. Persist Vote
+	// Convert from local pos.Vote to shared types.Vote for persistence
+	// This ensures type compatibility with the storage layer
+	storageVote := &types.Vote{
+		ValidatorAddress: vote.ValidatorAddress,
+		SourceBlockHash:  vote.SourceBlockHash,
+		TargetBlockHash:  vote.TargetBlockHash,
+		SourceEpoch:      vote.SourceEpoch,
+		TargetEpoch:      vote.TargetEpoch,
+		Signature:        vote.Signature,
+	}
+
+	if err := ce.worldState.GetStateStorage().SaveConsensusVote(storageVote); err != nil {
+		fmt.Printf("❌ Failed to persist vote: %v\n", err)
+		return
+	}
+
+	// Store vote in memory
 	key := fmt.Sprintf("%s-%d", vote.ValidatorAddress, vote.TargetEpoch)
 	ce.votes[key] = vote
 }
