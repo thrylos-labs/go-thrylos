@@ -57,7 +57,6 @@ func (h *Hash) Equal(other Hash) bool {
 	return bytes.Equal(h[:], other[:])
 }
 
-// TODO: optimise the hashing function
 // // Initialize a cache with a mutex for concurrent access control
 var (
 	addressCache = make(map[string]string)

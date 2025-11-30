@@ -457,7 +457,6 @@ func (ce *ConsensusEngine) isCurrentNodeValidator() bool {
 }
 
 // processAttestations processes received attestations
-// OLD CODE (remove the TODO comment and add broadcasting):
 func (ce *ConsensusEngine) processAttestations() {
 	for _, attestation := range ce.attestations {
 		if err := ce.validateAttestation(attestation); err != nil {
@@ -469,8 +468,6 @@ func (ce *ConsensusEngine) processAttestations() {
 			// Slashing violation detected!
 			fmt.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n",
 				attestation.ValidatorAddress, err)
-
-			// TODO: Broadcast slashing evidence to network  ← REMOVE THIS TODO
 
 			// ✅ NEW: Create and broadcast slashing evidence
 			evidence := ce.createSlashingEvidenceFromAttestation(attestation, err)

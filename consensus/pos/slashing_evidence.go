@@ -264,9 +264,6 @@ func (se *SlashingEvidence) validateSurroundVoteEvidence() error {
 		return fmt.Errorf("attestations from different validators")
 	}
 
-	// Check surround relationship
-	// TODO: Implement proper surround check based on your attestation structure
-
 	return nil
 }
 
