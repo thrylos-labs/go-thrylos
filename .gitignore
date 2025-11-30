@@ -6,7 +6,12 @@ logs/
 *.log
 vm/:memory
 
-# api info
+# Binaries
+thrylos-dev
+thrylos-prod
+thrylos
+
+# API info
 server.crt
 server.key
 
