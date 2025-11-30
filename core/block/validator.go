@@ -218,17 +218,15 @@ func (v *Validator) validateCryptographic(block *core.Block, publicKey *crypto.P
 
 // verifyBlockHash verifies that a block's hash is correct
 func (v *Validator) verifyBlockHash(block *core.Block) error {
-	// Create a temporary creator to calculate hash
-	tempCreator := NewCreator(v.shardID, v.totalShards)
+	if block == nil {
+		return fmt.Errorf("block is nil")
+	}
 
-	// Temporarily clear the hash to recalculate
 	originalHash := block.Hash
-	block.Hash = ""
+	block.Hash = "" // ensure we're not accidentally hashing the existing hash
 
-	calculatedHash, err := tempCreator.calculateBlockHash(block)
-
-	// Restore original hash
-	block.Hash = originalHash
+	calculatedHash, err := CanonicalBlockHash(block)
+	block.Hash = originalHash // restore
 
 	if err != nil {
 		return fmt.Errorf("failed to recalculate block hash: %v", err)
