@@ -71,6 +71,19 @@ Before building Thrylos, ensure you have the following installed:
    go build -o bin/thrylos ./cmd/thrylos
    ```
 
+## 🛡️ Secure Genesis Setup (Production)
+
+For production or public testnets, **never** use hardcoded addresses. Follow this process to generate a secure genesis configuration.
+
+### 1. Generate Cold Keys
+On an offline machine (air-gapped), generate your genesis keys. Do not store the private key on the node server.
+
+```bash
+# Generate a new keypair
+openssl genpkey -algorithm Ed25519 -out genesis_private.pem
+# Extract public key/address (hypothetical command, depends on your key tool)
+# Store the private key in a physical safe.
+
 5. **🔐 TLS Certificates (for prod-style API)**
 
    If you plan to run the API server with TLS enabled (HTTPS), you must generate certificates, for example:

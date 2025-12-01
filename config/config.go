@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -281,32 +283,23 @@ type ValidatorKeyConfig struct {
 }
 
 func Load() (*Config, error) {
-	return &Config{
+	// CHANGE: Assign to 'cfg' variable instead of returning immediately
+	cfg := &Config{
 		NodeID:   "thrylos-v2-node",
-		DataDir:  "/home/thrylos/data",
+		DataDir:  "./data",
 		LogLevel: "info",
 
-		Environment: "development", // default; overridden by main_prod.go
+		Environment: "development",
 
 		Validator: ValidatorKeyConfig{
 			Enabled:     false,
-			KeyFilePath: "", // production will set this explicitly
+			KeyFilePath: "",
 		},
 
-		// Genesis token allocation
+		// SAFE DEFAULT: Empty genesis. Must be loaded from file.
 		Genesis: GenesisAllocation{
 			TotalGenesis: GenesisSupply,
-			Accounts: []GenesisAccount{
-				// Node developer/validator account - ALL 15M THRYLOS for testing
-				{
-					// NNEDS TO BE GENERATED TO BE A REAL ADDRESS FOR PRODUCTION
-					Address:      "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", // Your consistent node address
-					Balance:      15000000 * BaseUnit,                          // 15M THRYLOS (full genesis supply for testing)
-					Purpose:      "Development node with full genesis supply for testing",
-					Locked:       false,
-					UnlockBlocks: 0,
-				},
-			},
+			Accounts:     []GenesisAccount{},
 		},
 
 		Network: NetworkConfig{
@@ -314,14 +307,14 @@ func Load() (*Config, error) {
 			BootstrapPeers: []string{},
 			MaxPeers:       50,
 			PingInterval:   30 * time.Second,
-			NetworkID:      "testnet",      // Changed from "thrylos-mainnet"
-			ChainID:        TestnetChainID, // Add this - defaults to "thrylos-testnet-1"
+			NetworkID:      "testnet",
+			ChainID:        TestnetChainID,
 		},
 
 		Consensus: ConsensusConfig{
 			BlockTime:          3 * time.Second,
 			MaxTxPerBlock:      1000,
-			MaxBlockSize:       2 * 1024 * 1024, // 2MB
+			MaxBlockSize:       2 * 1024 * 1024,
 			MinGasPrice:        BaseGasPrice,
 			MaxValidators:      100,
 			ValidatorRotation:  24 * time.Hour,
@@ -329,95 +322,62 @@ func Load() (*Config, error) {
 			MaxPastBlockTime:   2 * time.Hour,
 			MaxTimestampSkew:   5 * time.Minute,
 			MaxTimestampAge:    1 * time.Hour,
-			MaxTxDataSize:      1024 * 1024, // 1MB max transaction data
+			MaxTxDataSize:      1024 * 1024,
 			StakeCacheTTL:      30 * time.Second,
+			SlashingEnabled:    false,
 
-			// TESTNET CONFIGURATION: Permissive Slashing
-			// Disabled for initial testnet stability
-			SlashingEnabled: false,
-
-			SlashingDoubleVote:      50, // 50% penalty for double voting
-			SlashingSurroundVote:    30, // 30% penalty for surround voting
-			SlashingInvalidProposal: 20, // 20% penalty for invalid proposals
-			SlashingInvalidSig:      10, // 10% penalty for invalid signatures
-
-			// DOWNTIME SENSITIVITY RELAXATION:
-			// Reduced penalty to 1% (was 5%)
-			SlashingDowntime: 1,
-
-			// Increased tolerance: ~24 hours of misses (28,800 blocks @ 3s/block)
-			// Prevents mass jailing during network instability
-			MaxMissedAttestations: 28800,
-
-			// Reduced jail time for quicker recovery during testing
-			// 1 hour (was 168h / 7 days)
-			JailDurationHours: 1,
+			SlashingDoubleVote:      50,
+			SlashingSurroundVote:    30,
+			SlashingInvalidProposal: 20,
+			SlashingInvalidSig:      10,
+			SlashingDowntime:        1,
+			MaxMissedAttestations:   28800,
+			JailDurationHours:       1,
 		},
 
 		Staking: StakingConfig{
-			// CHANGED: Uses the new 2,500 constant
-			MinValidatorStake: MinimumValidatorStake,
-			MinDelegation:     MinimumDelegation,
-
-			// CHANGED: Self stake is now 250 THRYLOS (10% of 2,500)
+			MinValidatorStake:          MinimumValidatorStake,
+			MinDelegation:              MinimumDelegation,
 			MinSelfStake:               MinimumValidatorStake / 10,
 			MaxCommission:              0.20,
 			CommissionChangeMax:        0.01,
 			UnbondingTime:              21 * 24 * time.Hour,
 			MaxDelegationsPerValidator: 1000,
-
-			// Slashing parameters
-			SlashFractionDoubleSign: 0.05, // 5% slash for double signing
-
-			// Relaxed downtime penalties
-			SlashFractionDowntime: 0.001,            // 0.1% slash for extended downtime
-			DowntimeJailDuration:  10 * time.Minute, // Short jail for minor infractions
-
-			// Relaxed uptime requirements for Testnet
-			MinSignedPerWindow: 0.05,  // Must sign only 5% of blocks (was 50%)
-			SignedBlocksWindow: 30000, // Window of ~25 hours (was 10,000)
+			SlashFractionDoubleSign:    0.05,
+			SlashFractionDowntime:      0.001,
+			DowntimeJailDuration:       10 * time.Minute,
+			MinSignedPerWindow:         0.05,
+			SignedBlocksWindow:         30000,
 		},
 
 		Economics: EconomicsConfig{
-			TotalSupply:       TotalSupply,   // 100M THRYLOS
-			GenesisSupply:     GenesisSupply, // 15M THRYLOS
-			CirculatingSupply: GenesisSupply, // Start with genesis supply
-
-			InflationRate: 0.04, // 4% annual (balanced)
-			InflationMax:  0.07,
-			InflationMin:  0.02,
-			GoalBonded:    0.70,
-
-			// Fee parameters
-			BaseGasPrice: BaseGasPrice,                 // 10
-			MinimumFee:   BaseGasPrice * StandardTxGas, // 0.00021 THRYLOS
-
-			// Gas Limits (Explicitly defined)
-			MinGasLimit: StandardTxGas,
-			MaxGasPerTx: 2000000,
-			MaxGasPrice: 10000,
-			MaxBlockGas: MaxGasPerBlock,
-
-			// Rewards
-			BlockReward:         BlockReward, // 0.38 THRYLOS
+			TotalSupply:         TotalSupply,
+			GenesisSupply:       GenesisSupply,
+			CirculatingSupply:   GenesisSupply,
+			InflationRate:       0.04,
+			InflationMax:        0.07,
+			InflationMin:        0.02,
+			GoalBonded:          0.70,
+			BaseGasPrice:        BaseGasPrice,
+			MinimumFee:          BaseGasPrice * StandardTxGas,
+			MinGasLimit:         StandardTxGas,
+			MaxGasPerTx:         2000000,
+			MaxGasPrice:         10000,
+			MaxBlockGas:         MaxGasPerBlock,
+			BlockReward:         BlockReward,
 			CommunityTax:        0.03,
 			BaseProposerReward:  0.015,
 			BonusProposerReward: 0.035,
-
-			// CHANGED: Increased APR slightly to incentivize the 2,500 stake
-			ValidatorRewardRate: 0.12, // 12% APY for Validators
-			DelegatorRewardRate: 0.08, // 8% APY for Delegators
-
-			MinBalance:    MinimumBalance,     // 0.001 THRYLOS
-			MinTransfer:   MinimumTransfer,    // 0.01 THRYLOS
-			MinStake:      MinimumStakeAmount, // 1 THRYLOS
-			MinDelegation: MinimumDelegation,  // 0.1 THRYLOS
-
-			// Distribution pools
-			GenesisDistribution: GenesisDistribution, // 15M THRYLOS
-			ValidatorRewardPool: ValidatorRewardPool, // 60M THRYLOS
-			LiquidityPool:       LiquidityPool,       // 15M THRYLOS
-			DevelopmentPool:     DevelopmentPool,     // 10M THRYLOS
+			ValidatorRewardRate: 0.12,
+			DelegatorRewardRate: 0.08,
+			MinBalance:          MinimumBalance,
+			MinTransfer:         MinimumTransfer,
+			MinStake:            MinimumStakeAmount,
+			MinDelegation:       MinimumDelegation,
+			GenesisDistribution: GenesisDistribution,
+			ValidatorRewardPool: ValidatorRewardPool,
+			LiquidityPool:       LiquidityPool,
+			DevelopmentPool:     DevelopmentPool,
 		},
 
 		Sharding: ShardingConfig{
@@ -437,36 +397,69 @@ func Load() (*Config, error) {
 			EnableCORS:    true,
 			RateLimit:     10,
 			EnableMetrics: true,
-			EnableFaucet:  true, // dev default; main_prod.go will override to false in prod env
+			EnableFaucet:  true,
 		},
-
-		// For production, you'd change to:
-		// API: APIConfig{
-		//     EnableAPI:     true,
-		//     RESTAddr:      ":8443",                   // HTTPS production port
-		//     EnableTLS:     true,                      // HTTPS for production
-		//     CertFile:      "/etc/ssl/certs/domain.crt",
-		//     KeyFile:       "/etc/ssl/private/domain.key",
-		//     EnableCORS:    true,
-		//     RateLimit:     1000,
-		//     EnableMetrics: true,
-		// },
 
 		P2P: P2PConfig{
 			Enabled:            true,
 			ListenPort:         9000,
 			BootstrapPeers:     []string{},
 			MaxPeers:           50,
-			EnableMDNS:         false, // Change to false for production
+			EnableMDNS:         false,
 			EnableDHT:          true,
-			MaxMessageSize:     10 * 1024 * 1024, // 10MB
-			MaxBlockRangeSize:  100,              // 100 blocks
+			MaxMessageSize:     10 * 1024 * 1024,
+			MaxBlockRangeSize:  100,
 			StreamReadTimeout:  30 * time.Second,
 			StreamWriteTimeout: 30 * time.Second,
-			RequestRateLimit:   60,  // 60 req/min
-			MaxPendingRequests: 100, // 100 pending
+			RequestRateLimit:   60,
+			MaxPendingRequests: 100,
 		},
-	}, nil
+	} // End of struct assignment
+
+	// === GENESIS LOADING LOGIC ===
+
+	// 2. Attempt to load genesis.json
+	genesisFile := "genesis.json"
+	if _, err := os.Stat(genesisFile); os.IsNotExist(err) {
+		// Try config directory
+		genesisFile = "config/genesis.json"
+	}
+
+	if err := loadGenesisFromFile(genesisFile, cfg); err != nil {
+		fmt.Printf("⚠️  Warning: Could not load %s (%v). Using empty genesis.\n", genesisFile, err)
+	} else {
+		fmt.Printf("✅ Loaded genesis configuration from %s\n", genesisFile)
+	}
+
+	return cfg, nil
+}
+
+// loadGenesisFromFile reads the genesis allocation from a JSON file
+func loadGenesisFromFile(path string, cfg *Config) error {
+	file, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var allocation GenesisAllocation
+	if err := json.Unmarshal(file, &allocation); err != nil {
+		return fmt.Errorf("invalid genesis.json format: %v", err)
+	}
+
+	// Validate that the file matches the expected supply
+	var totalAllocated int64
+	for _, acc := range allocation.Accounts {
+		totalAllocated += acc.Balance
+	}
+
+	// Allow small variance or exact match depending on your tokenomics strictness
+	if totalAllocated != cfg.Economics.GenesisSupply && totalAllocated != cfg.Economics.GenesisSupply*BaseUnit {
+		// This warning helps prevent inflation bugs
+		fmt.Printf("⚠️  Genesis allocation (%d) does not match Config Supply (%d)\n", totalAllocated, cfg.Economics.GenesisSupply)
+	}
+
+	cfg.Genesis = allocation
+	return nil
 }
 
 // GetGenesisAccounts returns the genesis account allocation

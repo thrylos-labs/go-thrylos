@@ -4,7 +4,6 @@
 package main
 
 import (
-	"crypto/ed25519"
 	"crypto/sha256"
 	"fmt"
 	"time"
@@ -12,16 +11,18 @@ import (
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
-	"github.com/thrylos-labs/go-thrylos/node"
+	"github.com/thrylos-labs/go-thrylos/node" // UNCOMMENTED: Required for NodeConfig and NewNode
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
-// Deterministically derive an ed25519 private key per-node for dev networks only.
+// Deterministically derive a secp256k1 private key per-node for dev networks only.
 func getNodeSpecificPrivateKey(nodeID int) (crypto.PrivateKey, error) {
 	seedStr := fmt.Sprintf("thrylos-development-node-key-%d-2024", nodeID)
+
+	// FIX: SHA256 produces exactly 32 bytes (256 bits), which fits Secp256k1 requirements.
 	hash := sha256.Sum256([]byte(seedStr))
-	edPriv := ed25519.NewKeyFromSeed(hash[:])
-	return crypto.NewPrivateKeyFromBytes(edPriv)
+
+	return crypto.NewPrivateKeyFromBytes(hash[:])
 }
 
 // createAllValidators generates a shared genesis validator set for dev networks.
@@ -62,6 +63,7 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 			return nil, nil, nil, fmt.Errorf("failed to derive dev private key for node %d: %w", nodeID, err)
 		}
 
+		// Use the public key interface to generate the address
 		addr, err := account.GenerateAddress(priv.PublicKey())
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to derive address for node %d: %w", nodeID, err)
