@@ -9,6 +9,7 @@ import (
 
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/consensus/validator"
+	"github.com/thrylos-labs/go-thrylos/core/chain" // Import chain package
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -61,6 +62,9 @@ type ConsensusEngine struct {
 	// Configuration
 	config *config.Config
 
+	// Chain reference for Reorgs
+	blockchain *chain.Blockchain
+
 	// Validator management
 	validatorManager *validator.Manager
 	validatorSet     *validator.Set
@@ -101,9 +105,9 @@ type ConsensusEngine struct {
 	blocksMissed     uint64
 	attestationsMade uint64
 
-	chainCache *ChainCache // ADD THIS
+	chainCache *ChainCache
 
-	slashingManager *SlashingManager // ADD THIS LINE
+	slashingManager *SlashingManager
 
 	evidenceTracker *EvidenceTracker
 

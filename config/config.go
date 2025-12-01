@@ -164,26 +164,26 @@ type NetworkConfig struct {
 }
 
 type ConsensusConfig struct {
-	BlockTime          time.Duration `json:"block_time"`
-	MaxTxPerBlock      int           `json:"max_tx_per_block"`
-	MaxBlockSize       int64         `json:"max_block_size"`
-	MinGasPrice        int64         `json:"min_gas_price"`
-	MaxValidators      int           `json:"max_validators"`
-	ValidatorRotation  time.Duration `json:"validator_rotation"`
-	SlashingEnabled    bool          `json:"slashing_enabled"`
-	MaxFutureBlockTime time.Duration `json:"max_future_block_time"` // 15s
-	MaxPastBlockTime   time.Duration `json:"max_past_block_time"`   // 2h
-	MaxTimestampSkew   time.Duration `json:"max_timestamp_skew"`
-	MaxTimestampAge    time.Duration `json:"max_timestamp_age"`
-	MaxTxDataSize      int           `json:"max_tx_data_size"`
-
-	SlashingDoubleVote      int    `json:"slashing_double_vote"`      // Percentage (50)
-	SlashingSurroundVote    int    `json:"slashing_surround_vote"`    // Percentage (30)
-	SlashingInvalidProposal int    `json:"slashing_invalid_proposal"` // Percentage (20)
-	SlashingDowntime        int    `json:"slashing_downtime"`         // Percentage (5)
-	SlashingInvalidSig      int    `json:"slashing_invalid_sig"`      // Percentage (10)
-	MaxMissedAttestations   uint64 `json:"max_missed_attestations"`   // Count (100)
-	JailDurationHours       int    `json:"jail_duration_hours"`       // Hours (168 = 7 days)
+	BlockTime               time.Duration `json:"block_time"`
+	MaxTxPerBlock           int           `json:"max_tx_per_block"`
+	MaxBlockSize            int64         `json:"max_block_size"`
+	MinGasPrice             int64         `json:"min_gas_price"`
+	MaxValidators           int           `json:"max_validators"`
+	ValidatorRotation       time.Duration `json:"validator_rotation"`
+	SlashingEnabled         bool          `json:"slashing_enabled"`
+	MaxFutureBlockTime      time.Duration `json:"max_future_block_time"` // 15s
+	MaxPastBlockTime        time.Duration `json:"max_past_block_time"`   // 2h
+	MaxTimestampSkew        time.Duration `json:"max_timestamp_skew"`
+	MaxTimestampAge         time.Duration `json:"max_timestamp_age"`
+	MaxTxDataSize           int           `json:"max_tx_data_size"`
+	StakeCacheTTL           time.Duration `json:"stake_cache_ttl"`
+	SlashingDoubleVote      int           `json:"slashing_double_vote"`      // Percentage (50)
+	SlashingSurroundVote    int           `json:"slashing_surround_vote"`    // Percentage (30)
+	SlashingInvalidProposal int           `json:"slashing_invalid_proposal"` // Percentage (20)
+	SlashingDowntime        int           `json:"slashing_downtime"`         // Percentage (5)
+	SlashingInvalidSig      int           `json:"slashing_invalid_sig"`      // Percentage (10)
+	MaxMissedAttestations   uint64        `json:"max_missed_attestations"`   // Count (100)
+	JailDurationHours       int           `json:"jail_duration_hours"`       // Hours (168 = 7 days)
 }
 
 type StakingConfig struct {
@@ -330,13 +330,14 @@ func Load() (*Config, error) {
 			MaxTimestampSkew:        5 * time.Minute,
 			MaxTimestampAge:         1 * time.Hour,
 			MaxTxDataSize:           1024 * 1024, // 1MB max transaction data
-			SlashingDoubleVote:      50,          // 50% penalty for double voting
-			SlashingSurroundVote:    30,          // 30% penalty for surround voting
-			SlashingInvalidProposal: 20,          // 20% penalty for invalid proposals
-			SlashingDowntime:        5,           // 5% penalty for downtime
-			SlashingInvalidSig:      10,          // 10% penalty for invalid signatures
-			MaxMissedAttestations:   100,         // Slash after 100 missed attestations
-			JailDurationHours:       168,         // 7 days (168 hours)
+			StakeCacheTTL:           30 * time.Second,
+			SlashingDoubleVote:      50,  // 50% penalty for double voting
+			SlashingSurroundVote:    30,  // 30% penalty for surround voting
+			SlashingInvalidProposal: 20,  // 20% penalty for invalid proposals
+			SlashingDowntime:        5,   // 5% penalty for downtime
+			SlashingInvalidSig:      10,  // 10% penalty for invalid signatures
+			MaxMissedAttestations:   100, // Slash after 100 missed attestations
+			JailDurationHours:       168, // 7 days (168 hours)
 		},
 
 		Staking: StakingConfig{

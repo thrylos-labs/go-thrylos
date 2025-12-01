@@ -51,6 +51,7 @@ type ForkChoiceMetrics struct {
 type WorldStateReader interface {
 	GetValidator(address string) (*core.Validator, error)
 	GetActiveValidators() []*core.Validator
+	GetBlockByHash(hash string) (*core.Block, error)
 }
 
 // NewForkChoice creates a new fork choice instance with memory management
@@ -379,6 +380,72 @@ func (fc *ForkChoice) GetMetrics() *ForkChoiceMetrics {
 	metrics.TotalAttestations = attestationCount
 
 	return &metrics
+}
+
+// consensus/pos/fork_choice.go
+
+// ADD THESE METHODS TO THE ForkChoice STRUCT
+
+// IsViableChain checks if a block is a valid candidate for the head of the chain.
+// It enforces the Finality Rule: A block MUST descend from the finalized checkpoint.
+func (fc *ForkChoice) IsViableChain(blockHash string) bool {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+
+	// 1. If no checkpoint is finalized yet, all chains are technically viable
+	if fc.finalizedCheckpoint == nil {
+		return true
+	}
+
+	// 2. The new block's epoch cannot be older than the finalized epoch
+	// We use the block epoch map cache for quick lookup
+	blockEpoch, exists := fc.blockEpochMap[blockHash]
+	if !exists {
+		// If we don't know the block, we can't switch to it safely
+		return false
+	}
+
+	if blockEpoch < fc.finalizedCheckpoint.Epoch {
+		return false
+	}
+
+	// 3. CRITICAL: The block must trace back to the finalized block hash.
+	return fc.isDescendant(blockHash, fc.finalizedCheckpoint.BlockHash)
+}
+
+// isDescendant checks if childHash is a descendant of ancestorHash
+// It traverses backwards through the WorldStateReader
+func (fc *ForkChoice) isDescendant(childHash, ancestorHash string) bool {
+	if childHash == ancestorHash {
+		return true
+	}
+
+	currentHash := childHash
+	maxDepth := 1000 // Safety cap to prevent infinite loops
+
+	for i := 0; i < maxDepth; i++ {
+		// Use the interface we updated in Step 1
+		block, err := fc.worldState.GetBlockByHash(currentHash)
+		if err != nil || block == nil {
+			// Block not found in chain or DB error - assume not a descendant
+			return false
+		}
+
+		// Check parent
+		if block.Header.PrevHash == ancestorHash {
+			return true
+		}
+
+		// Stop if we reach genesis
+		if block.Header.PrevHash == "" {
+			return false
+		}
+
+		// Move backwards
+		currentHash = block.Header.PrevHash
+	}
+
+	return false
 }
 
 // IsBlockFinalized checks if a specific block is finalized

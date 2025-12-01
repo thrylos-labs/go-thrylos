@@ -407,6 +407,48 @@ func (bc *Blockchain) CreateBlock(validator string, privateKey crypto.PrivateKey
 	return block, nil
 }
 
+// ReorganizeChain switches the canonical chain to a new fork.
+// newBlocks must be sorted from oldest (common ancestor + 1) to newest (new head).
+func (bc *Blockchain) ReorganizeChain(newBlocks []*core.Block) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	if len(newBlocks) == 0 {
+		return fmt.Errorf("no blocks to reorganize")
+	}
+
+	firstNewBlock := newBlocks[0]
+
+	// 1. Validate link to common ancestor
+	commonAncestor, err := bc.worldState.GetBlockByHash(firstNewBlock.Header.PrevHash)
+	if err != nil || commonAncestor == nil {
+		return fmt.Errorf("common ancestor block %s not found", firstNewBlock.Header.PrevHash)
+	}
+
+	fmt.Printf("🔀 Executing Reorg: Switching from height %d to fork starting at %d\n",
+		bc.worldState.GetHeight(), firstNewBlock.Header.Index)
+
+	// 2. Apply new blocks
+	// Note: In a production DB, you might need to "unwind" old blocks first.
+	// Since our WorldState.AddBlock overwrites based on height/hash, strictly applying
+	// the new fork works for this architecture, provided nonces/balances align.
+	for _, block := range newBlocks {
+		// Execute without validation checks that would fail due to "existing block" errors
+		// We use the internal execution logic
+		if _, err := bc.worldState.ExecuteBatchTransactions(block.Transactions); err != nil {
+			return fmt.Errorf("reorg failed: transaction execution error in block %d: %v", block.Header.Index, err)
+		}
+
+		// Force add the block (overwriting canonical pointer)
+		if err := bc.worldState.AddBlock(block); err != nil {
+			return fmt.Errorf("reorg failed: could not add block %d: %v", block.Header.Index, err)
+		}
+	}
+
+	fmt.Printf("✅ Reorg complete. New head height: %d\n", bc.worldState.GetHeight())
+	return nil
+}
+
 // GetBlock returns a block by hash (delegates to WorldState)
 func (bc *Blockchain) GetBlock(hash string) (*core.Block, error) {
 	return bc.worldState.GetBlockByHash(hash)

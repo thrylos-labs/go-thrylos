@@ -1,12 +1,5 @@
+// consensus/pos/consensus.go
 // Proof of Stake consensus implementation for Thrylos blockchain
-// Features:
-// - Validator selection based on stake weight and randomness
-// - Block proposal and validation with economic incentives
-// - Slashing conditions for double signing and downtime
-// - Dynamic validator set management with rotation
-// - Cross-shard consensus coordination via beacon chain
-// - Fork choice rule based on validator attestations
-// - Economic finality with stake-based voting
 
 package pos
 
@@ -20,17 +13,19 @@ import (
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/consensus/validator"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	"github.com/thrylos-labs/go-thrylos/core/chain"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
-	"github.com/thrylos-labs/go-thrylos/types" // Import types package for persistence
+	"github.com/thrylos-labs/go-thrylos/types"
 	"golang.org/x/crypto/blake2b"
 )
 
 // NewConsensusEngine creates a new PoS consensus engine
 func NewConsensusEngine(
 	cfg *config.Config,
+	blockchain *chain.Blockchain, // Added parameter
 	worldState *state.WorldState,
 	nodePrivateKey crypto.PrivateKey,
 	broadcastChan chan interface{},
@@ -41,6 +36,7 @@ func NewConsensusEngine(
 
 	engine := &ConsensusEngine{
 		config:            cfg,
+		blockchain:        blockchain, // Initialized field
 		worldState:        worldState,
 		nodePrivateKey:    nodePrivateKey,
 		nodeAddress:       nodeAddress,
@@ -64,26 +60,27 @@ func NewConsensusEngine(
 	engine.blockProposer = NewBlockProposer(cfg, worldState, nodeAddress)
 	engine.blockValidator = NewBlockValidator(engine)
 
-	// Initialize fork choice
-	engine.forkChoice = NewForkChoice(cfg, worldState, &SlashingManager{})
+	// Configure and Initialize Fork Choice
+	fcConfig := DefaultForkChoiceConfig()
+	// Use config value if set, otherwise default is kept
+	if cfg.Consensus.StakeCacheTTL > 0 {
+		fcConfig.StakeCacheTTL = cfg.Consensus.StakeCacheTTL
+	}
+
+	// Pass SlashingManager placeholder, it will be overwritten shortly but needed for initialization order
+	engine.forkChoice = NewForkChoiceWithConfig(cfg, worldState, &SlashingManager{}, fcConfig)
 
 	// Initialize slashing manager with persistent storage
 	slashingConfig := &storage.SlashingConfig{
-		DoubleVotingPenalty:    uint8(cfg.Consensus.SlashingDoubleVote),
-		SurroundVotingPenalty:  uint8(cfg.Consensus.SlashingSurroundVote),
-		InvalidProposalPenalty: uint8(cfg.Consensus.SlashingInvalidProposal),
-
-		// ✅ FIX 1: Use SlashingDowntime
-		SlashingDowntime: uint8(cfg.Consensus.SlashingDowntime),
-
+		DoubleVotingPenalty:     uint8(cfg.Consensus.SlashingDoubleVote),
+		SurroundVotingPenalty:   uint8(cfg.Consensus.SlashingSurroundVote),
+		InvalidProposalPenalty:  uint8(cfg.Consensus.SlashingInvalidProposal),
+		SlashingDowntime:        uint8(cfg.Consensus.SlashingDowntime),
 		InvalidSignaturePenalty: uint8(cfg.Consensus.SlashingInvalidSig),
 		MaxMissedAttestations:   cfg.Consensus.MaxMissedAttestations,
 		AttestationWindow:       24 * time.Hour,
-
-		// ✅ FIX 2: Use JailDurationHours (and pass the int directly, no math needed here)
-		JailDurationHours: cfg.Consensus.JailDurationHours,
-
-		MinimumStake: cfg.Staking.MinValidatorStake,
+		JailDurationHours:       cfg.Consensus.JailDurationHours,
+		MinimumStake:            cfg.Staking.MinValidatorStake,
 	}
 
 	// Create slashing storage if we have access to BadgerDB
@@ -100,12 +97,12 @@ func NewConsensusEngine(
 
 	engine.slashingManager = NewSlashingManager(slashingConfig, worldState, slashingStorage)
 
-	// ============================================================================
-	// ADD THIS: Initialize evidence tracker for slashing evidence broadcasting
-	// ============================================================================
+	// Update fork choice with real slashing manager
+	engine.forkChoice.slashingManager = engine.slashingManager
+
+	// Initialize evidence tracker for slashing evidence broadcasting
 	engine.evidenceTracker = NewEvidenceTracker()
 	log.Println("✅ Slashing evidence tracker initialized")
-	// ============================================================================
 
 	// Initialize time validator for timestamp validation and drift monitoring
 	engine.timeValidator = NewTimeValidator()
@@ -113,6 +110,8 @@ func NewConsensusEngine(
 
 	return engine
 }
+
+// ... [Include all other existing methods like Start, Stop, updateForkChoice, etc.] ...
 
 // Start begins the consensus process
 func (ce *ConsensusEngine) Start() error {
@@ -160,8 +159,6 @@ func (ce *ConsensusEngine) consensusLoop() {
 		case <-cleanupTicker.C:
 			// Cleanup old epoch data to prevent memory leaks
 			ce.forkChoice.CleanupOldEpochs()
-
-			// ADD THIS LINE:
 			ce.cleanupChainCache()
 		}
 	}
@@ -238,6 +235,90 @@ func (ce *ConsensusEngine) processSlot() {
 
 	// Update fork choice
 	ce.updateForkChoice()
+}
+
+// updateForkChoice updates the fork choice rule with safety checks and Reorg logic
+func (ce *ConsensusEngine) updateForkChoice() {
+	head := ce.forkChoice.GetHead()
+	if head == "" {
+		return
+	}
+
+	// 1. Safety Check: Is this new head viable? (Descends from finalized checkpoint)
+	if !ce.forkChoice.IsViableChain(head) {
+		fmt.Printf("⚠️ Fork choice rejected head %s: violates finality\n", head[:8])
+		return
+	}
+
+	currentHead := ce.worldState.GetCurrentBlock()
+
+	// 2. If we have no current head (genesis), accept it
+	if currentHead == nil {
+		fmt.Printf("📍 Setting initial head: %s\n", head[:8])
+		return
+	}
+
+	// 3. If fork choice suggests a different head
+	if head != currentHead.Hash {
+		hasQuorum := ce.forkChoice.HasQuorum(head)
+		quorumPercentage := ce.forkChoice.GetQuorumPercentage(head)
+
+		if hasQuorum {
+			fmt.Printf("🔀 Fork choice suggests new head: %s (HAS QUORUM). Triggering Reorg Logic.\n", head[:8])
+
+			// --- REAL IMPLEMENTATION START ---
+
+			// A. Find Common Ancestor between new head and current chain
+			ancestorHash, err := ce.getCommonAncestor(head, currentHead.Hash)
+			if err != nil {
+				log.Printf("❌ Reorg failed: could not find common ancestor between %s and %s: %v", head[:8], currentHead.Hash[:8], err)
+				return
+			}
+
+			// B. Get path of hashes from new head back to (but excluding) Common Ancestor
+			// getChainPath returns [head, parent, ..., ancestor+1, ancestor]
+			hashPath, err := ce.getChainPath(head, ancestorHash)
+			if err != nil {
+				log.Printf("❌ Reorg failed: could not calculate chain path: %v", err)
+				return
+			}
+
+			// C. Convert Hashes to Blocks and Reverse Order
+			// We need blocks ordered [Ancestor+1, ..., Head]
+			var newBlocks []*core.Block
+
+			// Iterate backwards from len-2 (skipping the ancestor at the end) down to 0
+			for i := len(hashPath) - 2; i >= 0; i-- {
+				blockHash := hashPath[i]
+
+				// Try fetching from WorldState first
+				block, err := ce.worldState.GetBlockByHash(blockHash)
+				if err != nil || block == nil {
+					log.Printf("❌ Reorg failed: block %s data not found", blockHash[:8])
+					return
+				}
+				newBlocks = append(newBlocks, block)
+			}
+
+			// D. Execute Reorganization
+			if len(newBlocks) > 0 {
+				if ce.blockchain != nil {
+					if err := ce.blockchain.ReorganizeChain(newBlocks); err != nil {
+						log.Printf("❌ Reorg failed during execution: %v", err)
+					} else {
+						log.Printf("✅ Successfully reorganized chain to new head %s", head[:8])
+					}
+				} else {
+					log.Printf("⚠️ Blockchain reference not set, cannot execute reorg")
+				}
+			}
+			// --- REAL IMPLEMENTATION END ---
+
+		} else {
+			fmt.Printf("⏳ Fork choice suggests %s but waiting for quorum (%.1f%% < 66.7%%)\n",
+				head[:8], quorumPercentage)
+		}
+	}
 }
 
 func (ce *ConsensusEngine) updateValidatorActivity(validatorAddr string, wasBlockProduced bool) {
@@ -517,48 +598,6 @@ func (ce *ConsensusEngine) validateAttestation(attestation *types.Attestation) e
 	return nil
 }
 
-// updateForkChoice updates the fork choice rule with safety checks
-func (ce *ConsensusEngine) updateForkChoice() {
-	head := ce.forkChoice.GetHead()
-	if head == "" {
-		return
-	}
-
-	currentHead := ce.worldState.GetCurrentBlock()
-
-	// Check if the new head has achieved quorum
-	hasQuorum := ce.forkChoice.HasQuorum(head)
-	quorumPercentage := ce.forkChoice.GetQuorumPercentage(head)
-
-	// Only switch to new head if:
-	// 1. It has quorum (2/3+ stake), OR
-	// 2. We have no current head
-	if currentHead == nil {
-		fmt.Printf("📍 Setting initial head: %s (%.1f%% stake)\n", head[:8], quorumPercentage)
-		return
-	}
-
-	// Check if current head is finalized - never reorg past finalized blocks
-	if ce.forkChoice.IsBlockFinalized(currentHead.Hash) {
-		if head != currentHead.Hash && !ce.isDescendant(head, currentHead.Hash) {
-			fmt.Printf("⚠️ Ignoring fork choice - current head is finalized\n")
-			return
-		}
-	}
-
-	// If fork choice suggests a different head
-	if head != currentHead.Hash {
-		if hasQuorum {
-			fmt.Printf("🔀 Fork choice suggests new head: %s (%.1f%% stake, HAS QUORUM)\n",
-				head[:8], quorumPercentage)
-			// In production, would trigger chain reorganization here
-		} else {
-			fmt.Printf("⏳ Fork choice suggests %s but waiting for quorum (%.1f%% < 66.7%%)\n",
-				head[:8], quorumPercentage)
-		}
-	}
-}
-
 // computeBlockSigningHash creates the hash that validators sign / verify for a block.
 func (ce *ConsensusEngine) computeBlockSigningHash(block *core.Block) ([]byte, error) {
 	if block == nil || block.Header == nil {
@@ -745,8 +784,6 @@ func (ce *ConsensusEngine) handleVote(vote *Vote) {
 	}
 
 	// 2. Persist Vote
-	// Convert from local pos.Vote to shared types.Vote for persistence
-	// This ensures type compatibility with the storage layer
 	storageVote := &types.Vote{
 		ValidatorAddress: vote.ValidatorAddress,
 		SourceBlockHash:  vote.SourceBlockHash,
@@ -1095,4 +1132,10 @@ func (bv *BlockValidator) validateProposer(block *core.Block) error {
 	}
 
 	return nil
+}
+
+// cleanupChainCache should be called periodically (e.g., every epoch)
+func (ce *ConsensusEngine) cleanupChainCache() {
+	ce.chainCache.Clear()
+	fmt.Printf("🧹 Chain cache cleared\n")
 }

@@ -235,13 +235,3 @@ func (ce *ConsensusEngine) isForkDetected(blockHash1, blockHash2 string) bool {
 
 	return false
 }
-
-// cleanupChainCache should be called periodically (e.g., every epoch)
-// to prevent the cache from growing unbounded
-func (ce *ConsensusEngine) cleanupChainCache() {
-	// Clear the entire cache
-	// Alternative: could keep recent entries and only clear old ones
-	ce.chainCache.Clear()
-
-	fmt.Printf("🧹 Chain cache cleared\n")
-}

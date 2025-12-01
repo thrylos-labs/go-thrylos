@@ -719,19 +719,15 @@ func (sm *SlashingManager) IsValidatorActive(validatorKey string) bool {
 	}
 
 	if status != storage.ValidatorActive {
-		log.Printf("[Slashing] Validator %s status is %s (inactive)", validatorKey, status)
+		// FIX: Changed %s to %v to handle the integer-based ValidatorStatus type
+		log.Printf("[Slashing] Validator %s status is %v (inactive)", validatorKey, status)
 		return false
 	}
 
-	// 🔧 IMPORTANT CHANGE:
 	// Do NOT hard-fail validators just because their balance is below MinimumStake here.
-	// That enforcement belongs in staking / registration.
-	//
-	// We *optionally* log balance info, but never mark them inactive solely on this.
 	if sm.worldState != nil && sm.config.MinimumStake > 0 {
 		balance, err := sm.worldState.GetBalance(validatorKey)
 		if err != nil {
-			// Just log and continue – validator stays active
 			log.Printf("[Slashing] GetBalance failed for %s: %v (ignoring for activity check)", validatorKey, err)
 		} else {
 			if balance < sm.config.MinimumStake {

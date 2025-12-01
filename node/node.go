@@ -1,7 +1,5 @@
+// node/node.go
 package node
-
-// node/node.go - Main blockchain node with PoS integration and WorldState
-// Transaction creation removed - handled by wallets in production
 
 import (
 	"context"
@@ -23,7 +21,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/network"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
-	thrylosSync "github.com/thrylos-labs/go-thrylos/sync" // Use alias to avoid conflict with "sync" package
+	thrylosSync "github.com/thrylos-labs/go-thrylos/sync"
 	"github.com/thrylos-labs/go-thrylos/types"
 )
 
@@ -31,7 +29,7 @@ import (
 type Node struct {
 	// Core components
 	config     *config.Config
-	storage    *storage.BadgerStorage // ADD THIS FIELD
+	storage    *storage.BadgerStorage
 	worldState *state.WorldState
 	blockchain *chain.Blockchain
 
@@ -97,8 +95,8 @@ type NodeConfig struct {
 	EnableP2P         bool
 	P2PListenPort     int
 	BootstrapPeers    []string
-	EnableAPI         bool `json:"enable_api"` // ADD THIS
-	APIPort           int  `json:"api_port"`   // ADD THIS
+	EnableAPI         bool `json:"enable_api"`
+	APIPort           int  `json:"api_port"`
 }
 
 // NewNode creates a new blockchain node with full WorldState integration
@@ -158,8 +156,10 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	receiveChan := make(chan interface{}, 1000)
 
 	// Initialize consensus engine
+	// UPDATE: Pass the blockchain instance (bc)
 	consensusEngine := pos.NewConsensusEngine(
 		nodeConfig.Config,
+		bc, // <-- Added this
 		worldState,
 		nodeConfig.PrivateKey,
 		broadcastChan,
@@ -249,7 +249,8 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	return node, nil
 }
 
-// port helper
+// ... [Rest of the file remains unchanged, port helper, Start, Stop etc.] ...
+
 func parsePortFromAddr(addr string) int {
 	if addr == "" {
 		return 8080
@@ -418,7 +419,6 @@ func (n *Node) Stop() error {
 }
 
 // SubmitTransaction accepts a transaction from external sources (e.g., wallets via RPC)
-// This is the main entry point for transaction submission in production
 func (n *Node) SubmitTransaction(tx *core.Transaction) error {
 	if tx == nil {
 		return fmt.Errorf("transaction cannot be nil")
@@ -503,7 +503,7 @@ func (n *Node) BroadcastTransaction(tx *core.Transaction) error {
 
 func (n *Node) SyncWithPeers() error {
 	if n.syncManager != nil {
-		return n.syncManager.SyncWithPeers() // Advanced, efficient
+		return n.syncManager.SyncWithPeers()
 	}
 	return fmt.Errorf("sync manager not available")
 }
@@ -870,8 +870,6 @@ func (n *Node) performMaintenance() {
 	n.triggerEvent("maintenance_completed", time.Now())
 }
 
-// Helper Methods
-
 func (n *Node) storeGenesisConfig(config *NodeConfig) {
 	// Store genesis configuration for later use
 }
@@ -927,7 +925,6 @@ func (n *Node) initializeGenesis() error {
 	return nil
 }
 
-// Fix 1: Update registerAsValidator in node.go to handle existing validators
 func (n *Node) registerAsValidator() error {
 	// Check if validator already exists first
 	_, err := n.blockchain.GetValidator(n.nodeAddress)
