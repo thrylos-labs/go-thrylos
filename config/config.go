@@ -164,26 +164,27 @@ type NetworkConfig struct {
 }
 
 type ConsensusConfig struct {
-	BlockTime               time.Duration `json:"block_time"`
-	MaxTxPerBlock           int           `json:"max_tx_per_block"`
-	MaxBlockSize            int64         `json:"max_block_size"`
-	MinGasPrice             int64         `json:"min_gas_price"`
-	MaxValidators           int           `json:"max_validators"`
-	ValidatorRotation       time.Duration `json:"validator_rotation"`
-	SlashingEnabled         bool          `json:"slashing_enabled"`
-	MaxFutureBlockTime      time.Duration `json:"max_future_block_time"` // 15s
-	MaxPastBlockTime        time.Duration `json:"max_past_block_time"`   // 2h
-	MaxTimestampSkew        time.Duration `json:"max_timestamp_skew"`
-	MaxTimestampAge         time.Duration `json:"max_timestamp_age"`
-	MaxTxDataSize           int           `json:"max_tx_data_size"`
-	StakeCacheTTL           time.Duration `json:"stake_cache_ttl"`
-	SlashingDoubleVote      int           `json:"slashing_double_vote"`      // Percentage (50)
-	SlashingSurroundVote    int           `json:"slashing_surround_vote"`    // Percentage (30)
-	SlashingInvalidProposal int           `json:"slashing_invalid_proposal"` // Percentage (20)
-	SlashingDowntime        int           `json:"slashing_downtime"`         // Percentage (5)
-	SlashingInvalidSig      int           `json:"slashing_invalid_sig"`      // Percentage (10)
-	MaxMissedAttestations   uint64        `json:"max_missed_attestations"`   // Count (100)
-	JailDurationHours       int           `json:"jail_duration_hours"`       // Hours (168 = 7 days)
+	BlockTime          time.Duration `json:"block_time"`
+	MaxTxPerBlock      int           `json:"max_tx_per_block"`
+	MaxBlockSize       int64         `json:"max_block_size"`
+	MinGasPrice        int64         `json:"min_gas_price"`
+	MaxValidators      int           `json:"max_validators"`
+	ValidatorRotation  time.Duration `json:"validator_rotation"`
+	SlashingEnabled    bool          `json:"slashing_enabled"`
+	MaxFutureBlockTime time.Duration `json:"max_future_block_time"` // 15s
+	MaxPastBlockTime   time.Duration `json:"max_past_block_time"`   // 2h
+	MaxTimestampSkew   time.Duration `json:"max_timestamp_skew"`
+	MaxTimestampAge    time.Duration `json:"max_timestamp_age"`
+	MaxTxDataSize      int           `json:"max_tx_data_size"`
+	StakeCacheTTL      time.Duration `json:"stake_cache_ttl"`
+
+	SlashingDoubleVote      int    `json:"slashing_double_vote"`      // Percentage (50)
+	SlashingSurroundVote    int    `json:"slashing_surround_vote"`    // Percentage (30)
+	SlashingInvalidProposal int    `json:"slashing_invalid_proposal"` // Percentage (20)
+	SlashingDowntime        int    `json:"slashing_downtime"`         // Percentage (5)
+	SlashingInvalidSig      int    `json:"slashing_invalid_sig"`      // Percentage (10)
+	MaxMissedAttestations   uint64 `json:"max_missed_attestations"`   // Count (100)
+	JailDurationHours       int    `json:"jail_duration_hours"`       // Hours (168 = 7 days)
 }
 
 type StakingConfig struct {
@@ -318,26 +319,39 @@ func Load() (*Config, error) {
 		},
 
 		Consensus: ConsensusConfig{
-			BlockTime:               3 * time.Second,
-			MaxTxPerBlock:           1000,
-			MaxBlockSize:            2 * 1024 * 1024, // 2MB
-			MinGasPrice:             BaseGasPrice,
-			MaxValidators:           100,
-			ValidatorRotation:       24 * time.Hour,
-			SlashingEnabled:         true,
-			MaxFutureBlockTime:      15 * time.Second,
-			MaxPastBlockTime:        2 * time.Hour,
-			MaxTimestampSkew:        5 * time.Minute,
-			MaxTimestampAge:         1 * time.Hour,
-			MaxTxDataSize:           1024 * 1024, // 1MB max transaction data
-			StakeCacheTTL:           30 * time.Second,
-			SlashingDoubleVote:      50,  // 50% penalty for double voting
-			SlashingSurroundVote:    30,  // 30% penalty for surround voting
-			SlashingInvalidProposal: 20,  // 20% penalty for invalid proposals
-			SlashingDowntime:        5,   // 5% penalty for downtime
-			SlashingInvalidSig:      10,  // 10% penalty for invalid signatures
-			MaxMissedAttestations:   100, // Slash after 100 missed attestations
-			JailDurationHours:       168, // 7 days (168 hours)
+			BlockTime:          3 * time.Second,
+			MaxTxPerBlock:      1000,
+			MaxBlockSize:       2 * 1024 * 1024, // 2MB
+			MinGasPrice:        BaseGasPrice,
+			MaxValidators:      100,
+			ValidatorRotation:  24 * time.Hour,
+			MaxFutureBlockTime: 15 * time.Second,
+			MaxPastBlockTime:   2 * time.Hour,
+			MaxTimestampSkew:   5 * time.Minute,
+			MaxTimestampAge:    1 * time.Hour,
+			MaxTxDataSize:      1024 * 1024, // 1MB max transaction data
+			StakeCacheTTL:      30 * time.Second,
+
+			// TESTNET CONFIGURATION: Permissive Slashing
+			// Disabled for initial testnet stability
+			SlashingEnabled: false,
+
+			SlashingDoubleVote:      50, // 50% penalty for double voting
+			SlashingSurroundVote:    30, // 30% penalty for surround voting
+			SlashingInvalidProposal: 20, // 20% penalty for invalid proposals
+			SlashingInvalidSig:      10, // 10% penalty for invalid signatures
+
+			// DOWNTIME SENSITIVITY RELAXATION:
+			// Reduced penalty to 1% (was 5%)
+			SlashingDowntime: 1,
+
+			// Increased tolerance: ~24 hours of misses (28,800 blocks @ 3s/block)
+			// Prevents mass jailing during network instability
+			MaxMissedAttestations: 28800,
+
+			// Reduced jail time for quicker recovery during testing
+			// 1 hour (was 168h / 7 days)
+			JailDurationHours: 1,
 		},
 
 		Staking: StakingConfig{
@@ -354,10 +368,14 @@ func Load() (*Config, error) {
 
 			// Slashing parameters
 			SlashFractionDoubleSign: 0.05, // 5% slash for double signing
-			SlashFractionDowntime:   0.01, // 1% slash for extended downtime
-			DowntimeJailDuration:    10 * time.Minute,
-			MinSignedPerWindow:      0.50,  // Must sign 50% of blocks
-			SignedBlocksWindow:      10000, // Window of 10,000 blocks
+
+			// Relaxed downtime penalties
+			SlashFractionDowntime: 0.001,            // 0.1% slash for extended downtime
+			DowntimeJailDuration:  10 * time.Minute, // Short jail for minor infractions
+
+			// Relaxed uptime requirements for Testnet
+			MinSignedPerWindow: 0.05,  // Must sign only 5% of blocks (was 50%)
+			SignedBlocksWindow: 30000, // Window of ~25 hours (was 10,000)
 		},
 
 		Economics: EconomicsConfig{
