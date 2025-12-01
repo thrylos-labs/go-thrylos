@@ -69,8 +69,11 @@ type WorldState struct {
 	// Cross-shard manager
 	crossShardManager *CrossShardManager
 
-	// Synchronization
-	mu sync.RWMutex
+	chainMu     sync.RWMutex  // Guards blocks, height, currentHash, lastTimestamp
+	validatorMu sync.RWMutex  // Guards validators map
+	accountMu   *ShardedMutex // Guards individual accounts (via AccountManager)
+
+	stateRootMu sync.RWMutex // Guards stateRoot generation
 
 	assets        map[string]*AssetToken      // assetID -> asset
 	assetBalances map[string]map[string]int64 // assetID -> (address -> balance)
@@ -237,6 +240,7 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 		assetRegistry:     make(map[string]string),
 		totalTransactions: 0,
 		badgerStorage:     badgerStorage,
+		accountMu:         NewShardedMutex(),
 	}
 
 	// Initialize cross-shard manager
@@ -301,8 +305,11 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply int
 }
 
 func (ws *WorldState) AddBlock(block *core.Block) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	// 1. Acquire Chain Lock for validation and setup
+	ws.chainMu.Lock()
+	// Note: We defer Unlock() at the end, but we must be careful about deadlocks
+	// if we call other locked methods.
+	defer ws.chainMu.Unlock()
 
 	// Validate block can be added
 	if err := ws.validateBlockForAddition(block); err != nil {
@@ -406,16 +413,17 @@ func (ws *WorldState) ValidateTransactionExecution(tx *core.Transaction) error {
 
 // GetAccount retrieves an account by address
 func (ws *WorldState) GetAccount(address string) (*core.Account, error) {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	// Lock only the specific shard for this address
+	ws.accountMu.RLock(address)
+	defer ws.accountMu.RUnlock(address)
 
 	return ws.accountManager.GetAccount(address)
 }
 
 // GetBalance returns the balance of an account
 func (ws *WorldState) GetBalance(address string) (int64, error) {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.accountMu.RLock(address)
+	defer ws.accountMu.RUnlock(address)
 
 	return ws.accountManager.GetBalance(address)
 }
@@ -486,9 +494,9 @@ func (ws *WorldState) GetExecutableTransactions(maxCount int) []*core.Transactio
 
 // GetCurrentBlock returns the current (latest) block
 func (ws *WorldState) GetCurrentBlock() *core.Block {
-	ws.mu.RLock()
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
 	height := ws.height
-	ws.mu.RUnlock()
 
 	if height < 0 {
 		return nil
@@ -497,8 +505,9 @@ func (ws *WorldState) GetCurrentBlock() *core.Block {
 	block, err := ws.db.GetBlockByHeight(height)
 	if err != nil {
 		// As a fallback, try the in-memory slice (useful during initial run)
-		ws.mu.RLock()
-		defer ws.mu.RUnlock()
+
+		ws.chainMu.RLock()
+		defer ws.chainMu.RUnlock()
 		if len(ws.blocks) == 0 {
 			return nil
 		}
@@ -547,9 +556,8 @@ func (ws *WorldState) GetBlockByHash(hash string) (*core.Block, error) {
 
 // GetHeight returns the current blockchain height
 func (ws *WorldState) GetHeight() int64 {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
-
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
 	return ws.height
 }
 
@@ -571,8 +579,8 @@ func (ws *WorldState) AddValidator(validator *core.Validator) error {
 
 // GetValidator returns a validator by address
 func (ws *WorldState) GetValidator(address string) (*core.Validator, error) {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.validatorMu.RLock()
+	defer ws.validatorMu.RUnlock()
 
 	validator, exists := ws.validators[address]
 	if !exists {
@@ -599,8 +607,8 @@ func (ws *WorldState) GetActiveValidators() []*core.Validator {
 
 // UpdateValidator updates an existing validator
 func (ws *WorldState) UpdateValidator(validator *core.Validator) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
 
 	if _, exists := ws.validators[validator.Address]; !exists {
 		return fmt.Errorf("validator %s not found", validator.Address)
@@ -616,17 +624,20 @@ func (ws *WorldState) UpdateValidator(validator *core.Validator) error {
 }
 
 // GetTotalSupply returns the total supply of tokens
+// GetTotalSupply returns the total supply of tokens
 func (ws *WorldState) GetTotalSupply() int64 {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	// Use chainMu as this is a global chain statistic
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
 
 	return ws.totalSupply
 }
 
 // GetTotalStaked returns the total amount of staked tokens
 func (ws *WorldState) GetTotalStaked() int64 {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	// Use chainMu as this is a global chain statistic
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
 
 	return ws.totalStaked
 }
@@ -652,25 +663,45 @@ func (ws *WorldState) GetCrossShardManager() *CrossShardManager {
 }
 
 // GetStatus returns a status summary of the world state
+// Updated to use Granular Locking (Chain, Validator, StateRoot)
 func (ws *WorldState) GetStatus() map[string]interface{} {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	// 1. Capture Chain Data (Blocks, Supply, Height)
+	ws.chainMu.RLock()
+	height := ws.height
+	currentHash := ws.currentHash
+	totalSupply := ws.totalSupply
+	totalStaked := ws.totalStaked
+	totalTx := ws.totalTransactions
+	blockCount := len(ws.blocks)
+	lastTime := ws.lastTimestamp
+	ws.chainMu.RUnlock()
 
+	// 2. Capture Validator Data
+	ws.validatorMu.RLock()
+	valCount := len(ws.validators)
+	ws.validatorMu.RUnlock()
+
+	// 3. Capture State Root
+	ws.stateRootMu.RLock()
+	root := ws.stateRoot
+	ws.stateRootMu.RUnlock()
+
+	// 4. Get Sub-component stats (These handle their own internal locking)
 	poolStats := ws.txPool.GetStats()
 	accountStats := ws.accountManager.GetAccountStats()
 
 	return map[string]interface{}{
-		"shard_id":           ws.shardID,
-		"height":             ws.height,
-		"current_hash":       ws.currentHash,
-		"state_root":         ws.stateRoot,
-		"total_supply":       ws.totalSupply,
-		"total_staked":       ws.totalStaked,
-		"total_transactions": ws.totalTransactions,
-		"block_count":        len(ws.blocks),
+		"shard_id":           ws.shardID, // Immutable
+		"height":             height,
+		"current_hash":       currentHash,
+		"state_root":         root,
+		"total_supply":       totalSupply,
+		"total_staked":       totalStaked,
+		"total_transactions": totalTx,
+		"block_count":        blockCount,
 		"pending_txs":        poolStats.PendingCount,
-		"validator_count":    len(ws.validators),
-		"last_timestamp":     ws.lastTimestamp,
+		"validator_count":    valCount,
+		"last_timestamp":     lastTime,
 		"pool_stats":         poolStats,
 		"account_stats":      accountStats,
 	}
@@ -1863,16 +1894,16 @@ func (ws *WorldState) Clear() error {
 
 // SetAccount sets an account in the world state
 func (ws *WorldState) SetAccount(address string, account *core.Account) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.accountMu.Lock(address)
+	defer ws.accountMu.Unlock(address)
 
 	return ws.accountManager.UpdateAccount(account)
 }
 
 // SetValidator sets a validator in the world state
 func (ws *WorldState) SetValidator(address string, validator *core.Validator) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
 
 	// Validate validator
 	if validator == nil {
@@ -1894,8 +1925,9 @@ func (ws *WorldState) SetValidator(address string, validator *core.Validator) er
 
 // SetStake sets a delegation in the world state
 func (ws *WorldState) SetStake(delegatorAddr, validatorAddr string, amount int64) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	// 1. Lock delegator account
+	ws.accountMu.Lock(delegatorAddr)
+	defer ws.accountMu.Unlock(delegatorAddr)
 
 	// Get or create delegator account
 	delegator, err := ws.accountManager.GetAccount(delegatorAddr)
@@ -1936,8 +1968,8 @@ func (ws *WorldState) SetStake(delegatorAddr, validatorAddr string, amount int64
 
 // SetStateRoot sets the state root
 func (ws *WorldState) SetStateRoot(stateRoot string) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.stateRootMu.Lock()
+	defer ws.stateRootMu.Unlock()
 
 	ws.stateRoot = stateRoot
 	return nil
@@ -1945,8 +1977,8 @@ func (ws *WorldState) SetStateRoot(stateRoot string) error {
 
 // SetCurrentHeight sets the current height
 func (ws *WorldState) SetCurrentHeight(height int64) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.chainMu.Lock()
+	defer ws.chainMu.Unlock()
 
 	ws.height = height
 	return nil
@@ -1954,8 +1986,8 @@ func (ws *WorldState) SetCurrentHeight(height int64) error {
 
 // PruneStatesBefore removes state data before a given height
 func (ws *WorldState) PruneStatesBefore(height int64) (int, error) {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.chainMu.Lock()
+	defer ws.chainMu.Unlock()
 
 	if height <= 0 || height >= ws.height {
 		return 0, nil // Nothing to prune
@@ -1980,20 +2012,29 @@ func (ws *WorldState) PruneStatesBefore(height int64) (int, error) {
 }
 
 func (ws *WorldState) SaveState() error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	// 1. Acquire Chain Lock (Height, Root)
+	ws.chainMu.RLock()
+	height := ws.height
+	// stateRoot := ws.stateRoot // Use GetStateRoot or lock stateRootMu if separate
+	ws.chainMu.RUnlock()
+
+	ws.stateRootMu.RLock()
+	stateRoot := ws.stateRoot
+	ws.stateRootMu.RUnlock()
 
 	// Save current height
-	if err := ws.state.SaveHeight(ws.height); err != nil {
+	if err := ws.state.SaveHeight(height); err != nil {
 		return fmt.Errorf("failed to save height: %v", err)
 	}
 
 	// Save state root
-	if err := ws.state.SaveStateRoot(ws.stateRoot); err != nil {
+	if err := ws.state.SaveStateRoot(stateRoot); err != nil {
 		return fmt.Errorf("failed to save state root: %v", err)
 	}
 
 	// Save all accounts
+	// Note: GetAllAccounts iterates DB, so it doesn't use the cache lock directly
+	// but it's safe as long as DB is consistent
 	accounts := ws.accountManager.GetAllAccounts()
 	for _, account := range accounts {
 		if err := ws.state.SaveAccount(account); err != nil {
@@ -2002,24 +2043,38 @@ func (ws *WorldState) SaveState() error {
 	}
 
 	// Save all validators
+	ws.validatorMu.RLock()
+	defer ws.validatorMu.RUnlock()
+
 	for _, validator := range ws.validators {
 		if err := ws.state.SaveValidator(validator); err != nil {
 			return fmt.Errorf("failed to save validator %s: %v", validator.Address, err)
 		}
 	}
 
-	// Save assets (ADD THIS)
+	// Save assets
+	// Use chainMu as assets are global
+	ws.chainMu.RLock() // Re-acquire for asset read
 	if err := ws.SaveAssetsToStorage(); err != nil {
+		ws.chainMu.RUnlock()
 		return fmt.Errorf("failed to save assets: %v", err)
 	}
+	ws.chainMu.RUnlock()
 
 	return nil
 }
 
 // LoadState loads the world state from storage
 func (ws *WorldState) LoadState() error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	// Acquire locks in standard order: Chain -> Validators -> Accounts
+	ws.chainMu.Lock()
+	ws.validatorMu.Lock()
+	// Note: We can't easily lock ALL accounts with sharded mutex,
+	// but usually LoadState is exclusive at startup.
+	// We'll assume exclusive access or accept that individual account locks happen inside loop.
+
+	defer ws.validatorMu.Unlock()
+	defer ws.chainMu.Unlock()
 
 	fmt.Printf("🔍 LoadState: Attempting to load state from storage...\n")
 
@@ -2065,23 +2120,27 @@ func (ws *WorldState) LoadState() error {
 	fmt.Printf("🔍 LoadState: Found %d accounts\n", len(accounts))
 
 	// Reset account manager and load accounts
+	// Since we are re-initializing, we can create a new manager safely
 	ws.accountManager = account.NewAccountManager(ws.state, ws.shardID, ws.totalShards)
 	totalSupply := int64(0)
-	for _, account := range accounts {
-		if err := ws.accountManager.UpdateAccount(account); err != nil {
-			return fmt.Errorf("failed to restore account %s: %v", account.Address, err)
+
+	for _, acc := range accounts {
+		// We don't need to lock individual accounts here because we are loading
+		// into a fresh manager that isn't exposed yet.
+		if err := ws.accountManager.UpdateAccount(acc); err != nil {
+			return fmt.Errorf("failed to restore account %s: %v", acc.Address, err)
 		}
 
 		// account.Balance + account.StakedAmount
-		balPlusStake, err := math.SafeAdd(account.Balance, account.StakedAmount)
+		balPlusStake, err := math.SafeAdd(acc.Balance, acc.StakedAmount)
 		if err != nil {
-			return fmt.Errorf("account %s has invalid balance+stake overflow: %v", account.Address, err)
+			return fmt.Errorf("account %s has invalid balance+stake overflow: %v", acc.Address, err)
 		}
 
 		// (balance+stake) + rewards
-		accountTotal, err := math.SafeAdd(balPlusStake, account.Rewards)
+		accountTotal, err := math.SafeAdd(balPlusStake, acc.Rewards)
 		if err != nil {
-			return fmt.Errorf("account %s has invalid total funds overflow: %v", account.Address, err)
+			return fmt.Errorf("account %s has invalid total funds overflow: %v", acc.Address, err)
 		}
 
 		// add into global totalSupply
@@ -2174,8 +2233,9 @@ func (ws *WorldState) GetTransactionFromStorage(hash string) (*core.Transaction,
 
 // Modified account operations to persist to storage
 func (ws *WorldState) UpdateAccountWithStorage(account *core.Account) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	// Acquire lock for specific account
+	ws.accountMu.Lock(account.Address)
+	defer ws.accountMu.Unlock(account.Address)
 
 	// Update in memory
 	if err := ws.accountManager.UpdateAccount(account); err != nil {
@@ -2188,8 +2248,8 @@ func (ws *WorldState) UpdateAccountWithStorage(account *core.Account) error {
 
 // Modified validator operations to persist to storage
 func (ws *WorldState) UpdateValidatorWithStorage(validator *core.Validator) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
 
 	// Update in memory
 	ws.validators[validator.Address] = validator
@@ -2201,8 +2261,10 @@ func (ws *WorldState) UpdateValidatorWithStorage(validator *core.Validator) erro
 // Add to StakingManager in worldstate.go
 func (sm *StakingManager) ClaimRewards(delegatorAddr string) error {
 	ws := sm.worldState
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+
+	// Acquire account lock first
+	ws.accountMu.Lock(delegatorAddr)
+	defer ws.accountMu.Unlock(delegatorAddr)
 
 	// Validate address
 	if err := account.ValidateAddress(delegatorAddr); err != nil {
@@ -2798,8 +2860,8 @@ func (ws *WorldState) SaveAssetsToStorage() error {
 
 // GetAssetStatistics returns system-wide asset statistics
 func (ws *WorldState) GetAssetStatistics() map[string]interface{} {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
 
 	stats := map[string]interface{}{
 		"total_assets":  0,
