@@ -87,6 +87,17 @@ Before building Thrylos, ensure you have the following installed:
 
 ---
 
+### 🔐 TLS Certificates in Production
+
+Thrylos does **not** ship with any TLS certificates or private keys. You must provide them per environment:
+
+- Certificates and keys are expected at:
+
+  ```text
+  ./certs/server.crt
+  ./certs/server.key
+
+
 ## 🏃‍♂️ Running the Node
 
 Thrylos now has two entrypoints:

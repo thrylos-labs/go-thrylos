@@ -241,7 +241,7 @@ func DefaultAPIConfig() *APIConfig {
 		EnableTLS:            false,       // Enable for production
 		CertFile:             "./certs/server.crt",
 		KeyFile:              "./certs/server.key",
-		AutoGenerateCert:     true, // Generate self-signed cert if files don't exist
+		AutoGenerateCert:     false, // you're managing them yourself now
 	}
 }
 
