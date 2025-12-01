@@ -401,20 +401,25 @@ func Load() (*Config, error) {
 		},
 
 		P2P: P2PConfig{
-			Enabled:            true,
-			ListenPort:         9000,
-			BootstrapPeers:     []string{},
-			MaxPeers:           50,
-			EnableMDNS:         false,
-			EnableDHT:          true,
-			MaxMessageSize:     10 * 1024 * 1024,
-			MaxBlockRangeSize:  100,
+			Enabled:        true,
+			ListenPort:     9000,
+			BootstrapPeers: []string{},
+			MaxPeers:       50,
+			EnableMDNS:     false,
+			EnableDHT:      true,
+			MaxMessageSize: 2 * 1024 * 1024, // Reduced to 2MB (tighten this up)
+
+			// FIX: Reduce block range size to prevent massive payload requests
+			MaxBlockRangeSize: 20, // Was 100
+
 			StreamReadTimeout:  30 * time.Second,
 			StreamWriteTimeout: 30 * time.Second,
-			RequestRateLimit:   60,
-			MaxPendingRequests: 100,
+
+			// FIX: Reduce rate limit to prevent DoS
+			RequestRateLimit:   20, // Was 60 (Requests per minute per peer)
+			MaxPendingRequests: 20, // Was 100 (Max concurrent requests per peer)
 		},
-	} // End of struct assignment
+	}
 
 	// === GENESIS LOADING LOGIC ===
 

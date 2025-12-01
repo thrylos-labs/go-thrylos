@@ -234,6 +234,8 @@ func (fc *ForkChoice) GetFinalityStatus() map[string]interface{} {
 // CleanupOldEpochs removes old epoch data to prevent unbounded memory growth
 // This is critical for long-running nodes with many validators
 // Note: This enhances the existing CleanupOldEpochs from finality.go with more comprehensive cleanup
+// CleanupOldEpochs removes old epoch data to prevent unbounded memory growth
+// This is critical for long-running nodes with many validators
 func (fc *ForkChoice) CleanupOldEpochs() {
 	startTime := time.Now()
 
@@ -242,18 +244,28 @@ func (fc *ForkChoice) CleanupOldEpochs() {
 
 	currentEpoch := fc.getCurrentEpoch()
 
-	// Use finalized epoch if available, otherwise use current epoch
+	// 1. Define Safety Cap (Hard Limit)
+	// Even if finality stalls, do not keep more than 50 epochs (~25 minutes @ 3s blocks) in memory.
+	// This prevents OOM crashes during network partitions.
+	const MaxSafetyRetention = 50
+	var minSafeCutoff uint64 = 0
+	if currentEpoch > MaxSafetyRetention {
+		minSafeCutoff = currentEpoch - MaxSafetyRetention
+	}
+
+	// 2. Determine Cutoff Epoch
 	var cutoffEpoch uint64
+
 	if fc.finalizedCheckpoint != nil {
 		finalizedEpoch := fc.finalizedCheckpoint.Epoch
-		// Keep 2 epochs before finalized for safety
+		// Ideally keep 2 epochs before finalized
 		if finalizedEpoch > 2 {
 			cutoffEpoch = finalizedEpoch - 2
 		} else {
 			cutoffEpoch = 0
 		}
 	} else {
-		// No finalization yet, use MaxEpochsToKeep from config
+		// No finalization yet, use Config default
 		if currentEpoch > fc.fcConfig.MaxEpochsToKeep {
 			cutoffEpoch = currentEpoch - fc.fcConfig.MaxEpochsToKeep
 		} else {
@@ -261,11 +273,20 @@ func (fc *ForkChoice) CleanupOldEpochs() {
 		}
 	}
 
+	// 3. Apply Safety Cap Override
+	// If the calculated cutoff (based on finality) is too old (stalled chain),
+	// force the cutoff to the safety limit.
+	if cutoffEpoch < minSafeCutoff {
+		fmt.Printf("⚠️ Finality stalled or lagging; forcing cleanup at safety cutoff %d (current: %d)\n",
+			minSafeCutoff, currentEpoch)
+		cutoffEpoch = minSafeCutoff
+	}
+
 	epochsRemoved := 0
 	blocksRemoved := 0
 	attestationsRemoved := 0
 
-	// 1. Cleanup old epoch attestations
+	// 4. Cleanup old epoch attestations
 	for epoch := range fc.epochAttestations {
 		if epoch < cutoffEpoch {
 			delete(fc.epochAttestations, epoch)
@@ -273,12 +294,13 @@ func (fc *ForkChoice) CleanupOldEpochs() {
 		}
 	}
 
-	// 2. Cleanup old blocks
+	// 5. Cleanup old blocks
 	for blockHash := range fc.blockScores {
 		blockEpoch, exists := fc.blockEpochMap[blockHash]
 
 		shouldRemove := false
-		if exists && blockEpoch < cutoffEpoch {
+		// Remove if epoch is too old OR if we have a "zombie" block with no mapped epoch
+		if !exists || blockEpoch < cutoffEpoch {
 			shouldRemove = true
 		}
 

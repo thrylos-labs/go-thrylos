@@ -11,12 +11,17 @@ import (
 
 const (
 	// Default limits (can be overridden by config)
-	DefaultMaxMessageSize     = 10 * 1024 * 1024 // 10MB
-	DefaultMaxBlockRangeSize  = 100              // blocks
+	DefaultMaxMessageSize = 2 * 1024 * 1024 // 2MB (Safe default)
+
+	// FIX: Lower default range size
+	DefaultMaxBlockRangeSize = 20 // blocks
+
 	DefaultStreamReadTimeout  = 30 * time.Second
 	DefaultStreamWriteTimeout = 30 * time.Second
-	DefaultRequestRateLimit   = 60  // requests per minute
-	DefaultMaxPendingRequests = 100 // per peer
+
+	// FIX: Lower default rate limits
+	DefaultRequestRateLimit   = 20 // requests per minute
+	DefaultMaxPendingRequests = 20 // per peer
 )
 
 // MessageValidator handles P2P message validation and rate limiting
