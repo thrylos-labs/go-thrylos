@@ -3,9 +3,10 @@
 
 // ✅ Transaction creation with proper ID and hash generation
 // ✅ Blake2b hash calculation for transaction integrity
-// ✅ Ed25519 signature integration for signing and verification
+// ✅ secp256k1 signature integration (Ethereum-compatible) for signing and verification
+
 // ✅ Comprehensive validation - structure, hash, shard, and business logic
-// ✅ Address format validation using tl1 bech 32 format
+// ✅ Address format validation using Ethereum-style 0x-prefixed addresses
 // ✅ Business logic validation - balance checks, minimum amounts, nonce validation
 // ✅ Batch validation - validates multiple transactions with temporary state tracking
 // ✅ Cross-shard awareness - handles transactions between different shards
@@ -199,9 +200,7 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, erro
 	return fmt.Sprintf("%x", hashBytes), err
 }
 
-// SignTransaction signs a transaction with Ed25519
-// SignTransaction signs a transaction with Ed25519
-// SignTransaction signs a transaction with Ed25519
+// SignTransaction signs a transaction using the secp256k1 private key.
 func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.PrivateKey) error {
 	if tx == nil {
 		return fmt.Errorf("transaction cannot be nil")
@@ -237,7 +236,7 @@ func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.Priv
 		return fmt.Errorf("failed to calculate signable hash: %v", err)
 	}
 
-	// Sign with Ed25519
+	// Sign with secp256k1
 	signature := privateKey.Sign(hashToSign)
 	if signature == nil {
 		return fmt.Errorf("failed to sign transaction")

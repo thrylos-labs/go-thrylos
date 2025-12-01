@@ -10,7 +10,7 @@
 * **Security:**
   * **Slashing:** Automated penalties for double-voting, surround-voting, and downtime.
   * **Replay Protection:** Nonce-based and finalized-block-hash protection.
-  * **Cryptography:** Ed25519 signatures and Blake2b hashing.
+* **Cryptography:** secp256k1 signatures (Ethereum-compatible) with Keccak-256 for transaction signing and address derivation, and Blake2b for consensus hashing.
 * **Tokenomics:** Dynamic inflation model targeting a specific bonding ratio, with separate pools for validators, liquidity, and development.
 * **Compatibility:** Uses standard **Ethereum 0x addresses** (20 bytes) for wallet compatibility.
 * **Sharding:** Native support for sharded state management and cross-shard transfers.
@@ -347,6 +347,15 @@ Thrylos enforces the following security guarantees across build modes:
 * **Environment-based protections**: Critical features (faucet, non-TLS API) are gated by `THRYLOS_ENVIRONMENT` checks to prevent accidental misconfiguration.
 
 These invariants ensure that production validators cannot accidentally run with insecure configurations or development-only features.
+
+### 🔑 Validator Keys
+
+Thrylos validators use secp256k1 private keys, stored on disk as **hex-encoded** strings.
+
+- A validator key file is a plain text file containing a single hex-encoded private key, for example:
+
+  ```text
+  0xabcdef1234...deadbeef
 
 ---
 

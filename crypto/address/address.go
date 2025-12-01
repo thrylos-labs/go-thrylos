@@ -27,8 +27,8 @@ const (
 // Address represents a 20-byte Ethereum-compatible address
 type Address [AddressLength]byte
 
-// New creates an Address from an Ed25519 public key
-// Uses keccak256 (Ethereum standard) for compatibility
+// New creates an Address from an Ed25519 public key (legacy helper for older address scheme).
+// New code should prefer secp256k1-based crypto.PublicKey.Address().
 func New(pubKey ed25519.PublicKey) (*Address, error) {
 	if pubKey == nil || len(pubKey) == 0 {
 		return nil, fmt.Errorf("public key cannot be nil or empty")

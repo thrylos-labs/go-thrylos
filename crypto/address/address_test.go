@@ -10,7 +10,7 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	// Generate Ed25519 key pair
+	// Generate Ed25519 key pair (for legacy address helper tests)
 	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("Failed to generate keys: %v", err)

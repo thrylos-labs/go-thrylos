@@ -133,12 +133,12 @@ func WalletExample() {
 	poller := api.NewSmartPoller(client)
 	
 	// Add user's addresses
-	poller.AddAddress("tl1user123...", func(oldBalance, newBalance int64) {
+	poller.AddAddress("0x1111111111111111111111111111111111111111", func(oldBalance, newBalance int64) {
 		fmt.Printf("Main wallet: %d → %d\n", oldBalance, newBalance)
 		// Update UI
 	})
 	
-	poller.AddAddress("tl1savings456...", func(oldBalance, newBalance int64) {
+	poller.AddAddress("0x2222222222222222222222222222222222222222", func(oldBalance, newBalance int64) {
 		fmt.Printf("Savings: %d → %d\n", oldBalance, newBalance)
 		// Update UI
 	})

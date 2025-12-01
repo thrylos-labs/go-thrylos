@@ -55,7 +55,8 @@ func (ce *ConsensusEngine) verifyAttestationSignature(attestation *types.Attesta
 		return fmt.Errorf("failed to parse attestation signature: %v", err)
 	}
 
-	// Verify the signature using Ed25519
+	// Verify the signature using secp256k1 (via the shared crypto.PrivateKey abstraction)
+
 	// Note: Your Verify method returns error (not bool), nil = success
 	if err := pubKey.Verify(hash[:], &sig); err != nil {
 		return fmt.Errorf("invalid attestation signature from validator %s: %v",

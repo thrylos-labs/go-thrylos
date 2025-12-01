@@ -196,7 +196,7 @@ func ExampleWalletPolling() {
 	client := NewClient("http://localhost:8080")
 
 	// Create poller for a wallet address
-	address := "tl1wxyz123..."
+	address := "0x1234567890abcdef1234567890abcdef12345678"
 	poller := NewBalancePoller(client, address)
 
 	// Set up callbacks
