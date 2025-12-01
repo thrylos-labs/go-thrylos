@@ -266,9 +266,19 @@ func (ws *WorldState) GetBadgerDB() *badger.DB {
 }
 
 // InitializeGenesis initializes the world state with genesis data
+// InitializeGenesis initializes the world state with genesis data
+// Updated to use Granular Locking
 func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply int64, genesisValidators []*core.Validator) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	// 1. Acquire Global Locks (Chain, Validator, StateRoot)
+	// We hold these for the duration to ensure atomic genesis setup
+	ws.chainMu.Lock()
+	defer ws.chainMu.Unlock()
+
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
+
+	ws.stateRootMu.Lock()
+	defer ws.stateRootMu.Unlock()
 
 	// Validate genesis account address format
 	if err := account.ValidateAddress(genesisAccount); err != nil {
@@ -281,22 +291,29 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply int
 	}
 
 	// Create genesis account
-	if err := ws.accountManager.CreateGenesisAccount(genesisAccount, initialSupply); err != nil {
+	// We must lock the specific account shard for this operation
+	ws.accountMu.Lock(genesisAccount)
+	err := ws.accountManager.CreateGenesisAccount(genesisAccount, initialSupply)
+	ws.accountMu.Unlock(genesisAccount) // Unlock immediately after creation
+
+	if err != nil {
 		return fmt.Errorf("failed to create genesis account: %v", err)
 	}
 
 	// Initialize validators
 	for _, validator := range genesisValidators {
+		// addValidator is internal and assumes ws.validatorMu is held
 		if err := ws.addValidator(validator); err != nil {
 			return fmt.Errorf("failed to add genesis validator %s: %v", validator.Address, err)
 		}
 	}
 
-	// Set initial state
+	// Set initial state (Protected by chainMu)
 	ws.totalSupply = initialSupply
 	ws.height = 0
 
 	// Calculate initial state root
+	// Protected by stateRootMu (write) and validatorMu (read - already held)
 	if err := ws.updateStateRoot(); err != nil {
 		return fmt.Errorf("failed to calculate initial state root: %v", err)
 	}
@@ -373,40 +390,77 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 }
 
 func (ws *WorldState) GetTransactionsByAddress(address string, limit int) ([]*core.Transaction, error) {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
 
 	return ws.db.GetTransactionsByAddress(address, limit)
 }
 
 // ValidateTransaction validates a transaction using the transaction validator
 func (ws *WorldState) ValidateTransaction(tx *core.Transaction) error {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	if tx.From != "" {
+		ws.accountMu.RLock(tx.From)
+		defer ws.accountMu.RUnlock(tx.From)
+	}
 
 	return ws.txValidator.ValidateTransaction(tx, ws.accountManager)
 }
 
 // ExecuteTransaction executes a single transaction (helper method)
 func (ws *WorldState) ExecuteTransaction(tx *core.Transaction) (*transaction.ExecutionReceipt, error) {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	// 1. Identify accounts to lock
+	// Always lock sender
+	accountsToLock := []string{tx.From}
 
+	// Lock receiver only if it exists and is different from sender
+	if tx.To != "" && tx.To != tx.From {
+		accountsToLock = append(accountsToLock, tx.To)
+	}
+
+	// 2. Sort addresses to prevent deadlocks (Canonical Locking Order)
+	// If Thread A locks X then Y, and Thread B locks Y then X -> Deadlock.
+	// Sorting ensures both always lock X then Y.
+	if len(accountsToLock) > 1 && accountsToLock[0] > accountsToLock[1] {
+		accountsToLock[0], accountsToLock[1] = accountsToLock[1], accountsToLock[0]
+	}
+
+	// 3. Acquire locks
+	for _, addr := range accountsToLock {
+		ws.accountMu.Lock(addr)
+		// Defer unlock in LIFO order (reverse of acquisition)
+		defer ws.accountMu.Unlock(addr)
+	}
+
+	// 4. Execute logic
 	return ws.txExecutor.ExecuteTransaction(tx, ws.accountManager)
 }
 
 // ExecuteBatchTransactions executes multiple transactions
 func (ws *WorldState) ExecuteBatchTransactions(transactions []*core.Transaction) ([]*transaction.ExecutionReceipt, error) {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	// We do not hold a global lock here to allow parallelism.
+	// We rely on ExecuteTransaction to lock individual accounts as needed.
 
-	return ws.txExecutor.ExecuteBatch(transactions, ws.accountManager)
+	receipts := make([]*transaction.ExecutionReceipt, 0, len(transactions))
+
+	for i, tx := range transactions {
+		// Delegate to the safe execution method defined above
+		receipt, err := ws.ExecuteTransaction(tx)
+		if err != nil {
+			// Stop batch on first error (sequential dependency)
+			return receipts, fmt.Errorf("transaction %d failed: %v", i, err)
+		}
+		receipts = append(receipts, receipt)
+	}
+
+	return receipts, nil
 }
 
 // ValidateTransactionExecution validates that a transaction can be executed
 func (ws *WorldState) ValidateTransactionExecution(tx *core.Transaction) error {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	if tx.From != "" {
+		ws.accountMu.RLock(tx.From)
+		defer ws.accountMu.RUnlock(tx.From)
+	}
 
 	return ws.txExecutor.ValidateExecution(tx, ws.accountManager)
 }
@@ -430,8 +484,8 @@ func (ws *WorldState) GetBalance(address string) (int64, error) {
 
 // UpdateBalance updates the balance for a given address (needed for slashing)
 func (ws *WorldState) UpdateBalance(address string, newBalance int64) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.accountMu.Lock(address)
+	defer ws.accountMu.Unlock(address)
 
 	if newBalance < 0 {
 		return fmt.Errorf("cannot set negative balance")
@@ -457,38 +511,33 @@ func (ws *WorldState) UpdateBalance(address string, newBalance int64) error {
 
 // GetNonce returns the nonce of an account
 func (ws *WorldState) GetNonce(address string) (uint64, error) {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.accountMu.RLock(address)
+	defer ws.accountMu.RUnlock(address)
 
 	return ws.accountManager.GetNonce(address)
 }
 
-// AddTransaction adds a transaction to the pool
+// 1. ValidateTransaction handles its own granular account locking
+// 2. txPool.AddTransaction handles its own internal locking
 func (ws *WorldState) AddTransaction(tx *core.Transaction) error {
-	// First validate the transaction
+	// First validate the transaction (uses sharded locks internally)
 	if err := ws.ValidateTransaction(tx); err != nil {
 		return fmt.Errorf("transaction validation failed: %v", err)
 	}
 
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
+	// Add to pool (uses pool's own mutex)
 	return ws.txPool.AddTransaction(tx)
 }
 
 // GetPendingTransactions returns all pending transactions
+// No WorldState lock needed (delegates to thread-safe pool)
 func (ws *WorldState) GetPendingTransactions() []*core.Transaction {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
-
 	return ws.txPool.GetPendingTransactions()
 }
 
 // GetExecutableTransactions returns transactions ready for execution
+// No WorldState lock needed (delegates to thread-safe pool)
 func (ws *WorldState) GetExecutableTransactions(maxCount int) []*core.Transaction {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
-
 	return ws.txPool.GetExecutableTransactions(maxCount, ws.accountManager)
 }
 
@@ -523,15 +572,15 @@ func (ws *WorldState) GetBlock(index int64) (*core.Block, error) {
 		return nil, fmt.Errorf("block index %d out of range", index)
 	}
 
-	// Try storage first
+	// Try storage first (thread-safe)
 	block, err := ws.db.GetBlockByHeight(index)
 	if err == nil {
 		return block, nil
 	}
 
-	// Fallback to in-memory slice for early / dev scenarios
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	// Fallback to in-memory slice
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
 
 	if index >= int64(len(ws.blocks)) {
 		return nil, fmt.Errorf("block index %d out of range", index)
@@ -542,8 +591,15 @@ func (ws *WorldState) GetBlock(index int64) (*core.Block, error) {
 
 // GetBlockByHash returns a block by hash
 func (ws *WorldState) GetBlockByHash(hash string) (*core.Block, error) {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	// Try storage first (thread-safe)
+	block, err := ws.db.GetBlock(hash)
+	if err == nil {
+		return block, nil
+	}
+
+	// Fallback to in-memory slice
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
 
 	for _, block := range ws.blocks {
 		if block.Hash == hash {
@@ -563,17 +619,18 @@ func (ws *WorldState) GetHeight() int64 {
 
 // GetStateRoot returns the current state root
 func (ws *WorldState) GetStateRoot() string {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.stateRootMu.RLock()
+	defer ws.stateRootMu.RUnlock()
 
 	return ws.stateRoot
 }
 
 // AddValidator adds a validator to the state
 func (ws *WorldState) AddValidator(validator *core.Validator) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
 
+	// delegates to internal method which assumes lock is held
 	return ws.addValidator(validator)
 }
 
@@ -592,8 +649,8 @@ func (ws *WorldState) GetValidator(address string) (*core.Validator, error) {
 
 // GetActiveValidators returns all active validators
 func (ws *WorldState) GetActiveValidators() []*core.Validator {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.validatorMu.RLock()
+	defer ws.validatorMu.RUnlock()
 
 	var active []*core.Validator
 	for _, validator := range ws.validators {
@@ -917,8 +974,14 @@ func (ws *WorldState) updateStateRoot() error {
 
 // ValidateStateConsistency validates the consistency of the world state
 func (ws *WorldState) ValidateStateConsistency() error {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
+
+	ws.validatorMu.RLock()
+	defer ws.validatorMu.RUnlock()
+
+	ws.stateRootMu.RLock()
+	defer ws.stateRootMu.RUnlock()
 
 	// Validate account balances are non-negative
 	accounts := ws.accountManager.GetAllAccounts()
@@ -1185,8 +1248,14 @@ type StateSnapshot struct {
 
 // CreateSnapshot creates a snapshot of the current world state
 func (ws *WorldState) CreateSnapshot() *StateSnapshot {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
+
+	ws.validatorMu.RLock()
+	defer ws.validatorMu.RUnlock()
+
+	ws.stateRootMu.RLock()
+	defer ws.stateRootMu.RUnlock()
 
 	// Copy accounts
 	accounts := make(map[string]*core.Account)
@@ -1257,8 +1326,14 @@ func (ws *WorldState) RestoreFromSnapshot(snapshot *StateSnapshot) error {
 		return fmt.Errorf("snapshot cannot be nil")
 	}
 
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.chainMu.Lock()
+	defer ws.chainMu.Unlock()
+
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
+
+	ws.stateRootMu.Lock()
+	defer ws.stateRootMu.Unlock()
 
 	// Validate snapshot compatibility
 	if snapshot.Config != nil {
@@ -1313,10 +1388,20 @@ func (ws *WorldState) GetStakingManager() *StakingManager {
 // Delegate stakes tokens to a validator
 func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount int64) error {
 	ws := sm.worldState
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
 
-	// Validate addresses
+	// 1. Lock specific delegator account
+	ws.accountMu.Lock(delegatorAddr)
+	defer ws.accountMu.Unlock(delegatorAddr)
+
+	// 2. Lock validators to check existence/status
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
+
+	// 3. Lock chain stats to update total staked
+	ws.chainMu.Lock()
+	defer ws.chainMu.Unlock()
+
+	// --- Validation Logic ---
 	if err := account.ValidateAddress(delegatorAddr); err != nil {
 		return fmt.Errorf("invalid delegator address: %v", err)
 	}
@@ -1431,85 +1516,79 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 // Undelegate unstakes tokens from a validator
 func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount int64) error {
 	ws := sm.worldState
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
 
-	// Validate addresses
-	if err := account.ValidateAddress(delegatorAddr); err != nil {
-		return fmt.Errorf("invalid delegator address: %v", err)
-	}
-	if err := account.ValidateAddress(validatorAddr); err != nil {
-		return fmt.Errorf("invalid validator address: %v", err)
+	// Acquire locks in consistent order
+	ws.accountMu.Lock(delegatorAddr)
+	defer ws.accountMu.Unlock(delegatorAddr)
+
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
+
+	ws.chainMu.Lock()
+	defer ws.chainMu.Unlock()
+
+	// --- Validation ---
+	if amount <= 0 {
+		return fmt.Errorf("undelegation amount must be positive")
 	}
 
-	// Get delegator account
 	delegator, err := ws.accountManager.GetAccount(delegatorAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
 	if delegator.DelegatedTo == nil {
-		return fmt.Errorf("no delegations found for account %s", delegatorAddr)
+		return fmt.Errorf("no delegations found")
 	}
 
 	delegatedAmount, exists := delegator.DelegatedTo[validatorAddr]
 	if !exists || delegatedAmount < amount {
-		return fmt.Errorf("insufficient delegation: have %d, need %d", delegatedAmount, amount)
+		return fmt.Errorf("insufficient delegation")
 	}
 
-	// Get validator
 	validator, exists := ws.validators[validatorAddr]
 	if !exists {
-		return fmt.Errorf("validator %s not found", validatorAddr)
+		return fmt.Errorf("validator not found")
 	}
 
-	// ===== SafeMath calculations (no state mutations yet) =====
-
-	// delegator.StakedAmount -= amount
+	// --- Math ---
 	newStakedAmount, err := math.SafeSub(delegator.StakedAmount, amount)
 	if err != nil {
-		return fmt.Errorf("undelegation would underflow delegator staked amount: %v", err)
+		return err
 	}
 
-	// current delegation minus amount
 	newDelegatedToVal, err := math.SafeSub(delegatedAmount, amount)
 	if err != nil {
-		return fmt.Errorf("undelegation would underflow delegator->validator delegation: %v", err)
+		return err
 	}
 
-	// validator.DelegatedStake -= amount
 	newDelegatedStake, err := math.SafeSub(validator.DelegatedStake, amount)
 	if err != nil {
-		return fmt.Errorf("undelegation would underflow validator delegated stake: %v", err)
+		return err
 	}
 
-	// validator.Stake -= amount
 	newValidatorStake, err := math.SafeSub(validator.Stake, amount)
 	if err != nil {
-		return fmt.Errorf("undelegation would underflow validator total stake: %v", err)
+		return err
 	}
 
-	// validator.Delegators[delegatorAddr] -= amount
 	currentValDelegation := validator.Delegators[delegatorAddr]
 	newValDelegation, err := math.SafeSub(currentValDelegation, amount)
 	if err != nil {
-		return fmt.Errorf("undelegation would underflow validator delegator entry: %v", err)
+		return err
 	}
 
-	// ws.totalStaked -= amount
 	newTotalStaked, err := math.SafeSub(ws.totalStaked, amount)
 	if err != nil {
-		return fmt.Errorf("undelegation would underflow total staked: %v", err)
+		return err
 	}
 
-	// delegator.Balance += amount (instant unbonding)
 	newBalance, err := math.SafeAdd(delegator.Balance, amount)
 	if err != nil {
-		return fmt.Errorf("undelegation would overflow delegator balance: %v", err)
+		return err
 	}
 
-	// ===== Commit updates only after all checks passed =====
-
+	// --- Update State ---
 	delegator.StakedAmount = newStakedAmount
 	delegator.Balance = newBalance
 
@@ -1531,12 +1610,12 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 
 	ws.totalStaked = newTotalStaked
 
+	// Persist
 	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
-		return fmt.Errorf("failed to update delegator account: %v", err)
+		return err
 	}
-
-	if err := ws.UpdateValidator(validator); err != nil {
-		return fmt.Errorf("failed to update validator: %v", err)
+	if err := ws.state.SaveValidator(validator); err != nil {
+		return err
 	}
 
 	return nil
@@ -1545,13 +1624,21 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 // DistributeRewards distributes staking rewards to validators and delegators
 func (sm *StakingManager) DistributeRewards(totalRewards int64) error {
 	ws := sm.worldState
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+
+	// This is a heavy global operation.
+	// We need Chain/Validator locks for reading global state.
+	// We need Account locks for WRITING to potentially thousands of accounts.
+	// We cannot hold global locks while iterating through accounts if we want high concurrency,
+	// but for reward distribution (usually once per epoch), exclusive locking is acceptable/safer.
+
+	ws.chainMu.Lock()      // Update TotalSupply
+	ws.validatorMu.RLock() // Read Validators
+	defer ws.chainMu.Unlock()
+	defer ws.validatorMu.RUnlock()
 
 	if totalRewards <= 0 {
-		return fmt.Errorf("total rewards must be positive")
+		return fmt.Errorf("rewards must be positive")
 	}
-
 	activeValidators := ws.GetActiveValidators()
 	if len(activeValidators) == 0 {
 		return fmt.Errorf("no active validators to distribute rewards")
@@ -1682,10 +1769,14 @@ func (sm *StakingManager) DistributeRewards(totalRewards int64) error {
 }
 
 // GetDelegations returns all delegations for an account
+// GetDelegations returns all delegations for an account
+// Uses accountMu (Read) for the specific delegator
 func (sm *StakingManager) GetDelegations(delegatorAddr string) (map[string]int64, error) {
 	ws := sm.worldState
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+
+	// Acquire read lock for this specific account
+	ws.accountMu.RLock(delegatorAddr)
+	defer ws.accountMu.RUnlock(delegatorAddr)
 
 	account, err := ws.accountManager.GetAccount(delegatorAddr)
 	if err != nil {
@@ -1696,7 +1787,7 @@ func (sm *StakingManager) GetDelegations(delegatorAddr string) (map[string]int64
 		return make(map[string]int64), nil
 	}
 
-	// Return a copy to prevent external modification
+	// Return a copy to prevent external modification after unlock
 	delegations := make(map[string]int64)
 	for validator, amount := range account.DelegatedTo {
 		delegations[validator] = amount
@@ -1724,33 +1815,35 @@ func (ws *WorldState) GetAccountManager() *account.AccountManager {
 
 // UpdateTotalStaked recalculates total staked amount (useful for consistency checks)
 func (ws *WorldState) UpdateTotalStaked() {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.validatorMu.RLock()
+	defer ws.validatorMu.RUnlock()
 
 	total := int64(0)
 	for _, validator := range ws.validators {
 		newTotal, err := math.SafeAdd(total, validator.Stake)
 		if err != nil {
-			// This should never happen unless state is corrupted
 			fmt.Printf("⚠️ UpdateTotalStaked: overflow when summing stake: %v\n", err)
 			return
 		}
 		total = newTotal
 	}
+
+	ws.chainMu.Lock()
 	ws.totalStaked = total
+	ws.chainMu.Unlock()
 }
 
 // GetValidatorCount returns the number of validators
 func (ws *WorldState) GetValidatorCount() int {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.validatorMu.RLock()
+	defer ws.validatorMu.RUnlock()
 	return len(ws.validators)
 }
 
 // GetActiveValidatorCount returns the number of active validators
 func (ws *WorldState) GetActiveValidatorCount() int {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.validatorMu.RLock()
+	defer ws.validatorMu.RUnlock()
 
 	count := 0
 	for _, validator := range ws.validators {
@@ -1763,29 +1856,18 @@ func (ws *WorldState) GetActiveValidatorCount() int {
 
 // GetAccountCount returns the number of accounts
 func (ws *WorldState) GetAccountCount() int {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
-
 	accounts := ws.accountManager.GetAllAccounts()
 	return len(accounts)
 }
 
 // Cleanup removes old completed transactions and performs maintenance
 func (ws *WorldState) Cleanup() {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
-	// Clean up stale transactions (older than 1 hour)
+	// txPool handles its own locking
 	maxAge := time.Hour
-	removedCount := ws.txPool.CleanupStaleTransactions(maxAge)
+	ws.txPool.CleanupStaleTransactions(maxAge)
 
-	// Log cleanup if any transactions were removed
-	if removedCount > 0 {
-		// Could add logging here if needed
-		_ = removedCount // Acknowledge the return value
-	}
-
-	// Update state root after cleanup
+	// Update state root
+	// This method acquires necessary locks
 	ws.updateStateRoot()
 }
 
@@ -1795,21 +1877,18 @@ func (ws *WorldState) GetCurrentHeight() int64 {
 
 // ExportAccounts returns all accounts for state sync
 func (ws *WorldState) ExportAccounts() map[string]*core.Account {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
-
+	// Iterates DB, safe
 	return ws.accountManager.GetAllAccounts()
 }
 
 // ExportValidators returns all validators for state sync
 func (ws *WorldState) ExportValidators() map[string]*core.Validator {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.validatorMu.RLock()
+	defer ws.validatorMu.RUnlock()
 
-	// Create a copy to prevent external modification
 	validators := make(map[string]*core.Validator)
 	for addr, validator := range ws.validators {
-		// Deep copy validator
+		// Deep copy
 		delegators := make(map[string]int64)
 		if validator.Delegators != nil {
 			for k, v := range validator.Delegators {
@@ -1839,13 +1918,10 @@ func (ws *WorldState) ExportValidators() map[string]*core.Validator {
 
 // ExportStakes returns staking information for state sync
 func (ws *WorldState) ExportStakes() map[string]map[string]int64 {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	// Accounts are from DB, so safe to iterate
+	accounts := ws.accountManager.GetAllAccounts()
 
 	stakes := make(map[string]map[string]int64)
-
-	// Export delegations from all accounts
-	accounts := ws.accountManager.GetAllAccounts()
 	for addr, account := range accounts {
 		if account.DelegatedTo != nil && len(account.DelegatedTo) > 0 {
 			stakes[addr] = make(map[string]int64)
@@ -1860,10 +1936,16 @@ func (ws *WorldState) ExportStakes() map[string]map[string]int64 {
 
 // Clear clears the world state (for restoring from snapshot)
 func (ws *WorldState) Clear() error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.chainMu.Lock()
+	defer ws.chainMu.Unlock()
 
-	// Reset account manager with proper state storage injection
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
+
+	ws.stateRootMu.Lock()
+	defer ws.stateRootMu.Unlock()
+
+	// Reset account manager
 	ws.accountManager = account.NewAccountManager(ws.state, ws.shardID, ws.totalShards)
 
 	// Clear validators
