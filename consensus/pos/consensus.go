@@ -504,20 +504,57 @@ func (ce *ConsensusEngine) selectValidatorByStake(validators []*core.Validator, 
 	return validators[len(validators)-1], nil
 }
 
-// getRandomnessSeed generates deterministic randomness for validator selection
+// getRandomnessSeed generates deterministic randomness for validator selection.
+// SECURITY FIX: Implements Epoch-Based Randomness to prevent Stake Grinding.
 func (ce *ConsensusEngine) getRandomnessSeed(slot uint64) []byte {
-	currentBlock := ce.worldState.GetCurrentBlock()
+	// 1. Define Epoch Parameters
+	// This must match the epoch calculation in processSlot (currently 32)
+	const slotsPerEpoch = 32
+	currentEpoch := slot / slotsPerEpoch
 
-	var prevHash []byte
-	if currentBlock != nil {
-		prevHash = []byte(currentBlock.Hash)
+	var seedSource []byte
+
+	// 2. Determine the Seed Source
+	if currentEpoch == 0 {
+		// Epoch 0: Use Genesis Hash (Fixed)
+		// FIX: Use GetBlock(0) since GetGenesisBlock is not on WorldState
+		genesis, err := ce.worldState.GetBlock(0)
+		if err == nil && genesis != nil {
+			seedSource = []byte(genesis.Hash)
+		} else {
+			// Fallback for initialization safety or if genesis is missing
+			seedSource = make([]byte, 32)
+		}
+	} else {
+		// Epoch N > 0: Use the hash of the last block of Epoch N-1.
+		// This block is already finalized/committed before this epoch started.
+		// Target Height = (CurrentEpoch * 32) - 1
+		lookbackHeight := int64(currentEpoch*slotsPerEpoch) - 1
+
+		refBlock, err := ce.worldState.GetBlock(lookbackHeight)
+		if err != nil || refBlock == nil {
+			// Safety Fallback: If historical block is missing (e.g. during fast sync),
+			// rely on Genesis hash rather than CurrentHead to prevent grinding.
+			genesis, errGen := ce.worldState.GetBlock(0)
+			if errGen == nil && genesis != nil {
+				seedSource = []byte(genesis.Hash)
+			} else {
+				seedSource = make([]byte, 32)
+			}
+		} else {
+			seedSource = []byte(refBlock.Hash)
+		}
 	}
 
-	// Combine slot number and previous block hash
+	// 3. Mix the Slot ID with the Stable Epoch Seed
+	// This ensures every slot has a unique hash, but the source of entropy
+	// (seedSource) remains constant and unmanipulable throughout the epoch.
 	slotBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(slotBytes, slot)
 
-	combined := append(slotBytes, prevHash...)
+	combined := append(slotBytes, seedSource...)
+
+	// 4. Generate final hash
 	hash := blake2b.Sum256(combined)
 
 	return hash[:]
