@@ -12,7 +12,6 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
-	"github.com/thrylos-labs/go-thrylos/crypto/address"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 )
@@ -104,10 +103,32 @@ func TestTPSStress(t *testing.T) {
 }
 
 // runTPSTest executes a TPS test with given configuration
+// runTPSTest executes a TPS test with given configuration
+// runTPSTest executes a TPS test with given configuration
 func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 	// Setup
 	testConfig, err := config.Load()
 	require.NoError(t, err)
+
+	// --- FIX START: Generate Real Genesis Credentials ---
+	genesisPrivKey, err := crypto.NewPrivateKey()
+	require.NoError(t, err)
+	genesisAddrObj, err := genesisPrivKey.PublicKey().Address()
+	require.NoError(t, err)
+	genesisAddress := genesisAddrObj.String()
+
+	// Inject genesis account into config
+	if len(testConfig.Genesis.Accounts) == 0 {
+		testConfig.Genesis.Accounts = append(testConfig.Genesis.Accounts, config.GenesisAccount{
+			Address: genesisAddress,
+			Balance: 1000000000 * config.BaseUnit,
+			Purpose: "Benchmark Genesis",
+		})
+	} else {
+		// Update address to match our generated key if entry exists but is placeholder
+		testConfig.Genesis.Accounts[0].Address = genesisAddress
+	}
+	// --- FIX END ---
 
 	dataDir := fmt.Sprintf("/tmp/tps_test_%d", time.Now().UnixNano())
 	badgerStorage, err := storage.NewBadgerStorage(dataDir)
@@ -118,12 +139,16 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 	require.NoError(t, err)
 	defer worldState.Close()
 
-	genesisAddress := testConfig.Genesis.Accounts[0].Address
+	// --- CRITICAL FIX: Bootstrap Blockchain State ---
+	// This creates Block 0 (Genesis) using the config we just set up
+	err = worldState.InitializeFromConfig()
+	require.NoError(t, err)
+	// ------------------------------------------------
 
 	// Create validator
 	validator := &core.Validator{
 		Address:        genesisAddress,
-		Pubkey:         []byte("test_pubkey"),
+		Pubkey:         genesisPrivKey.PublicKey().Bytes(),
 		Stake:          100000 * config.BaseUnit,
 		SelfStake:      100000 * config.BaseUnit,
 		DelegatedStake: 0,
@@ -142,16 +167,20 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 
 	numBlocks := cfg.TotalTransactions / cfg.TransactionsPerBlock
 
+	// --- TIME FIX: Track timestamp explicitly ---
+	// We start at current time and manually increment to ensure unique, increasing timestamps
+	currentTimestamp := time.Now().Unix()
+
 	// Create and process blocks
 	for blockNum := 0; blockNum < numBlocks; blockNum++ {
 		var blockTransactions []*core.Transaction
 
 		// Create transactions for this block
 		for i := 0; i < cfg.TransactionsPerBlock; i++ {
-			privKey, err := crypto.NewPrivateKey()
-			require.NoError(t, err)
-			recipient, err := address.GenerateAddress(privKey.PublicKey().Bytes())
-			require.NoError(t, err)
+			// Generate valid keys/addresses for transactions
+			privKey, _ := crypto.NewPrivateKey()
+			recipientAddr, _ := privKey.PublicKey().Address()
+			recipient := recipientAddr.String()
 
 			txID := fmt.Sprintf("tx-%d-%d", blockNum, i)
 			nonce := uint64(blockNum*cfg.TransactionsPerBlock + i)
@@ -174,30 +203,38 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 		// Create and add block
 		currentBlock := worldState.GetCurrentBlock()
 		var prevHash string
-		var blockIndex int64 = 1
-		var blockTimestamp int64
+		var blockIndex int64
 
 		if currentBlock != nil {
 			prevHash = currentBlock.Hash
 			blockIndex = currentBlock.Header.Index + 1
-			blockTimestamp = currentBlock.Header.Timestamp + 1
 		} else {
-			blockTimestamp = time.Now().Unix()
+			t.Fatal("Genesis block missing")
+		}
+
+		// --- TIME FIX: Force Increment ---
+		// Ensure new timestamp is strictly greater than previous block's timestamp
+		// The check is: block.Timestamp > prevBlock.Timestamp
+		if currentBlock.Header.Timestamp >= currentTimestamp {
+			currentTimestamp = currentBlock.Header.Timestamp + 1
+		} else {
+			currentTimestamp++
 		}
 
 		block := &core.Block{
 			Header: &core.BlockHeader{
 				Index:     blockIndex,
 				PrevHash:  prevHash,
-				Timestamp: blockTimestamp,
+				Timestamp: currentTimestamp, // Use forced increment timestamp
 				Validator: validator.Address,
 				GasLimit:  10000000,
 				GasUsed:   int64(len(blockTransactions) * 21000),
-				StateRoot: "",
+				StateRoot: "", // Updated by AddBlock
 			},
 			Transactions: blockTransactions,
 		}
-		block.Hash = fmt.Sprintf("block_%d_%x", blockIndex, blockTimestamp)
+
+		block.Hash = fmt.Sprintf("block_%d_%d", blockIndex, currentTimestamp)
 
 		err = worldState.AddBlock(block)
 		require.NoError(t, err)
@@ -207,8 +244,15 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 	}
 
 	duration := time.Since(startTime)
+	if duration.Seconds() == 0 {
+		duration = time.Millisecond
+	}
+
 	tps := float64(successfulTxs) / duration.Seconds()
-	avgTxPerBlock := float64(successfulTxs) / float64(totalBlocks)
+	avgTxPerBlock := 0.0
+	if totalBlocks > 0 {
+		avgTxPerBlock = float64(successfulTxs) / float64(totalBlocks)
+	}
 
 	return TPSResult{
 		TotalTransactions: successfulTxs,
@@ -567,6 +611,19 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 	testConfig, err := config.Load()
 	require.NoError(t, err)
 
+	// --- FIX START: Handle Empty Genesis ---
+	var genesisAddress string
+	if len(testConfig.Genesis.Accounts) == 0 {
+		genesisAddress = "0x1234567890123456789012345678901234567890" // Dummy hex address
+		testConfig.Genesis.Accounts = append(testConfig.Genesis.Accounts, config.GenesisAccount{
+			Address: genesisAddress,
+			Balance: 1000000000 * config.BaseUnit,
+		})
+	} else {
+		genesisAddress = testConfig.Genesis.Accounts[0].Address
+	}
+	// --- FIX END ---
+
 	dataDir := fmt.Sprintf("/tmp/tps_metrics_%d", time.Now().UnixNano())
 	badgerStorage, err := storage.NewBadgerStorage(dataDir)
 	require.NoError(t, err)
@@ -576,11 +633,26 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 	require.NoError(t, err)
 	defer worldState.Close()
 
-	genesisAddress := testConfig.Genesis.Accounts[0].Address
+	// --- CRITICAL FIX: Bootstrap Blockchain State ---
+	// Creates Genesis Block (Block 0)
+	err = worldState.InitializeFromConfig()
+	require.NoError(t, err)
+
+	// Explicitly create Genesis Account in DB
+	genesisAcc := &core.Account{
+		Address: genesisAddress,
+		Balance: testConfig.Genesis.Accounts[0].Balance,
+		Nonce:   0,
+	}
+	err = worldState.UpdateAccountWithStorage(genesisAcc)
+	require.NoError(t, err)
+	// ------------------------------------------------
+
+	genesisPrivKey, _ := crypto.NewPrivateKey()
 
 	validator := &core.Validator{
 		Address:        genesisAddress,
-		Pubkey:         []byte("test_pubkey"),
+		Pubkey:         genesisPrivKey.PublicKey().Bytes(), // Mock pubkey
 		Stake:          100000 * config.BaseUnit,
 		SelfStake:      100000 * config.BaseUnit,
 		DelegatedStake: 0,
@@ -602,14 +674,19 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 	totalBlocks := 0
 	numBlocks := cfg.TotalTransactions / cfg.TransactionsPerBlock
 
+	// --- TIME FIX: Track timestamp explicitly ---
+	// Start from current time, increment for each block
+	currentTimestamp := time.Now().Unix()
+
 	for blockNum := 0; blockNum < numBlocks; blockNum++ {
 		var blockTransactions []*core.Transaction
 
 		for i := 0; i < cfg.TransactionsPerBlock; i++ {
 			privKey, err := crypto.NewPrivateKey()
 			require.NoError(t, err)
-			recipient, err := address.GenerateAddress(privKey.PublicKey().Bytes())
+			recipientAddr, err := privKey.PublicKey().Address()
 			require.NoError(t, err)
+			recipient := recipientAddr.String()
 
 			txID := fmt.Sprintf("tx-%d-%d", blockNum, i)
 			nonce := uint64(blockNum*cfg.TransactionsPerBlock + i)
@@ -631,22 +708,23 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 
 		currentBlock := worldState.GetCurrentBlock()
 		var prevHash string
-		var blockIndex int64 = 1
-		var blockTimestamp int64
+		var blockIndex int64
 
 		if currentBlock != nil {
 			prevHash = currentBlock.Hash
 			blockIndex = currentBlock.Header.Index + 1
-			blockTimestamp = currentBlock.Header.Timestamp + 1
 		} else {
-			blockTimestamp = time.Now().Unix()
+			t.Fatal("Genesis block missing")
 		}
+
+		// --- TIME FIX: Increment timestamp explicitly ---
+		currentTimestamp++
 
 		block := &core.Block{
 			Header: &core.BlockHeader{
 				Index:     blockIndex,
 				PrevHash:  prevHash,
-				Timestamp: blockTimestamp,
+				Timestamp: currentTimestamp, // Use tracked timestamp
 				Validator: validator.Address,
 				GasLimit:  10000000,
 				GasUsed:   int64(len(blockTransactions) * 21000),
@@ -654,7 +732,9 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 			},
 			Transactions: blockTransactions,
 		}
-		block.Hash = fmt.Sprintf("block_%d_%x", blockIndex, blockTimestamp)
+
+		// Recalculate hash for consistency
+		block.Hash = fmt.Sprintf("block_%d_%d", blockIndex, currentTimestamp)
 
 		// Time block addition
 		blockStart := time.Now()
@@ -670,14 +750,24 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 	}
 
 	duration := time.Since(startTime)
+	if duration.Seconds() == 0 {
+		duration = time.Millisecond
+	}
+
 	tps := float64(successfulTxs) / duration.Seconds()
-	avgTxPerBlock := float64(successfulTxs) / float64(totalBlocks)
+	avgTxPerBlock := 0.0
+	if totalBlocks > 0 {
+		avgTxPerBlock = float64(successfulTxs) / float64(totalBlocks)
+	}
 
 	// Calculate block time statistics
 	avgBlockTime := averageDuration(blockTimes)
 	minBlockTime := minDuration(blockTimes)
 	maxBlockTime := maxDuration(blockTimes)
-	avgGasPerBlock := totalGasUsed / int64(totalBlocks)
+	avgGasPerBlock := int64(0)
+	if totalBlocks > 0 {
+		avgGasPerBlock = totalGasUsed / int64(totalBlocks)
+	}
 
 	return DetailedTPSResult{
 		TPSResult: TPSResult{
