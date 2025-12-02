@@ -8,6 +8,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/types"
 	"golang.org/x/crypto/blake2b"
 )
@@ -356,29 +357,63 @@ func (ce *ConsensusEngine) signEvidence(evidence *SlashingEvidence) error {
 }
 
 func (ce *ConsensusEngine) verifyEvidenceSignature(evidence *SlashingEvidence) error {
-	// Check if signature exists
+	// 1. Signature must exist
 	if len(evidence.ReporterSignature) == 0 {
 		return fmt.Errorf("evidence not signed")
 	}
 
-	// Skip verification if worldState is nil (e.g., in tests)
+	// 2. In tests, we might not have worldState
 	if ce.worldState == nil {
-		log.Println("⚠️  Skipping signature verification (worldState not initialized)")
+		// OPTIONAL: Add a panic here if THRYLOS_ENVIRONMENT is "production"
+		log.Println("⚠️ CRITICAL WARNING: Skipping evidence verification because worldState is nil. This should ONLY happen in unit tests.")
 		return nil
 	}
 
-	// Verify signature format (ECDSA signatures are typically 64 or 65 bytes)
-	if len(evidence.ReporterSignature) < 64 {
-		return fmt.Errorf("invalid signature length: %d bytes", len(evidence.ReporterSignature))
+	// 3. Signature length must match our secp256k1 format (R||S||V = 65 bytes)
+	if len(evidence.ReporterSignature) != crypto.SignatureSize {
+		return fmt.Errorf("invalid signature length: got %d, want %d",
+			len(evidence.ReporterSignature), crypto.SignatureSize)
 	}
 
-	// Verify reporter is a known validator
-	_, err := ce.worldState.GetValidator(evidence.ReporterAddress)
+	// 4. Reporter must be a known validator
+	validator, err := ce.worldState.GetValidator(evidence.ReporterAddress)
 	if err != nil {
-		return fmt.Errorf("reporter is not a registered validator: %v", err)
+		return fmt.Errorf("reporter %s is not a registered validator: %w",
+			evidence.ReporterAddress, err)
 	}
 
-	log.Printf("✅ Evidence signature validated for reporter %s", evidence.ReporterAddress)
+	if validator.Pubkey == nil || len(validator.Pubkey) == 0 {
+		return fmt.Errorf("reporter %s has no registered public key", evidence.ReporterAddress)
+	}
+
+	// 5. Parse reporter’s public key
+	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
+	if err != nil {
+		return fmt.Errorf("failed to parse reporter public key: %w", err)
+	}
+
+	// 6. Parse the signature bytes
+	sig, err := crypto.SignatureFromBytes(evidence.ReporterSignature)
+	if err != nil {
+		return fmt.Errorf("failed to parse reporter signature: %w", err)
+	}
+
+	// 7. Reconstruct the exact message hash used in signEvidence
+	data := fmt.Sprintf("%s%s%s%d",
+		evidence.ID,
+		evidence.Type.String(),
+		evidence.ValidatorAddress,
+		evidence.Timestamp,
+	)
+
+	hash := blake2b.Sum256([]byte(data))
+
+	// 8. Verify (secp256k1 via crypto.Signature/crypto.PublicKey)
+	if err := sig.Verify(&pubKey, hash[:]); err != nil {
+		return fmt.Errorf("invalid evidence signature: %w", err)
+	}
+
+	log.Printf("✅ Evidence signature cryptographically validated for reporter %s", evidence.ReporterAddress)
 	return nil
 }
 

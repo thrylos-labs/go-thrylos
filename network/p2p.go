@@ -21,6 +21,7 @@ type P2PNetwork struct {
 	TransactionChan chan *core.Transaction
 	AttestationChan chan interface{}
 	VoteChan        chan interface{}
+	startTime       time.Time
 }
 
 // Config for P2P network
@@ -47,6 +48,7 @@ func NewP2PNetwork(cfg *config.Config) (*P2PNetwork, error) {
 	}
 
 	network := &P2PNetwork{
+		startTime:       time.Now(),
 		manager:         manager,
 		config:          cfg,
 		BlockChan:       make(chan *core.Block, 1000),
@@ -264,9 +266,8 @@ func (n *P2PNetwork) DiscoverPeers() {
 
 // IsHealthy returns true if the P2P network is healthy
 func (n *P2PNetwork) IsHealthy() bool {
-	// Consider network healthy if we have at least one connection
-	// or if we're still trying to connect (within first 5 minutes)
-	return n.IsConnected() || time.Since(time.Now()) < 5*time.Minute
+	// Fix: Use n.startTime instead of time.Now()
+	return n.IsConnected() || time.Since(n.startTime) < 5*time.Minute
 }
 
 // GetHealthStatus returns detailed health information
