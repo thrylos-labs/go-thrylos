@@ -527,11 +527,11 @@ func (ar *AttestationRecord) Conflicts(other *AttestationRecord) bool {
 	return ar.Epoch == other.Epoch && ar.BlockHash != other.BlockHash
 }
 
-// IsSurroundedBy checks if this attestation is surrounded by another
-// Note: Since your Attestation only has Epoch (not source/target),
-// surround voting detection is simplified or may need Vote struct instead
+// IsSurroundedBy checks if this attestation is surrounded by another.
+// NOTE: This feature is currently DISABLED for the Testnet.
+// The current Attestation structure uses point-based voting (Epoch/Slot) rather
+// than span-based voting (Source->Target), making surround-vote detection impossible.
+// This will be enabled in a future hard fork when the Attestation struct is updated.
 func (ar *AttestationRecord) IsSurroundedBy(other *AttestationRecord) bool {
-	// For simplified surround detection with single epoch
-	// This would need to be enhanced with Vote struct for full Casper FFG
-	return false // Placeholder - use Vote struct for proper surround detection
+	return false
 }

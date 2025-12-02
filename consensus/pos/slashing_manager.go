@@ -31,6 +31,15 @@ type DowntimePolicy struct {
 	JailDuration time.Duration // How long to jail
 }
 
+// DoubleSigningError carries the existing attestation that caused the conflict.
+type DoubleSigningError struct {
+	ConflictingRecord *storage.AttestationRecord
+}
+
+func (e *DoubleSigningError) Error() string {
+	return fmt.Sprintf("double signing detected against block %s", e.ConflictingRecord.BlockHash)
+}
+
 // SlashingManager handles all slashing-related operations
 type SlashingManager struct {
 	config *storage.SlashingConfig
@@ -189,9 +198,20 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 		fmt.Printf("🔍 DEBUG [%d]: Conflicts? %v (same epoch: %v, diff hash: %v)\n",
 			i, conflicts, record.Epoch == prev.Epoch, record.BlockHash != prev.BlockHash)
 
-		if conflicts {
+		// Only check for Double Voting (Conflicts)
+		// Surround voting requires Source/Target epoch data which is not yet implemented
+		if record.Conflicts(prev) {
 			fmt.Println("🚨 DEBUG: CONFLICT DETECTED! Calling slashDoubleVoting...")
-			return sm.slashDoubleVoting(att, record, prev)
+
+			// 1. Apply the slash locally immediately
+			if err := sm.slashDoubleVoting(att, record, prev); err != nil {
+				return fmt.Errorf("failed to slash double voting: %v", err)
+			}
+
+			// 2. Return the typed error so the consensus engine can build the evidence
+			return &DoubleSigningError{
+				ConflictingRecord: prev,
+			}
 		}
 	}
 

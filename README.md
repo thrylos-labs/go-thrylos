@@ -8,7 +8,7 @@
 * **Networking:** Robust P2P layer built on **libp2p** using GossipSub for message propagation and Kademlia DHT for peer discovery.
 * **Storage:** High-performance persistence using **BadgerDB v3**.
 * **Security:**
-  * **Slashing:** Automated penalties for double-voting, surround-voting, and downtime.
+  * **Slashing:** Slashing: Automated penalties for double-voting and downtime. Note: Surround-voting detection is currently disabled for Testnet and scheduled for a future protocol upgrade.  
   * **Replay Protection:** Nonce-based and finalized-block-hash protection.
 * **Cryptography:** secp256k1 signatures (Ethereum-compatible) with Keccak-256 for transaction signing and address derivation, and Blake2b for consensus hashing.
 * **Tokenomics:** Dynamic inflation model targeting a specific bonding ratio, with separate pools for validators, liquidity, and development.

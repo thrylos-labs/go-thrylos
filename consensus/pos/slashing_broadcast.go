@@ -422,20 +422,37 @@ func (ce *ConsensusEngine) createSlashingEvidenceFromAttestation(
 	attestation *types.Attestation,
 	violation error,
 ) *SlashingEvidence {
-	// Determine evidence type from violation error
-	// This is a simplified version - you'd parse the error more carefully
-	evidenceType := EvidenceDoubleVoting // Default
 
-	// Create evidence based on violation type
-	// For double voting, you'd need the conflicting attestation
-	// This is a placeholder - you'd get this from slashingManager
+	// Default evidence container
 	evidence := &DoubleVoteEvidence{
 		Attestation1: attestation,
-		Attestation2: nil, // Would be populated from slashing manager
+		Attestation2: nil,
+	}
+
+	// Check if this is a DoubleSigningError to recover the conflicting data
+	if dsErr, ok := violation.(*DoubleSigningError); ok {
+		rec := dsErr.ConflictingRecord
+
+		// Convert storage record back to network type
+		evidence.Attestation2 = &types.Attestation{
+			ValidatorAddress: rec.ValidatorAddress,
+			BlockHash:        rec.BlockHash,
+			Epoch:            rec.Epoch,
+			// We infer these from context if missing in storage record,
+			// or you can add them to AttestationRecord if needed.
+			Slot:      rec.Epoch * 32, // Approximation or store exact slot in Record
+			Signature: rec.Signature,
+			Timestamp: rec.Timestamp.Unix(),
+		}
+	} else {
+		// If we can't prove the conflict, we shouldn't broadcast incomplete evidence
+		// in a production network.
+		fmt.Printf("⚠️ Cannot create evidence: violation error does not contain conflicting data: %v\n", violation)
+		return nil
 	}
 
 	return NewSlashingEvidence(
-		evidenceType,
+		EvidenceDoubleVoting,
 		attestation.ValidatorAddress,
 		evidence,
 		ce.nodeAddress,
