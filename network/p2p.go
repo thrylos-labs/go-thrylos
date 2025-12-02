@@ -97,15 +97,13 @@ func NewP2PNetworkWithConfig(cfg *config.Config, p2pListenPort int, bootstrapPee
 // Start starts the P2P network
 func (n *P2PNetwork) Start() error {
 	stdlog.Println("Starting Thrylos P2P network...")
+	n.startTime = time.Now()
 
 	if err := n.manager.Start(); err != nil {
 		return fmt.Errorf("failed to start P2P manager: %w", err)
 	}
 
-	// Start message processing
 	go n.processMessages()
-
-	stdlog.Printf("P2P network started successfully on port %d", n.config.P2P.ListenPort)
 	return nil
 }
 
@@ -265,9 +263,13 @@ func (n *P2PNetwork) DiscoverPeers() {
 // Health and monitoring
 
 // IsHealthy returns true if the P2P network is healthy
+// IsHealthy reports whether the P2P layer is considered healthy.
 func (n *P2PNetwork) IsHealthy() bool {
-	// Fix: Use n.startTime instead of time.Now()
-	return n.IsConnected() || time.Since(n.startTime) < 5*time.Minute
+	if time.Since(n.startTime) < 5*time.Minute {
+		// startup grace period
+		return true
+	}
+	return n.IsConnected()
 }
 
 // GetHealthStatus returns detailed health information

@@ -37,8 +37,6 @@ package storage
 import (
 	"fmt"
 	"os"
-	"runtime"
-	"strings"
 	"sync"
 
 	"github.com/dgraph-io/badger/v3"
@@ -51,118 +49,31 @@ type BadgerStorage struct {
 	mu      sync.RWMutex
 }
 
-var (
-	badgerInstances = make(map[string]bool)
-	badgerMutex     sync.Mutex
-	creationCount   = 0
-)
-
 // NewBadgerStorage creates a new BadgerDB v3 storage instance
 
 func NewBadgerStorage(dataDir string) (*BadgerStorage, error) {
-	badgerMutex.Lock()
-	defer badgerMutex.Unlock()
-
-	creationCount++
-
-	// Get call stack to see where this is being called from
-	_, file, line, _ := runtime.Caller(1)
-	fmt.Printf("🔍 NewBadgerStorage called #%d from %s:%d\n", creationCount, file, line)
-	fmt.Printf("🔍 Attempting to create BadgerStorage for: %s\n", dataDir)
-
-	// Print full call stack for first few calls
-	if creationCount <= 2 {
-		fmt.Printf("🔍 Full call stack:\n")
-		for i := 1; i <= 10; i++ {
-			_, file, line, ok := runtime.Caller(i)
-			if !ok {
-				break
-			}
-			fmt.Printf("   %d: %s:%d\n", i, file, line)
-		}
-		fmt.Printf("🔍 End call stack\n")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create data directory %s: %w", dataDir, err)
 	}
 
-	// Check if we already have an instance for this directory
-	if badgerInstances[dataDir] {
-		fmt.Printf("❌ ERROR: BadgerDB instance already exists for directory: %s\n", dataDir)
-		fmt.Printf("❌ Current instances: %v\n", badgerInstances)
-		return nil, fmt.Errorf("BadgerDB instance already exists for directory: %s", dataDir)
-	}
+	opts := badger.DefaultOptions(dataDir)
+	// You can keep or tweak logging as you like:
+	opts = opts.WithLogger(nil)
 
-	// Mark this directory as in use BEFORE attempting to open
-	badgerInstances[dataDir] = true
-	fmt.Printf("🔍 Marked directory as in use: %s\n", dataDir)
-	fmt.Printf("🔍 Current instances: %v\n", badgerInstances)
-
-	// Create directory if it doesn't exist
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		delete(badgerInstances, dataDir)
-		return nil, fmt.Errorf("failed to create data directory: %v", err)
-	}
-	fmt.Printf("✅ Directory created/verified: %s\n", dataDir)
-
-	// Determine environment to set safety flags
-	env := strings.ToLower(os.Getenv("THRYLOS_ENVIRONMENT"))
-	isProduction := env == "production" || env == "mainnet"
-
-	// Configure BadgerDB options
-	opts := badger.DefaultOptions(dataDir).
-		WithLogger(nil).
-		WithNumVersionsToKeep(1)
-
-	// CRITICAL: Enable SyncWrites in production to prevent data loss/corruption on power failure
-	if isProduction {
-		fmt.Println("🔒 PRODUCTION MODE: Enabling SyncWrites for data integrity")
-		opts = opts.WithSyncWrites(true)
-	} else {
-		fmt.Println("⚠️  DEV MODE: SyncWrites disabled for speed (unsafe for production)")
-		opts = opts.WithSyncWrites(false)
-	}
-
-	fmt.Printf("🔍 Opening BadgerDB with config for %s...\n", dataDir)
 	db, err := badger.Open(opts)
 	if err != nil {
-		delete(badgerInstances, dataDir)
-		fmt.Printf("❌ Failed to open BadgerDB: %v\n", err)
-		return nil, fmt.Errorf("failed to open BadgerDB: %v", err)
+		return nil, fmt.Errorf("failed to open badger db at %s: %w", dataDir, err)
 	}
 
-	fmt.Printf("✅ Successfully opened BadgerDB for %s\n", dataDir)
-
-	storage := &BadgerStorage{
+	return &BadgerStorage{
 		db:      db,
-		dataDir: dataDir, // Store the directory path
-	}
-
-	return storage, nil
+		dataDir: dataDir, // 🔴 was `directory: dataDir`
+	}, nil
 }
 
-// Enhanced Close method with debug info
+// Close shuts down the underlying Badger DB.
 func (bs *BadgerStorage) Close() error {
-	badgerMutex.Lock()
-	defer badgerMutex.Unlock()
-
-	_, file, line, _ := runtime.Caller(1)
-	fmt.Printf("🔍 BadgerStorage.Close() called from %s:%d\n", file, line)
-
-	if bs.db != nil {
-		fmt.Printf("🔍 Closing BadgerDB for directory: %s\n", bs.dataDir)
-		err := bs.db.Close()
-		bs.db = nil
-
-		// Remove from tracking map
-		if bs.dataDir != "" {
-			delete(badgerInstances, bs.dataDir)
-			fmt.Printf("✅ Removed %s from tracking map\n", bs.dataDir)
-		}
-
-		fmt.Printf("🔍 Current instances after close: %v\n", badgerInstances)
-		fmt.Printf("✅ BadgerStorage closed\n")
-		return err
-	}
-	fmt.Printf("⚠️  BadgerStorage was already closed or never opened\n")
-	return nil
+	return bs.db.Close()
 }
 
 // Get retrieves a value by key

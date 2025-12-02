@@ -515,6 +515,7 @@ func (ah *AttestationHistory) GetMissRate() float64 {
 type AttestationRecord struct {
 	ValidatorAddress string
 	Epoch            uint64
+	Slot             uint64
 	BlockHash        string
 	Signature        []byte
 	Timestamp        time.Time
@@ -522,9 +523,11 @@ type AttestationRecord struct {
 
 // Conflicts checks if this attestation conflicts with another (double vote)
 func (ar *AttestationRecord) Conflicts(other *AttestationRecord) bool {
-	// Two attestations conflict if they have the same epoch
-	// but different block hashes
-	return ar.Epoch == other.Epoch && ar.BlockHash != other.BlockHash
+	// Two attestations conflict if they vote in the same slot
+	// (and epoch) but for different blocks
+	return ar.Epoch == other.Epoch &&
+		ar.Slot == other.Slot &&
+		ar.BlockHash != other.BlockHash
 }
 
 // IsSurroundedBy checks if this attestation is surrounded by another.

@@ -179,6 +179,7 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 	record := &storage.AttestationRecord{
 		ValidatorAddress: att.ValidatorAddress,
 		Epoch:            att.Epoch,
+		Slot:             att.Slot, // ✅ store exact slot from the attestation
 		BlockHash:        att.BlockHash,
 		Signature:        att.Signature,
 		Timestamp:        time.Now(),
@@ -187,9 +188,10 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 	// Get validator's previous attestations
 	prevAttestations := sm.attestationsByValidator[validatorAddress]
 
-	fmt.Printf("🔍 DEBUG: Checking %d previous attestations for validator %s\n", len(prevAttestations), validatorAddress)
+	fmt.Printf("🔍 DEBUG: Checking %d previous attestations for validator %s\n",
+		len(prevAttestations), validatorAddress)
 
-	// Check for double voting
+	// Check for double voting (conflicting attestations in same epoch)
 	for i, prev := range prevAttestations {
 		fmt.Printf("🔍 DEBUG [%d]: Previous - Epoch=%d, Hash=%s\n", i, prev.Epoch, prev.BlockHash)
 		fmt.Printf("🔍 DEBUG [%d]: Current  - Epoch=%d, Hash=%s\n", i, record.Epoch, record.BlockHash)
@@ -200,15 +202,10 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 
 		// Only check for Double Voting (Conflicts)
 		// Surround voting requires Source/Target epoch data which is not yet implemented
-		if record.Conflicts(prev) {
-			fmt.Println("🚨 DEBUG: CONFLICT DETECTED! Calling slashDoubleVoting...")
+		if conflicts {
+			fmt.Println("🚨 DEBUG: CONFLICT DETECTED! Returning DoubleSigningError...")
 
-			// 1. Apply the slash locally immediately
-			if err := sm.slashDoubleVoting(att, record, prev); err != nil {
-				return fmt.Errorf("failed to slash double voting: %v", err)
-			}
-
-			// 2. Return the typed error so the consensus engine can build the evidence
+			// Don't slash here – just return structured error
 			return &DoubleSigningError{
 				ConflictingRecord: prev,
 			}
@@ -218,17 +215,59 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 	fmt.Println("✅ DEBUG: No conflicts found, recording attestation")
 
 	// Record this attestation
-	sm.attestationsByValidator[validatorAddress] = append(sm.attestationsByValidator[validatorAddress], record)
+	sm.attestationsByValidator[validatorAddress] =
+		append(sm.attestationsByValidator[validatorAddress], record)
 
 	// Update attestation history for downtime tracking
 	sm.recordAttestationForDowntime(validatorAddress, att)
 
 	// Clean up old attestations (keep only last 1000 per validator)
 	if len(sm.attestationsByValidator[validatorAddress]) > 1000 {
-		sm.attestationsByValidator[validatorAddress] = sm.attestationsByValidator[validatorAddress][len(sm.attestationsByValidator[validatorAddress])-1000:]
+		attestations := sm.attestationsByValidator[validatorAddress]
+		sm.attestationsByValidator[validatorAddress] = attestations[len(attestations)-1000:]
 	}
 
 	return nil
+}
+
+// ApplyDoubleVoteSlashing is called by ConsensusEngine AFTER evidence verification.
+func (sm *SlashingManager) ApplyDoubleVoteSlashing(att1, att2 *types.Attestation) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if att1 == nil || att2 == nil {
+		return fmt.Errorf("ApplyDoubleVoteSlashing: nil attestation")
+	}
+
+	if att1.ValidatorAddress != att2.ValidatorAddress {
+		return fmt.Errorf("ApplyDoubleVoteSlashing: attestations from different validators")
+	}
+
+	// Convert to storage.AttestationRecord – this is what the existing
+	// slashDoubleVoting helper expects.
+	rec1 := &storage.AttestationRecord{
+		ValidatorAddress: att1.ValidatorAddress,
+		Epoch:            att1.Epoch,
+		BlockHash:        att1.BlockHash,
+		Signature:        att1.Signature,
+		// Use attestation timestamp if present; otherwise now.
+		Timestamp: time.Unix(att1.Timestamp, 0),
+	}
+
+	rec2 := &storage.AttestationRecord{
+		ValidatorAddress: att2.ValidatorAddress,
+		Epoch:            att2.Epoch,
+		BlockHash:        att2.BlockHash,
+		Signature:        att2.Signature,
+		Timestamp:        time.Unix(att2.Timestamp, 0),
+	}
+
+	// Delegate to the existing double-vote slashing logic, which:
+	// - builds types.SlashingEvidence with First/SecondAttestation
+	// - deduplicates with processedEvidence
+	// - computes penalty using DoubleVotingPenalty
+	// - calls applySlashing(...)
+	return sm.slashDoubleVoting(att1, rec1, rec2)
 }
 
 // ReportBlockWithholding penalizes a validator for consecutively failing to propose blocks

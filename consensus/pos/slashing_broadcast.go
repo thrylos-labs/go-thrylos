@@ -135,25 +135,17 @@ func (ce *ConsensusEngine) applySlashing(evidence *SlashingEvidence) error {
 
 	switch evidence.Type {
 	case EvidenceDoubleVoting:
-		// For double voting, ProcessAttestation will detect and handle it
 		doubleVote, ok := evidence.Evidence.(*DoubleVoteEvidence)
 		if !ok {
 			return fmt.Errorf("invalid evidence type for double voting")
 		}
 
-		// Process the conflicting attestations
-		// The SlashingManager will detect the conflict and apply slashing
-		err := ce.slashingManager.ProcessAttestation(doubleVote.Attestation1)
-		if err != nil {
-			// If error, might already be processed - that's okay
-			log.Printf("⚠️  Attestation 1 processing: %v", err)
-		}
-
-		err = ce.slashingManager.ProcessAttestation(doubleVote.Attestation2)
-		if err != nil {
-			// This should detect the double vote and apply slashing
-			log.Printf("✅ Double voting detected and slashed: %v", err)
-			return nil // Success - slashing was applied
+		// Slashing only happens here, after evidence verification
+		if err := ce.slashingManager.ApplyDoubleVoteSlashing(
+			doubleVote.Attestation1,
+			doubleVote.Attestation2,
+		); err != nil {
+			return fmt.Errorf("failed to apply double-vote slashing: %w", err)
 		}
 
 		return fmt.Errorf("double voting evidence did not trigger slashing")
@@ -417,44 +409,44 @@ func (ce *ConsensusEngine) verifyEvidenceSignature(evidence *SlashingEvidence) e
 	return nil
 }
 
-// createSlashingEvidenceFromAttestation creates evidence from attestation violation
+// createSlashingEvidenceFromAttestation creates slashing evidence from an
+// attestation violation detected by the SlashingManager.
+//
+// It expects violation to be a *DoubleSigningError containing a
+// storage.AttestationRecord with the conflicting attestation.
 func (ce *ConsensusEngine) createSlashingEvidenceFromAttestation(
 	attestation *types.Attestation,
 	violation error,
 ) *SlashingEvidence {
 
-	// Default evidence container
-	evidence := &DoubleVoteEvidence{
-		Attestation1: attestation,
-		Attestation2: nil,
+	// Must be a DoubleSigningError with conflicting data
+	dsErr, ok := violation.(*DoubleSigningError)
+	if !ok || dsErr.ConflictingRecord == nil {
+		fmt.Printf("⚠️ Cannot create evidence: violation does not contain conflicting data: %v\n", violation)
+		return nil
 	}
 
-	// Check if this is a DoubleSigningError to recover the conflicting data
-	if dsErr, ok := violation.(*DoubleSigningError); ok {
-		rec := dsErr.ConflictingRecord
+	rec := dsErr.ConflictingRecord
 
-		// Convert storage record back to network type
-		evidence.Attestation2 = &types.Attestation{
-			ValidatorAddress: rec.ValidatorAddress,
-			BlockHash:        rec.BlockHash,
-			Epoch:            rec.Epoch,
-			// We infer these from context if missing in storage record,
-			// or you can add them to AttestationRecord if needed.
-			Slot:      rec.Epoch * 32, // Approximation or store exact slot in Record
-			Signature: rec.Signature,
-			Timestamp: rec.Timestamp.Unix(),
-		}
-	} else {
-		// If we can't prove the conflict, we shouldn't broadcast incomplete evidence
-		// in a production network.
-		fmt.Printf("⚠️ Cannot create evidence: violation error does not contain conflicting data: %v\n", violation)
-		return nil
+	// Rebuild the conflicting attestation from storage record
+	conflicting := &types.Attestation{
+		ValidatorAddress: rec.ValidatorAddress,
+		BlockHash:        rec.BlockHash,
+		Epoch:            rec.Epoch,
+		Slot:             rec.Slot, // ✅ use real slot from record
+		Signature:        rec.Signature,
+		Timestamp:        rec.Timestamp.Unix(),
+	}
+
+	dv := &DoubleVoteEvidence{
+		Attestation1: attestation,
+		Attestation2: conflicting,
 	}
 
 	return NewSlashingEvidence(
 		EvidenceDoubleVoting,
 		attestation.ValidatorAddress,
-		evidence,
+		dv,
 		ce.nodeAddress,
 	)
 }
