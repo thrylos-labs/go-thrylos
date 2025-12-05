@@ -50,8 +50,6 @@ type WorldState struct {
 	shardID     account.ShardID
 	totalShards int
 
-	// Block chain state
-	blocks      []*core.Block
 	currentHash string
 	height      int64
 
@@ -183,7 +181,6 @@ func (ws *WorldState) InitializeFromConfig() error {
 	genesisBlock.Header.StateRoot = ws.stateRoot
 
 	// Add genesis block
-	ws.blocks = []*core.Block{genesisBlock}
 	ws.currentHash = genesisBlock.Hash
 	ws.height = 0
 	ws.lastTimestamp = genesisBlock.Header.Timestamp
@@ -230,7 +227,6 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 		txExecutor:        transaction.NewExecutor(shardID, totalShards),
 		shardID:           shardID,
 		totalShards:       totalShards,
-		blocks:            make([]*core.Block, 0),
 		validators:        make(map[string]*core.Validator),
 		totalSupply:       cfg.Economics.GenesisSupply,
 		totalStaked:       0,
@@ -350,7 +346,6 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 		ws.txPool.RemoveTransaction(tx.Id)
 	}
 
-	ws.blocks = append(ws.blocks, block)
 	ws.currentHash = block.Hash
 	ws.height = block.Header.Index
 	ws.lastTimestamp = block.Header.Timestamp
@@ -541,73 +536,50 @@ func (ws *WorldState) GetExecutableTransactions(maxCount int) []*core.Transactio
 	return ws.txPool.GetExecutableTransactions(maxCount, ws.accountManager)
 }
 
+// [Helper Method: Place this near GetCurrentBlock]
+// getCurrentBlockUnsafe retrieves the current block without locking.
+// Caller MUST hold ws.chainMu.
+func (ws *WorldState) getCurrentBlockUnsafe() *core.Block {
+	// Efficiency: If we have the current hash, fetch that directly
+	if ws.currentHash != "" {
+		block, err := ws.db.GetBlock(ws.currentHash)
+		if err == nil {
+			return block
+		}
+	}
+
+	// Fallback: Try fetching by height
+	if ws.height >= 0 {
+		block, err := ws.db.GetBlockByHeight(ws.height)
+		if err == nil {
+			return block
+		}
+	}
+
+	return nil
+}
+
 // GetCurrentBlock returns the current (latest) block
 func (ws *WorldState) GetCurrentBlock() *core.Block {
 	ws.chainMu.RLock()
 	defer ws.chainMu.RUnlock()
-	height := ws.height
 
-	if height < 0 {
-		return nil
-	}
-
-	block, err := ws.db.GetBlockByHeight(height)
-	if err != nil {
-		// As a fallback, try the in-memory slice (useful during initial run)
-
-		ws.chainMu.RLock()
-		defer ws.chainMu.RUnlock()
-		if len(ws.blocks) == 0 {
-			return nil
-		}
-		return ws.blocks[len(ws.blocks)-1]
-	}
-
-	return block
+	return ws.getCurrentBlockUnsafe()
 }
 
-// GetBlock returns a block by index
+// [Find GetBlock around line 1008]
 func (ws *WorldState) GetBlock(index int64) (*core.Block, error) {
 	if index < 0 {
 		return nil, fmt.Errorf("block index %d out of range", index)
 	}
-
-	// Try storage first (thread-safe)
-	block, err := ws.db.GetBlockByHeight(index)
-	if err == nil {
-		return block, nil
-	}
-
-	// Fallback to in-memory slice
-	ws.chainMu.RLock()
-	defer ws.chainMu.RUnlock()
-
-	if index >= int64(len(ws.blocks)) {
-		return nil, fmt.Errorf("block index %d out of range", index)
-	}
-
-	return ws.blocks[index], nil
+	// Strictly read from DB
+	return ws.db.GetBlockByHeight(index)
 }
 
-// GetBlockByHash returns a block by hash
+// [Find GetBlockByHash around line 1009]
 func (ws *WorldState) GetBlockByHash(hash string) (*core.Block, error) {
-	// Try storage first (thread-safe)
-	block, err := ws.db.GetBlock(hash)
-	if err == nil {
-		return block, nil
-	}
-
-	// Fallback to in-memory slice
-	ws.chainMu.RLock()
-	defer ws.chainMu.RUnlock()
-
-	for _, block := range ws.blocks {
-		if block.Hash == hash {
-			return block, nil
-		}
-	}
-
-	return nil, fmt.Errorf("block with hash %s not found", hash)
+	// Strictly read from DB
+	return ws.db.GetBlock(hash)
 }
 
 // GetHeight returns the current blockchain height
@@ -729,7 +701,7 @@ func (ws *WorldState) GetStatus() map[string]interface{} {
 	totalSupply := ws.totalSupply
 	totalStaked := ws.totalStaked
 	totalTx := ws.totalTransactions
-	blockCount := len(ws.blocks)
+	blockCount := height + 1
 	lastTime := ws.lastTimestamp
 	ws.chainMu.RUnlock()
 
@@ -766,7 +738,16 @@ func (ws *WorldState) GetStatus() map[string]interface{} {
 
 func (ws *WorldState) recalculateTotalTransactions() {
 	ws.totalTransactions = 0
-	for _, block := range ws.blocks {
+
+	// FIX: Iterate through blockchain height using DB instead of memory slice
+	// Start from 0 up to current height
+	for i := int64(0); i <= ws.height; i++ {
+		block, err := ws.db.GetBlockByHeight(i)
+		if err != nil {
+			// If a block is missing, we stop counting to avoid panic
+			fmt.Printf("⚠️ recalculateTotalTransactions: Missing block at height %d\n", i)
+			break
+		}
 		ws.totalTransactions += int64(len(block.Transactions))
 	}
 }
@@ -786,8 +767,11 @@ func (ws *WorldState) validateBlockForAddition(block *core.Block) error {
 		return fmt.Errorf("block header cannot be nil")
 	}
 
-	// Check if this is genesis block
-	if len(ws.blocks) == 0 {
+	// FIX: Use unsafe version to avoid Deadlock (AddBlock already holds Lock)
+	currentBlock := ws.getCurrentBlockUnsafe()
+
+	// Case 1: Genesis Block (Chain is empty or has no current block)
+	if currentBlock == nil {
 		if block.Header.Index != 0 {
 			return fmt.Errorf("first block must be genesis (index 0), got %d", block.Header.Index)
 		}
@@ -797,9 +781,8 @@ func (ws *WorldState) validateBlockForAddition(block *core.Block) error {
 		return nil
 	}
 
+	// Case 2: Subsequent Blocks
 	// Validate chain continuity
-	currentBlock := ws.blocks[len(ws.blocks)-1]
-
 	if block.Header.Index != currentBlock.Header.Index+1 {
 		return fmt.Errorf("invalid block index: expected %d, got %d",
 			currentBlock.Header.Index+1, block.Header.Index)
@@ -1951,9 +1934,6 @@ func (ws *WorldState) Clear() error {
 	// Clear validators
 	ws.validators = make(map[string]*core.Validator)
 
-	// Reset blocks
-	ws.blocks = make([]*core.Block, 0)
-
 	// Reset state
 	ws.currentHash = ""
 	ws.height = -1
@@ -2066,31 +2046,12 @@ func (ws *WorldState) SetCurrentHeight(height int64) error {
 	return nil
 }
 
-// PruneStatesBefore removes state data before a given height
+// [Find PruneStatesBefore around line 1079]
 func (ws *WorldState) PruneStatesBefore(height int64) (int, error) {
-	ws.chainMu.Lock()
-	defer ws.chainMu.Unlock()
-
-	if height <= 0 || height >= ws.height {
-		return 0, nil // Nothing to prune
-	}
-
-	// Count blocks to be pruned
-	pruned := 0
-	newBlocks := make([]*core.Block, 0)
-
-	for _, block := range ws.blocks {
-		if block.Header.Index >= height {
-			newBlocks = append(newBlocks, block)
-		} else {
-			pruned++
-		}
-	}
-
-	// Update blocks array
-	ws.blocks = newBlocks
-
-	return pruned, nil
+	// The in-memory block slice has been removed to prevent memory leaks.
+	// This function is now a no-op for memory, but serves as a hook
+	// for future DB pruning logic.
+	return 0, nil
 }
 
 func (ws *WorldState) SaveState() error {
@@ -2147,13 +2108,11 @@ func (ws *WorldState) SaveState() error {
 }
 
 // LoadState loads the world state from storage
+// LoadState loads the world state from storage
 func (ws *WorldState) LoadState() error {
 	// Acquire locks in standard order: Chain -> Validators -> Accounts
 	ws.chainMu.Lock()
 	ws.validatorMu.Lock()
-	// Note: We can't easily lock ALL accounts with sharded mutex,
-	// but usually LoadState is exclusive at startup.
-	// We'll assume exclusive access or accept that individual account locks happen inside loop.
 
 	defer ws.validatorMu.Unlock()
 	defer ws.chainMu.Unlock()
@@ -2182,11 +2141,11 @@ func (ws *WorldState) LoadState() error {
 	fmt.Printf("🔍 LoadState: Found state root: %s\n", stateRoot)
 	ws.stateRoot = stateRoot
 
-	// *** ADD THIS - Load total transactions ***
+	// Load total transactions
 	totalTx, err := ws.state.GetTotalTransactions()
 	if err != nil {
 		fmt.Printf("🔍 LoadState: No transaction count found (will calculate from blocks): %v\n", err)
-		ws.totalTransactions = 0 // Will be calculated later
+		ws.totalTransactions = 0
 	} else {
 		ws.totalTransactions = totalTx
 		fmt.Printf("🔍 LoadState: Found total transactions: %d\n", totalTx)
@@ -2201,31 +2160,25 @@ func (ws *WorldState) LoadState() error {
 
 	fmt.Printf("🔍 LoadState: Found %d accounts\n", len(accounts))
 
-	// Reset account manager and load accounts
-	// Since we are re-initializing, we can create a new manager safely
+	// Reset account manager
 	ws.accountManager = account.NewAccountManager(ws.state, ws.shardID, ws.totalShards)
 	totalSupply := int64(0)
 
 	for _, acc := range accounts {
-		// We don't need to lock individual accounts here because we are loading
-		// into a fresh manager that isn't exposed yet.
 		if err := ws.accountManager.UpdateAccount(acc); err != nil {
 			return fmt.Errorf("failed to restore account %s: %v", acc.Address, err)
 		}
 
-		// account.Balance + account.StakedAmount
 		balPlusStake, err := math.SafeAdd(acc.Balance, acc.StakedAmount)
 		if err != nil {
 			return fmt.Errorf("account %s has invalid balance+stake overflow: %v", acc.Address, err)
 		}
 
-		// (balance+stake) + rewards
 		accountTotal, err := math.SafeAdd(balPlusStake, acc.Rewards)
 		if err != nil {
 			return fmt.Errorf("account %s has invalid total funds overflow: %v", acc.Address, err)
 		}
 
-		// add into global totalSupply
 		totalSupply, err = math.SafeAdd(totalSupply, accountTotal)
 		if err != nil {
 			return fmt.Errorf("total supply overflow while summing accounts: %v", err)
@@ -2251,27 +2204,25 @@ func (ws *WorldState) LoadState() error {
 	}
 	ws.totalStaked = totalStaked
 
-	if err != nil {
-		fmt.Printf("🔍 LoadState: Warning - could not load blocks: %v\n", err)
-	} else {
-		// If transaction count wasn't found or is 0, calculate it from blocks
-		if ws.totalTransactions == 0 && len(ws.blocks) > 0 {
-			fmt.Printf("🔍 LoadState: Calculating transaction count from %d blocks...\n", len(ws.blocks))
-			ws.recalculateTotalTransactions()
+	// FIX: Check height instead of ws.blocks length
+	// If transaction count wasn't found (0) but we have blocks (height >= 0), recalculate.
+	if ws.totalTransactions == 0 && ws.height >= 0 {
+		fmt.Printf("🔍 LoadState: Calculating transaction count from height %d...\n", ws.height)
 
-			// Save the calculated value for future loads
-			if err := ws.state.SaveTotalTransactions(ws.totalTransactions); err != nil {
-				fmt.Printf("⚠️  LoadState: Failed to save calculated transaction count: %v\n", err)
-			} else {
-				fmt.Printf("✅ LoadState: Saved calculated transaction count: %d\n", ws.totalTransactions)
-			}
+		// This function now iterates DB by height (updated in previous step)
+		ws.recalculateTotalTransactions()
+
+		// Save the calculated value for future loads
+		if err := ws.state.SaveTotalTransactions(ws.totalTransactions); err != nil {
+			fmt.Printf("⚠️  LoadState: Failed to save calculated transaction count: %v\n", err)
+		} else {
+			fmt.Printf("✅ LoadState: Saved calculated transaction count: %d\n", ws.totalTransactions)
 		}
 	}
 
 	// Load assets
 	if err := ws.LoadAssetsFromStorage(); err != nil {
 		fmt.Printf("🔍 LoadState: Warning - could not load assets: %v\n", err)
-		// Don't fail - assets might not exist yet
 	}
 
 	fmt.Printf("✅ LoadState: State loaded successfully - Height: %d, Accounts: %d, Validators: %d, Transactions: %d\n",
