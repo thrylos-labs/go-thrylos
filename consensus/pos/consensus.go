@@ -505,10 +505,10 @@ func (ce *ConsensusEngine) selectValidatorByStake(validators []*core.Validator, 
 }
 
 // getRandomnessSeed generates deterministic randomness for validator selection.
-// SECURITY FIX: Implements Epoch-Based Randomness to prevent Stake Grinding.
+// TESTNET IMPLEMENTATION: Uses block hash history.
+// MAINNET TODO: Replace with VDF (Verifiable Delay Function) or RANDAO to prevent stake grinding.
 func (ce *ConsensusEngine) getRandomnessSeed(slot uint64) []byte {
 	// 1. Define Epoch Parameters
-	// This must match the epoch calculation in processSlot (currently 32)
 	const slotsPerEpoch = 32
 	currentEpoch := slot / slotsPerEpoch
 
@@ -516,25 +516,22 @@ func (ce *ConsensusEngine) getRandomnessSeed(slot uint64) []byte {
 
 	// 2. Determine the Seed Source
 	if currentEpoch == 0 {
-		// Epoch 0: Use Genesis Hash (Fixed)
-		// FIX: Use GetBlock(0) since GetGenesisBlock is not on WorldState
+		// Epoch 0: Use Genesis Hash
 		genesis, err := ce.worldState.GetBlock(0)
 		if err == nil && genesis != nil {
 			seedSource = []byte(genesis.Hash)
 		} else {
-			// Fallback for initialization safety or if genesis is missing
+			// Fallback for initialization safety
 			seedSource = make([]byte, 32)
 		}
 	} else {
 		// Epoch N > 0: Use the hash of the last block of Epoch N-1.
-		// This block is already finalized/committed before this epoch started.
-		// Target Height = (CurrentEpoch * 32) - 1
+		// This prevents manipulating the current epoch's blocks to influence the current epoch's seed.
 		lookbackHeight := int64(currentEpoch*slotsPerEpoch) - 1
 
 		refBlock, err := ce.worldState.GetBlock(lookbackHeight)
 		if err != nil || refBlock == nil {
-			// Safety Fallback: If historical block is missing (e.g. during fast sync),
-			// rely on Genesis hash rather than CurrentHead to prevent grinding.
+			// Fallback to Genesis if historical block is missing
 			genesis, errGen := ce.worldState.GetBlock(0)
 			if errGen == nil && genesis != nil {
 				seedSource = []byte(genesis.Hash)
@@ -546,13 +543,18 @@ func (ce *ConsensusEngine) getRandomnessSeed(slot uint64) []byte {
 		}
 	}
 
-	// 3. Mix the Slot ID with the Stable Epoch Seed
-	// This ensures every slot has a unique hash, but the source of entropy
-	// (seedSource) remains constant and unmanipulable throughout the epoch.
+	// 3. Cryptographic Mixing (Hardened for Testnet)
+	// We use a Domain Separation Tag to prevent hash collisions with other protocol messages.
+	domainTag := []byte("THRYLOS_RANDOMNESS_V1_EPOCH_SEED")
+
 	slotBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(slotBytes, slot)
 
-	combined := append(slotBytes, seedSource...)
+	// Combine: Tag + SeedSource (Previous Epoch Hash) + Slot ID
+	combined := make([]byte, 0, len(domainTag)+len(seedSource)+len(slotBytes))
+	combined = append(combined, domainTag...)
+	combined = append(combined, seedSource...)
+	combined = append(combined, slotBytes...)
 
 	// 4. Generate final hash
 	hash := blake2b.Sum256(combined)

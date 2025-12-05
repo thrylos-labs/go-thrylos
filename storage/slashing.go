@@ -519,6 +519,10 @@ type AttestationRecord struct {
 	BlockHash        string
 	Signature        []byte
 	Timestamp        time.Time
+
+	// Added for FFG Surround Vote Detection (Mainnet Readiness)
+	SourceEpoch uint64
+	TargetEpoch uint64
 }
 
 // Conflicts checks if this attestation conflicts with another (double vote)
@@ -530,11 +534,29 @@ func (ar *AttestationRecord) Conflicts(other *AttestationRecord) bool {
 		ar.BlockHash != other.BlockHash
 }
 
-// IsSurroundedBy checks if this attestation is surrounded by another.
-// NOTE: This feature is currently DISABLED for the Testnet.
-// The current Attestation structure uses point-based voting (Epoch/Slot) rather
-// than span-based voting (Source->Target), making surround-vote detection impossible.
-// This will be enabled in a future hard fork when the Attestation struct is updated.
+// IsSurroundedBy checks if this attestation (ar) is surrounded by another attestation (other).
+//
+// A Surround Vote violation occurs if:
+// other.SourceEpoch < ar.SourceEpoch AND other.TargetEpoch > ar.TargetEpoch
+//
+// This means 'other' spans a wider range of history that completely encapsulates 'ar',
+// which contradicts the finality guarantees.
 func (ar *AttestationRecord) IsSurroundedBy(other *AttestationRecord) bool {
-	return false
+	// Safety check: If FFG data is missing (Testnet Mode), we cannot detect surround votes.
+	// In a real Mainnet scenario, 0 could be valid for genesis, so we'd need a better "empty" check.
+	// For now, if both are 0, we assume we are in "Point Voting" mode (Testnet) and skip.
+	if ar.SourceEpoch == 0 && ar.TargetEpoch == 0 && other.SourceEpoch == 0 && other.TargetEpoch == 0 {
+		return false
+	}
+
+	// 1. Verify we are comparing the same validator
+	if ar.ValidatorAddress != other.ValidatorAddress {
+		return false
+	}
+
+	// 2. Casper FFG Surround Check
+	// Condition: The 'other' vote surrounds 'ar'
+	isSurrounded := other.SourceEpoch < ar.SourceEpoch && other.TargetEpoch > ar.TargetEpoch
+
+	return isSurrounded
 }
