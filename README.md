@@ -76,6 +76,42 @@ go build -o bin/thrylos ./cmd/thrylos
 
 ---
 
+#### 🐳 Docker Deployment (Local Testnet)
+
+You can simulate a full 4-node network locally using Docker Compose. This setup automatically generates secure keys, creates a shared genesis file, and peers the nodes together using Node 1 as the bootnode.
+
+Prerequisites: Docker and Docker Compose installed.
+
+1. Start the Cluster Build the images and start the network in detached mode:
+
+Bash
+
+docker-compose up --build -d
+2. Verify Connectivity Node 1 exposes the JSON-RPC API on port 8080. Check the status to see block height increasing:
+
+curl http://localhost:8080/api/v1/status
+
+
+3. Monitor Logs To watch the consensus engine and P2P traffic in real-time:
+
+# Tail logs for the bootnode
+docker logs -f go-thrylos-node-1-1
+
+# Tail logs for a specific peer
+docker logs -f go-thrylos-node-2-1
+
+# Run in the backgrounds
+docker-compose up -d
+
+4. Stop and Clean Stop the nodes (persisting data in Docker volumes):
+
+docker-compose down
+Stop and wipe all data (keys, genesis, blockchain history) to start fresh:
+
+docker-compose down -v
+
+
+
 ## 🛡️ Secure Genesis Setup (Production)
 
 For production or public testnets, never use hardcoded addresses. Follow this process to generate a secure genesis configuration.

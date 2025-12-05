@@ -1,0 +1,56 @@
+services:
+  node-1:
+    build: .
+    hostname: node-1
+    environment:
+      - THRYLOS_ENVIRONMENT=production
+    ports:
+      - "8080:8080" # API access
+      - "9001:9000" # P2P port mapped
+    volumes:
+      - shared-network:/app/network-config
+    networks:
+      - thrylos-net
+
+  node-2:
+    build: .
+    hostname: node-2
+    environment:
+      - THRYLOS_ENVIRONMENT=production
+    depends_on:
+      - node-1
+    volumes:
+      - shared-network:/app/network-config
+    networks:
+      - thrylos-net
+
+  node-3:
+    build: .
+    hostname: node-3
+    environment:
+      - THRYLOS_ENVIRONMENT=production
+    depends_on:
+      - node-1
+    volumes:
+      - shared-network:/app/network-config
+    networks:
+      - thrylos-net
+
+  node-4:
+    build: .
+    hostname: node-4
+    environment:
+      - THRYLOS_ENVIRONMENT=production
+    depends_on:
+      - node-1
+    volumes:
+      - shared-network:/app/network-config
+    networks:
+      - thrylos-net
+
+volumes:
+  shared-network:
+
+networks:
+  thrylos-net:
+    driver: bridge
