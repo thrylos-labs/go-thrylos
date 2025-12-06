@@ -259,6 +259,8 @@ type ShardingConfig struct {
 	ShardRebalanceInterval time.Duration `json:"shard_rebalance_interval"`
 }
 
+// config/config.go
+
 type APIConfig struct {
 	// REST API configuration
 	EnableAPI bool   `json:"enable_api"` // Whether to enable the API server
@@ -268,9 +270,10 @@ type APIConfig struct {
 	KeyFile   string `json:"key_file"`   // TLS private key file path
 
 	// API settings
-	EnableCORS    bool `json:"enable_cors"`
-	RateLimit     int  `json:"rate_limit"`
-	EnableMetrics bool `json:"enable_metrics"`
+	EnableCORS     bool     `json:"enable_cors"`
+	AllowedOrigins []string `json:"allowed_origins"` // [FIX] Added missing field
+	RateLimit      int      `json:"rate_limit"`
+	EnableMetrics  bool     `json:"enable_metrics"`
 
 	// Faucet / funding endpoint
 	EnableFaucet bool `json:"enable_faucet"`
@@ -436,7 +439,69 @@ func Load() (*Config, error) {
 		fmt.Printf("✅ Loaded genesis configuration from %s\n", genesisFile)
 	}
 
+	// [FIX L-04] Enforce Security Invariants
+	// This overrides configuration file settings if they are unsafe for the current environment.
+	sanitizeConfigForEnvironment(cfg)
+
 	return cfg, nil
+}
+
+// [FIX L-04] sanitizeConfigForEnvironment enforces security overrides for production
+func sanitizeConfigForEnvironment(c *Config) {
+	// Check OS environment variable first, fallback to config string
+	env := os.Getenv("THRYLOS_ENVIRONMENT")
+	if env == "" {
+		env = c.Environment
+	}
+	// If still empty, assume production for safety
+	if env == "" {
+		env = "production"
+	}
+
+	// Normalize
+	isProd := false
+	switch env {
+	case "production", "prod", "mainnet":
+		isProd = true
+	}
+
+	if isProd {
+		// 1. Force TLS for API if API is enabled
+		// Production nodes should never expose cleartext HTTP APIs
+		if c.API.EnableAPI && !c.API.EnableTLS {
+			fmt.Println("🔒 SECURITY OVERRIDE: Enforcing TLS for API in production environment")
+			c.API.EnableTLS = true
+
+			// If certificates are missing, the node will fail to start (which is safer than running insecurely)
+			if c.API.CertFile == "" {
+				c.API.CertFile = "./server.crt"
+			}
+			if c.API.KeyFile == "" {
+				c.API.KeyFile = "./server.key"
+			}
+		}
+
+		// 2. Disable Faucet
+		// Free money endpoints must never exist on mainnet
+		if c.API.EnableFaucet {
+			fmt.Println("🔒 SECURITY OVERRIDE: Disabling faucet in production environment")
+			c.API.EnableFaucet = false
+		}
+
+		// 3. Enforce Slashing
+		// Consensus security depends on penalties being active
+		if !c.Consensus.SlashingEnabled {
+			fmt.Println("🔒 SECURITY OVERRIDE: Enabling slashing logic in production environment")
+			c.Consensus.SlashingEnabled = true
+		}
+
+		// 4. Enforce CORS restrictions
+		// Wildcard origins are dangerous for wallets
+		if c.API.EnableCORS && len(c.API.AllowedOrigins) > 0 && c.API.AllowedOrigins[0] == "*" {
+			fmt.Println("🔒 SECURITY OVERRIDE: Removing wildcard CORS origin in production")
+			c.API.AllowedOrigins = []string{} // Requires manual configuration of specific domains
+		}
+	}
 }
 
 // loadGenesisFromFile reads the genesis allocation from a JSON file
@@ -666,8 +731,8 @@ GENESIS ALLOCATION BREAKDOWN:
 - Community Incentives: 2M THRYLOS (6-month lock)
 
 KEY IMPROVEMENTS:
-✓ Reduced genesis supply (15% vs 20%) for better price stability
-✓ Increased validator rewards (60% vs 50%) for long-term sustainability
+✓ Reduced genesis supply (15%% vs 20%%) for better price stability
+✓ Increased validator rewards (60%% vs 50%%) for long-term sustainability
 ✓ Lower validator requirements (25 vs 34 THRYLOS) for accessibility
 ✓ Higher staking APR (9%% validators, 7%% delegators) for participation
 ✓ No advisor allocation - community-focused distribution
