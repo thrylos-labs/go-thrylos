@@ -83,7 +83,8 @@ func (ce *ConsensusEngine) verifyAttestationSignature(attestation *types.Attesta
 		return fmt.Errorf("invalid signature format: %v", err)
 	}
 
-	if err := pubKey.Verify(hash, &sig); err != nil {
+	// [FIX L-02] Use VerifyHash to avoid double-hashing (Keccak(Blake2b))
+	if err := pubKey.VerifyHash(hash, &sig); err != nil {
 		return fmt.Errorf("invalid signature from %s: %v", attestation.ValidatorAddress, err)
 	}
 
@@ -97,9 +98,10 @@ func (ce *ConsensusEngine) signAttestation(attestation *types.Attestation) ([]by
 		return nil, err
 	}
 
-	signature := ce.nodePrivateKey.Sign(hash)
-	if signature == nil {
-		return nil, fmt.Errorf("signing failed")
+	// [FIX L-02] Use SignHash to sign the Blake2b digest directly
+	signature, err := ce.nodePrivateKey.SignHash(hash)
+	if err != nil {
+		return nil, fmt.Errorf("signing failed: %v", err)
 	}
 
 	return signature.Bytes(), nil
@@ -154,7 +156,8 @@ func (ce *ConsensusEngine) verifyProposalSignature(proposal *BlockProposal) erro
 		return fmt.Errorf("invalid signature format: %v", err)
 	}
 
-	if err := pubKey.Verify(hash, &sig); err != nil {
+	// [FIX L-02] Use VerifyHash
+	if err := pubKey.VerifyHash(hash, &sig); err != nil {
 		return fmt.Errorf("proposal signature verification failed: %v", err)
 	}
 
@@ -167,16 +170,17 @@ func (ce *ConsensusEngine) signBlockProposal(proposal *BlockProposal) error {
 		return err
 	}
 
-	signature := ce.nodePrivateKey.Sign(hash)
-	if signature == nil {
-		return fmt.Errorf("signing failed")
+	// [FIX L-02] Use SignHash
+	signature, err := ce.nodePrivateKey.SignHash(hash)
+	if err != nil {
+		return fmt.Errorf("signing failed: %v", err)
 	}
 	proposal.Signature = signature.Bytes()
 	return nil
 }
 
 // =============================================================================
-// VOTE SIGNATURES (Was Missing)
+// VOTE SIGNATURES
 // =============================================================================
 
 func (ce *ConsensusEngine) computeVoteHash(vote *Vote) ([]byte, error) {
@@ -225,7 +229,8 @@ func (ce *ConsensusEngine) verifyVoteSignature(vote *Vote) error {
 		return fmt.Errorf("invalid signature format: %v", err)
 	}
 
-	if err := pubKey.Verify(hash, &sig); err != nil {
+	// [FIX L-02] Use VerifyHash
+	if err := pubKey.VerifyHash(hash, &sig); err != nil {
 		return fmt.Errorf("vote signature verification failed: %v", err)
 	}
 

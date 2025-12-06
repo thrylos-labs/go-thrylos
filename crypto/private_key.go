@@ -34,11 +34,7 @@ func NewPrivateKeyFromBytes(keyData []byte) (PrivateKey, error) {
 
 // Sign signs data using Ethereum-standard Keccak256 + Secp256k1
 func (p *PrivateKeyImpl) Sign(data []byte) Signature {
-	// Ethereum signs the hash, not the raw data usually.
-	// We assume 'data' is the raw message/transaction bytes, so we hash it.
 	hash := ethcrypto.Keccak256(data)
-
-	// Sign returns the signature in [R || S || V] format (65 bytes)
 	sig, err := ethcrypto.Sign(hash, p.key)
 	if err != nil {
 		fmt.Printf("Error signing data: %v\n", err)
@@ -84,4 +80,17 @@ func (p *PrivateKeyImpl) Equal(other *PrivateKey) bool {
 		return p.key == nil
 	}
 	return bytes.Equal(p.Bytes(), otherInt.Bytes())
+}
+
+// [FIX L-02] SignHash signs a pre-calculated 32-byte hash
+func (p *PrivateKeyImpl) SignHash(hash []byte) (Signature, error) {
+	if len(hash) != 32 {
+		return nil, fmt.Errorf("hash must be 32 bytes, got %d", len(hash))
+	}
+
+	sig, err := ethcrypto.Sign(hash, p.key)
+	if err != nil {
+		return nil, err
+	}
+	return NewSignature(sig), nil
 }

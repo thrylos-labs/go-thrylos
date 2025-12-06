@@ -249,16 +249,16 @@ func (v *Validator) SignTransaction(tx *core.Transaction, privateKey crypto.Priv
 	// 🔹 Store public key bytes into the transaction (so validators can reconstruct it)
 	tx.FromPubkey = pubKey.Bytes()
 
-	// Calculate the signable hash including chain ID and all context
+	// Calculate the signable hash (Blake2b)
 	hashToSign, err := v.calculateSignableHash(tx)
 	if err != nil {
 		return fmt.Errorf("failed to calculate signable hash: %v", err)
 	}
 
-	// Sign with secp256k1
-	signature := privateKey.Sign(hashToSign)
-	if signature == nil {
-		return fmt.Errorf("failed to sign transaction")
+	// [FIX L-02] Use SignHash
+	signature, err := privateKey.SignHash(hashToSign)
+	if err != nil {
+		return fmt.Errorf("failed to sign transaction: %v", err)
 	}
 
 	tx.Signature = signature.Bytes()
@@ -498,8 +498,8 @@ func (v *Validator) VerifyTransactionSignature(tx *core.Transaction, publicKey c
 		return fmt.Errorf("failed to parse signature: %v", err)
 	}
 
-	// 4. Verify the signature against the calculated hash
-	err = publicKey.Verify(hashToVerify, &signature)
+	// [FIX L-02] Use VerifyHash
+	err = publicKey.VerifyHash(hashToVerify, &signature)
 	if err != nil {
 		return fmt.Errorf("signature verification failed: %v", err)
 	}

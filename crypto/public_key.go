@@ -39,20 +39,27 @@ func (p *publicKey) Verify(data []byte, sig *Signature) error {
 	if sig == nil || *sig == nil {
 		return errors.New("signature is nil")
 	}
-
-	// Standard EVM verification uses Keccak256 hash
 	hash := ethcrypto.Keccak256(data)
+	return p.VerifyHash(hash, sig)
+}
+
+// [FIX L-02] VerifyHash verifies signature against a raw hash
+func (p *publicKey) VerifyHash(hash []byte, sig *Signature) error {
+	if sig == nil || *sig == nil {
+		return errors.New("signature is nil")
+	}
+	if len(hash) != 32 {
+		return fmt.Errorf("hash must be 32 bytes, got %d", len(hash))
+	}
+
 	sigBytes := (*sig).Bytes()
 
 	// SigToPub returns the public key that created the signature
-	// This handles the ECDSA recovery logic
 	recoveredPub, err := ethcrypto.SigToPub(hash, sigBytes)
 	if err != nil {
 		return fmt.Errorf("failed to recover public key: %v", err)
 	}
 
-	// Compare the recovered public key with this public key
-	// We compare the X and Y coordinates of the curve points
 	if recoveredPub.X.Cmp(p.pubKey.X) != 0 || recoveredPub.Y.Cmp(p.pubKey.Y) != 0 {
 		return fmt.Errorf("signature verification failed: public key mismatch")
 	}
