@@ -90,18 +90,34 @@ func (m *Manager) startDHTDiscovery() {
 // handleBlockSyncRequest handles incoming block synchronization requests
 func (m *Manager) handleBlockSyncRequest(s network.Stream) {
 	defer s.Close()
-	stdlog.Printf("Received block sync request from %s", s.Conn().RemotePeer().String())
+	peerID := s.Conn().RemotePeer()
 
-	reader := NewJSONStreamReader(s)
+	// [SEC-FIX H-04] Rate Limiting
+	if err := m.validator.CheckRateLimit(peerID); err != nil {
+		stdlog.Printf("⚠️ Rate limit exceeded for %s (BlockSync): %v", peerID, err)
+		return
+	}
+	defer m.validator.ReleaseRequest(peerID)
+
+	// [SEC-FIX H-04] Stream Validation (Size limits & Timeouts)
+	limitedReader, err := m.validator.ValidateStream(s)
+	if err != nil {
+		stdlog.Printf("⚠️ Stream validation failed for %s: %v", peerID, err)
+		return
+	}
+
+	stdlog.Printf("Received block sync request from %s", peerID)
+
+	reader := NewJSONStreamReader(limitedReader)
 	writer := NewJSONStreamWriter(s)
 
 	var reqData map[string]int64
 	if err := reader.ReadJSON(&reqData); err != nil {
-		stdlog.Printf("Error reading sync request from %s: %v", s.Conn().RemotePeer().String(), err)
+		stdlog.Printf("Error reading sync request from %s: %v", peerID, err)
 		return
 	}
 	startHeight := reqData["startHeight"]
-	stdlog.Printf("Peer %s requested blocks from height: %d", s.Conn().RemotePeer().String(), startHeight)
+	stdlog.Printf("Peer %s requested blocks from height: %d", peerID, startHeight)
 
 	// Send request to blockchain for blocks
 	responseCh := make(chan Response)
@@ -113,7 +129,7 @@ func (m *Manager) handleBlockSyncRequest(s network.Stream) {
 
 	resp := <-responseCh
 	if resp.Error != nil {
-		stdlog.Printf("Error fetching blocks for sync with %s: %v", s.Conn().RemotePeer().String(), resp.Error)
+		stdlog.Printf("Error fetching blocks for sync with %s: %v", peerID, resp.Error)
 		writer.WriteJSON(map[string]string{"error": resp.Error.Error()})
 		return
 	}
@@ -132,15 +148,28 @@ func (m *Manager) handleBlockSyncRequest(s network.Stream) {
 		}
 	}
 	writer.Write([]byte("EOF\n"))
-	stdlog.Printf("Sent %d blocks to peer %s for sync", len(blocks), s.Conn().RemotePeer().String())
+	stdlog.Printf("Sent %d blocks to peer %s for sync", len(blocks), peerID)
 }
 
 // handleTransactionRequest handles incoming transaction requests
 func (m *Manager) handleTransactionRequest(s network.Stream) {
 	defer s.Close()
-	stdlog.Printf("Received transaction from %s", s.Conn().RemotePeer().String())
+	peerID := s.Conn().RemotePeer()
 
-	reader := NewJSONStreamReader(s)
+	// [SEC-FIX H-04] Rate & Stream Validation
+	if err := m.validator.CheckRateLimit(peerID); err != nil {
+		return
+	}
+	defer m.validator.ReleaseRequest(peerID)
+
+	limitedReader, err := m.validator.ValidateStream(s)
+	if err != nil {
+		return
+	}
+
+	stdlog.Printf("Received transaction from %s", peerID)
+
+	reader := NewJSONStreamReader(limitedReader)
 	var tx core.Transaction
 	if err := reader.ReadJSON(&tx); err != nil {
 		stdlog.Printf("Error unmarshaling transaction: %v", err)
@@ -156,9 +185,22 @@ func (m *Manager) handleTransactionRequest(s network.Stream) {
 // handleAttestationRequest handles incoming attestation requests
 func (m *Manager) handleAttestationRequest(s network.Stream) {
 	defer s.Close()
-	stdlog.Printf("Received attestation from %s", s.Conn().RemotePeer().String())
+	peerID := s.Conn().RemotePeer()
 
-	reader := NewJSONStreamReader(s)
+	// [SEC-FIX H-04] Rate & Stream Validation
+	if err := m.validator.CheckRateLimit(peerID); err != nil {
+		return
+	}
+	defer m.validator.ReleaseRequest(peerID)
+
+	limitedReader, err := m.validator.ValidateStream(s)
+	if err != nil {
+		return
+	}
+
+	stdlog.Printf("Received attestation from %s", peerID)
+
+	reader := NewJSONStreamReader(limitedReader)
 	var attestation map[string]interface{} // Generic attestation format
 	if err := reader.ReadJSON(&attestation); err != nil {
 		stdlog.Printf("Error unmarshaling attestation: %v", err)
@@ -174,9 +216,22 @@ func (m *Manager) handleAttestationRequest(s network.Stream) {
 // handleVoteRequest handles incoming vote requests
 func (m *Manager) handleVoteRequest(s network.Stream) {
 	defer s.Close()
-	stdlog.Printf("Received vote from %s", s.Conn().RemotePeer().String())
+	peerID := s.Conn().RemotePeer()
 
-	reader := NewJSONStreamReader(s)
+	// [SEC-FIX H-04] Rate & Stream Validation
+	if err := m.validator.CheckRateLimit(peerID); err != nil {
+		return
+	}
+	defer m.validator.ReleaseRequest(peerID)
+
+	limitedReader, err := m.validator.ValidateStream(s)
+	if err != nil {
+		return
+	}
+
+	stdlog.Printf("Received vote from %s", peerID)
+
+	reader := NewJSONStreamReader(limitedReader)
 	var vote map[string]interface{} // Generic vote format
 	if err := reader.ReadJSON(&vote); err != nil {
 		stdlog.Printf("Error unmarshaling vote: %v", err)
@@ -230,6 +285,14 @@ func (m *Manager) readPubSubMessages(topicName string, sub *pubsub.Subscription)
 			continue // Ignore messages from self
 		}
 
+		// [SEC-FIX H-04] Basic size check on PubSub messages
+		// (Note: PubSub also has internal limits, but this protects the decoder)
+		if int64(len(msg.Data)) > m.validator.maxMessageSize {
+			stdlog.Printf("⚠️ Dropping oversized PubSub message from %s on %s (%d bytes)",
+				msg.ReceivedFrom, topicName, len(msg.Data))
+			continue
+		}
+
 		stdlog.Printf("Received PubSub message from %s on topic %s", msg.ReceivedFrom.String(), topicName)
 
 		switch topicName {
@@ -271,14 +334,12 @@ func (m *Manager) readPubSubMessages(topicName string, sub *pubsub.Subscription)
 // Broadcasting Functions
 
 // BroadcastBlock broadcasts a block to all peers via PubSub
-// In manager.go - Fix the broadcast methods
 func (m *Manager) BroadcastBlock(block *core.Block) error {
 	blockData, err := json.Marshal(block)
 	if err != nil {
 		return fmt.Errorf("failed to serialize block for PubSub: %w", err)
 	}
 
-	// Use rate-limited broadcast instead of direct topic join
 	stdlog.Printf("Broadcasting block %s via PubSub to topic %s", block.Hash, TopicBlocks)
 	return m.rateLimitedBroadcast(TopicBlocks, blockData)
 }
