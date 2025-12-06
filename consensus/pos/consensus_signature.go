@@ -1,10 +1,9 @@
-// consensus/pos/consensus_signature_fix.go
-// FIX #1: Proper signature verification for attestations
-// Replace the placeholder verifyAttestationSignature in consensus.go
-
+// consensus/pos/consensus_signature.go
 package pos
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/thrylos-labs/go-thrylos/crypto"
@@ -12,131 +11,223 @@ import (
 	"golang.org/x/crypto/blake2b"
 )
 
+// Domain Separation Tags prevent signature reuse across different message types
+const (
+	DomainAttestation = "THRYLOS_ATTESTATION_V1"
+	DomainProposal    = "THRYLOS_PROPOSAL_V1"
+	DomainVote        = "THRYLOS_VOTE_V1"
+)
+
+// =============================================================================
+// ATTESTATION SIGNATURES
+// =============================================================================
+
+// computeAttestationHash creates a secure hash bound to the ChainID
+func (ce *ConsensusEngine) computeAttestationHash(attestation *types.Attestation) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// 1. Domain Separation
+	buf.WriteString(DomainAttestation)
+	// 2. Chain Binding (Prevents Cross-Chain Replay)
+	buf.WriteString(ce.config.Network.ChainID)
+
+	// 3. Data Fields
+	buf.WriteString(attestation.ValidatorAddress)
+	buf.WriteString(attestation.BlockHash)
+
+	// Use binary encoding for deterministic numeric serialization
+	if err := binary.Write(&buf, binary.BigEndian, attestation.BlockHeight); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, attestation.Epoch); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, attestation.Slot); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, attestation.Timestamp); err != nil {
+		return nil, err
+	}
+
+	hash := blake2b.Sum256(buf.Bytes())
+	return hash[:], nil
+}
+
 // verifyAttestationSignature verifies an attestation signature
-// This is the FIXED version that actually performs cryptographic verification
 func (ce *ConsensusEngine) verifyAttestationSignature(attestation *types.Attestation) error {
-	// Get validator's public key from world state
 	validator, err := ce.worldState.GetValidator(attestation.ValidatorAddress)
 	if err != nil {
 		return fmt.Errorf("validator not found: %v", err)
 	}
-
-	// Validate that validator has a public key
-	if validator.Pubkey == nil || len(validator.Pubkey) == 0 {
+	if len(validator.Pubkey) == 0 {
 		return fmt.Errorf("validator %s has no public key", attestation.ValidatorAddress)
 	}
 
-	// Parse validator's public key
 	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
 	if err != nil {
-		return fmt.Errorf("failed to parse validator public key: %v", err)
+		return fmt.Errorf("invalid public key: %v", err)
 	}
 
-	// Recreate the exact data that was signed
-	data := fmt.Sprintf("%s%s%d%d%d%d",
-		attestation.ValidatorAddress,
-		attestation.BlockHash,
-		attestation.BlockHeight,
-		attestation.Epoch,
-		attestation.Slot,
-		attestation.Timestamp)
-
-	// Hash the data using Blake2b
-	hash := blake2b.Sum256([]byte(data))
-
-	// Validate signature exists
-	if attestation.Signature == nil || len(attestation.Signature) == 0 {
-		return fmt.Errorf("attestation has no signature")
+	// Recompute hash with ChainID context
+	hash, err := ce.computeAttestationHash(attestation)
+	if err != nil {
+		return fmt.Errorf("failed to compute hash: %v", err)
 	}
 
-	// Parse the signature
+	if len(attestation.Signature) == 0 {
+		return fmt.Errorf("missing signature")
+	}
+
 	sig, err := crypto.SignatureFromBytes(attestation.Signature)
 	if err != nil {
-		return fmt.Errorf("failed to parse attestation signature: %v", err)
+		return fmt.Errorf("invalid signature format: %v", err)
 	}
 
-	// Verify the signature using secp256k1 (via the shared crypto.PrivateKey abstraction)
-
-	// Note: Your Verify method returns error (not bool), nil = success
-	if err := pubKey.Verify(hash[:], &sig); err != nil {
-		return fmt.Errorf("invalid attestation signature from validator %s: %v",
-			attestation.ValidatorAddress, err)
+	if err := pubKey.Verify(hash, &sig); err != nil {
+		return fmt.Errorf("invalid signature from %s: %v", attestation.ValidatorAddress, err)
 	}
 
 	return nil
 }
 
-// verifyProposalSignature verifies a block proposal signature
-// This should be added to your consensus engine for block proposal verification
+// signAttestation signs an attestation with ChainID binding
+func (ce *ConsensusEngine) signAttestation(attestation *types.Attestation) ([]byte, error) {
+	hash, err := ce.computeAttestationHash(attestation)
+	if err != nil {
+		return nil, err
+	}
+
+	signature := ce.nodePrivateKey.Sign(hash)
+	if signature == nil {
+		return nil, fmt.Errorf("signing failed")
+	}
+
+	return signature.Bytes(), nil
+}
+
+// =============================================================================
+// BLOCK PROPOSAL SIGNATURES
+// =============================================================================
+
+func (ce *ConsensusEngine) computeProposalHash(proposal *BlockProposal) ([]byte, error) {
+	var buf bytes.Buffer
+
+	buf.WriteString(DomainProposal)
+	buf.WriteString(ce.config.Network.ChainID)
+
+	buf.WriteString(proposal.Block.Hash)
+	buf.WriteString(proposal.Proposer)
+
+	if err := binary.Write(&buf, binary.BigEndian, proposal.Slot); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, proposal.Epoch); err != nil {
+		return nil, err
+	}
+
+	hash := blake2b.Sum256(buf.Bytes())
+	return hash[:], nil
+}
+
 func (ce *ConsensusEngine) verifyProposalSignature(proposal *BlockProposal) error {
-	// Get proposer's public key from world state
 	validator, err := ce.worldState.GetValidator(proposal.Proposer)
 	if err != nil {
 		return fmt.Errorf("proposer not found: %v", err)
 	}
 
-	// Validate that validator has a public key
-	if validator.Pubkey == nil || len(validator.Pubkey) == 0 {
-		return fmt.Errorf("proposer %s has no public key", proposal.Proposer)
-	}
-
-	// Parse proposer's public key
 	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
 	if err != nil {
-		return fmt.Errorf("failed to parse proposer public key: %v", err)
+		return fmt.Errorf("invalid public key: %v", err)
 	}
 
-	// Recreate the exact data that was signed
-	proposalData := fmt.Sprintf("%s%s%d%d",
-		proposal.Block.Hash,
-		proposal.Proposer,
-		proposal.Slot,
-		proposal.Epoch)
-
-	// Hash the data using Blake2b
-	proposalHash := blake2b.Sum256([]byte(proposalData))
-
-	// Validate signature exists
-	if proposal.Signature == nil || len(proposal.Signature) == 0 {
-		return fmt.Errorf("proposal has no signature")
+	hash, err := ce.computeProposalHash(proposal)
+	if err != nil {
+		return err
 	}
 
-	// Parse the signature
+	if len(proposal.Signature) == 0 {
+		return fmt.Errorf("missing signature")
+	}
+
 	sig, err := crypto.SignatureFromBytes(proposal.Signature)
 	if err != nil {
-		return fmt.Errorf("failed to parse proposal signature: %v", err)
+		return fmt.Errorf("invalid signature format: %v", err)
 	}
 
-	// Verify the signature using Ed25519
-	if err := pubKey.Verify(proposalHash[:], &sig); err != nil {
-		return fmt.Errorf("invalid proposal signature from proposer %s: %v",
-			proposal.Proposer, err)
+	if err := pubKey.Verify(hash, &sig); err != nil {
+		return fmt.Errorf("proposal signature verification failed: %v", err)
 	}
 
 	return nil
 }
 
-// signBlockProposal creates a signature for a block proposal
-// This should be called when creating a block proposal
 func (ce *ConsensusEngine) signBlockProposal(proposal *BlockProposal) error {
-	// Create the data to sign
-	proposalData := fmt.Sprintf("%s%s%d%d",
-		proposal.Block.Hash,
-		proposal.Proposer,
-		proposal.Slot,
-		proposal.Epoch)
-
-	// Hash the data
-	proposalHash := blake2b.Sum256([]byte(proposalData))
-
-	// Sign with private key
-	signature := ce.nodePrivateKey.Sign(proposalHash[:])
-	if signature == nil {
-		return fmt.Errorf("failed to sign block proposal: signature is nil")
+	hash, err := ce.computeProposalHash(proposal)
+	if err != nil {
+		return err
 	}
 
-	// Set the signature on the proposal
+	signature := ce.nodePrivateKey.Sign(hash)
+	if signature == nil {
+		return fmt.Errorf("signing failed")
+	}
 	proposal.Signature = signature.Bytes()
+	return nil
+}
+
+// =============================================================================
+// VOTE SIGNATURES (Was Missing)
+// =============================================================================
+
+func (ce *ConsensusEngine) computeVoteHash(vote *Vote) ([]byte, error) {
+	var buf bytes.Buffer
+
+	buf.WriteString(DomainVote)
+	buf.WriteString(ce.config.Network.ChainID)
+
+	buf.WriteString(vote.ValidatorAddress)
+	buf.WriteString(vote.SourceBlockHash)
+	buf.WriteString(vote.TargetBlockHash)
+
+	if err := binary.Write(&buf, binary.BigEndian, vote.SourceEpoch); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&buf, binary.BigEndian, vote.TargetEpoch); err != nil {
+		return nil, err
+	}
+
+	hash := blake2b.Sum256(buf.Bytes())
+	return hash[:], nil
+}
+
+func (ce *ConsensusEngine) verifyVoteSignature(vote *Vote) error {
+	validator, err := ce.worldState.GetValidator(vote.ValidatorAddress)
+	if err != nil {
+		return fmt.Errorf("validator not found: %v", err)
+	}
+
+	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
+	if err != nil {
+		return fmt.Errorf("invalid public key: %v", err)
+	}
+
+	hash, err := ce.computeVoteHash(vote)
+	if err != nil {
+		return err
+	}
+
+	if len(vote.Signature) == 0 {
+		return fmt.Errorf("missing signature")
+	}
+
+	sig, err := crypto.SignatureFromBytes(vote.Signature)
+	if err != nil {
+		return fmt.Errorf("invalid signature format: %v", err)
+	}
+
+	if err := pubKey.Verify(hash, &sig); err != nil {
+		return fmt.Errorf("vote signature verification failed: %v", err)
+	}
 
 	return nil
 }

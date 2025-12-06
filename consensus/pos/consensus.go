@@ -692,28 +692,6 @@ func (ce *ConsensusEngine) signBlock(block *core.Block) error {
 	return nil
 }
 
-// signAttestation signs an attestation with the node's private key
-func (ce *ConsensusEngine) signAttestation(attestation *types.Attestation) ([]byte, error) {
-	// Create attestation hash
-	data := fmt.Sprintf("%s%s%d%d%d%d",
-		attestation.ValidatorAddress,
-		attestation.BlockHash,
-		attestation.BlockHeight,
-		attestation.Epoch,
-		attestation.Slot,
-		attestation.Timestamp)
-
-	hash := blake2b.Sum256([]byte(data))
-
-	// Sign with private key - your Sign method returns only Signature, not (Signature, error)
-	signature := ce.nodePrivateKey.Sign(hash[:])
-	if signature == nil {
-		return nil, fmt.Errorf("failed to sign attestation: signature is nil")
-	}
-
-	return signature.Bytes(), nil
-}
-
 // initializeValidatorSet initializes the validator set from world state
 func (ce *ConsensusEngine) initializeValidatorSet() error {
 	activeValidators := ce.worldState.GetActiveValidators()
@@ -749,9 +727,9 @@ func (ce *ConsensusEngine) handleBlockProposal(proposal *BlockProposal) {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
 
-	// ADD THIS: Verify signature
+	// [SEC-FIX] Verify signature is now backed by robust ChainID logic
 	if err := ce.verifyProposalSignature(proposal); err != nil {
-		fmt.Printf("❌ Invalid signature: %v\n", err)
+		fmt.Printf("❌ Invalid proposal signature: %v\n", err)
 		return
 	}
 
@@ -808,6 +786,13 @@ func (ce *ConsensusEngine) handleAttestation(attestation *types.Attestation) {
 func (ce *ConsensusEngine) handleVote(vote *Vote) {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
+
+	// [SEC-FIX] Verify signature with ChainID binding BEFORE processing
+	if err := ce.verifyVoteSignature(vote); err != nil {
+		fmt.Printf("❌ Invalid vote signature from %s: %v\n", vote.ValidatorAddress, err)
+		// Do not process invalid votes
+		return
+	}
 
 	// 1. Persistence Check (Prevent Double Voting)
 	hasVoted, _ := ce.worldState.GetStateStorage().HasVoted(vote.TargetEpoch, vote.ValidatorAddress)
