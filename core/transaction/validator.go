@@ -41,22 +41,41 @@ type Validator struct {
 	metrics      *ReplayProtectionMetrics
 }
 
-// --- ADD THIS INTERFACE ---
 // StateReader defines the interface for accessing account state.
-// This allows passing either *account.AccountManager or a mock in tests.
 type StateReader interface {
 	GetAccount(address string) (*core.Account, error)
 }
 
 // NewValidator creates a new transaction validator
 func NewValidator(shardID account.ShardID, totalShards int, cfg *config.Config) *Validator {
+	var replayConfig *ReplayProtectionConfig
+
+	// Check environment to determine security level
+	// We default to STRICT (Production) unless explicitly in development
+	if isDevelopmentEnvironment(cfg.Environment) {
+		replayConfig = DevelopmentReplayProtectionConfig()
+	} else {
+		// Production, Testnet, or Mainnet
+		replayConfig = DefaultReplayProtectionConfig()
+
+		// Double-check critical flags for production
+		replayConfig.RequireFinalizedBlock = true
+		replayConfig.AllowEmptyFinalizedBlock = false
+	}
+
 	return &Validator{
 		shardID:      shardID,
 		totalShards:  totalShards,
 		config:       cfg,
-		replayConfig: DefaultReplayProtectionConfig(),
+		replayConfig: replayConfig,
 		metrics:      &ReplayProtectionMetrics{},
 	}
+}
+
+// isDevelopmentEnvironment checks if the environment is explicitly set to dev
+func isDevelopmentEnvironment(env string) bool {
+	env = strings.ToLower(strings.TrimSpace(env))
+	return env == "development" || env == "dev" || env == "local"
 }
 
 // NewValidatorWithReplayConfig creates a validator with custom replay protection config
