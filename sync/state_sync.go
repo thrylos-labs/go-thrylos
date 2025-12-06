@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thrylos-labs/go-thrylos/core/chain"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/network"
 	"github.com/thrylos-labs/go-thrylos/network/p2p"
@@ -16,11 +17,12 @@ import (
 // StateSyncer handles world state synchronization
 type StateSyncer struct {
 	worldState *state.WorldState
+	blockchain *chain.Blockchain // [SEC-FIX] Added blockchain reference
 	p2pNetwork *network.P2PNetwork
 	config     *SyncConfig
 
 	// State sync management
-	snapshots    map[string]*p2p.StateSnapshot // Change this line
+	snapshots    map[string]*p2p.StateSnapshot
 	syncRequests map[string]*StateSyncRequest
 
 	// State
@@ -88,6 +90,7 @@ type StateSyncMetrics struct {
 // NewStateSyncer creates a new state synchronizer
 func NewStateSyncer(
 	worldState *state.WorldState,
+	blockchain *chain.Blockchain, // [SEC-FIX] Added parameter
 	p2pNetwork *network.P2PNetwork,
 	config *SyncConfig,
 ) *StateSyncer {
@@ -95,6 +98,7 @@ func NewStateSyncer(
 
 	return &StateSyncer{
 		worldState:   worldState,
+		blockchain:   blockchain, // [SEC-FIX] Set field
 		p2pNetwork:   p2pNetwork,
 		config:       config,
 		snapshots:    make(map[string]*p2p.StateSnapshot),
@@ -397,16 +401,32 @@ func (ss *StateSyncer) validateSnapshot(snapshot *p2p.StateSnapshot) error {
 		return fmt.Errorf("snapshot state root is empty")
 	}
 
-	// Verify checksum
-	expectedChecksum := ss.calculateChecksum(snapshot)
-	if snapshot.Checksum != expectedChecksum {
-		return fmt.Errorf("snapshot checksum mismatch: expected %s, got %s",
-			expectedChecksum, snapshot.Checksum)
+	// [SEC-FIX] CRITICAL: Verify snapshot state root against the trusted block header.
+	// We enforce that Block Headers must be synced and verified BEFORE state is downloaded.
+	trustedBlock, err := ss.blockchain.GetBlockByIndex(snapshot.Height)
+	if err != nil || trustedBlock == nil {
+		// If we don't have the block, we cannot verify the state is legitimate.
+		// This prevents malicious peers from feeding us fake states for non-existent or invalid blocks.
+		return fmt.Errorf("cannot verify snapshot: trusted block at height %d not found (sync headers first)", snapshot.Height)
+	}
+
+	// The snapshot's declared root MUST match the block's committed state root.
+	if snapshot.StateRoot != trustedBlock.Header.StateRoot {
+		return fmt.Errorf("CRITICAL: snapshot state root mismatch! Block says: %s, Snapshot says: %s",
+			trustedBlock.Header.StateRoot, snapshot.StateRoot)
 	}
 
 	// Additional validation
 	if len(snapshot.Accounts) == 0 {
 		return fmt.Errorf("snapshot contains no accounts")
+	}
+
+	// [Optional] You can keep the checksum check as a secondary data-integrity check,
+	// but the block header check above is the primary security control.
+	expectedChecksum := ss.calculateChecksum(snapshot)
+	if snapshot.Checksum != expectedChecksum {
+		return fmt.Errorf("snapshot checksum mismatch: expected %s, got %s",
+			expectedChecksum, snapshot.Checksum)
 	}
 
 	return nil
@@ -454,28 +474,24 @@ func (ss *StateSyncer) applySnapshotData(snapshot *p2p.StateSnapshot) error {
 }
 
 func (ss *StateSyncer) verifyStateConsistency(snapshot *p2p.StateSnapshot) error {
-	// Verify state root matches
+	// 1. Force a recalculation of the local state root based on the data just imported
+	if err := ss.worldState.ValidateStateConsistency(); err != nil {
+		return fmt.Errorf("internal state consistency check failed: %v", err)
+	}
+
+	// 2. Get the newly calculated root
 	currentStateRoot := ss.worldState.GetStateRoot()
+
+	// 3. Compare against the snapshot's claimed root (which we verified against the block header earlier)
 	if currentStateRoot != snapshot.StateRoot {
-		return fmt.Errorf("state root mismatch after applying snapshot")
+		return fmt.Errorf("state root mismatch after application: expected %s, got %s",
+			snapshot.StateRoot, currentStateRoot)
 	}
 
 	// Verify height
 	currentHeight := ss.worldState.GetCurrentHeight()
 	if currentHeight != snapshot.Height {
 		return fmt.Errorf("height mismatch after applying snapshot")
-	}
-
-	// Verify account balances
-	for addr, expectedAccount := range snapshot.Accounts {
-		currentAccount, err := ss.worldState.GetAccount(addr)
-		if err != nil {
-			return fmt.Errorf("failed to get account %s: %v", addr, err)
-		}
-
-		if currentAccount.Balance != expectedAccount.Balance {
-			return fmt.Errorf("balance mismatch for account %s", addr)
-		}
 	}
 
 	return nil
@@ -911,13 +927,15 @@ func (sp *StatePruner) pruneOldStates() error {
 // StateRecovery handles state recovery from corruption
 type StateRecovery struct {
 	worldState *state.WorldState
-	backups    map[int64]*p2p.StateSnapshot // NEW TYPE
+	blockchain *chain.Blockchain // [FIX] Added blockchain field
+	backups    map[int64]*p2p.StateSnapshot
 	mu         sync.RWMutex
 }
 
-func NewStateRecovery(worldState *state.WorldState) *StateRecovery {
+func NewStateRecovery(worldState *state.WorldState, blockchain *chain.Blockchain) *StateRecovery {
 	return &StateRecovery{
 		worldState: worldState,
+		blockchain: blockchain, // [FIX] Store blockchain reference
 		backups:    make(map[int64]*p2p.StateSnapshot),
 	}
 }
@@ -927,7 +945,9 @@ func (sr *StateRecovery) CreateRecoveryPoint(height int64) error {
 	defer sr.mu.Unlock()
 
 	// Create snapshot for recovery
-	stateSyncer := NewStateSyncer(sr.worldState, nil, &SyncConfig{})
+	// [FIX] Pass sr.blockchain as 2nd arg, nil as 3rd arg (p2p network)
+	stateSyncer := NewStateSyncer(sr.worldState, sr.blockchain, nil, &SyncConfig{})
+
 	snapshot, err := stateSyncer.CreateSnapshot()
 	if err != nil {
 		return fmt.Errorf("failed to create recovery snapshot: %v", err)
@@ -959,7 +979,9 @@ func (sr *StateRecovery) RecoverToHeight(height int64) error {
 		return fmt.Errorf("no recovery point available for height %d", height)
 	}
 
-	stateSyncer := NewStateSyncer(sr.worldState, nil, &SyncConfig{})
+	// [FIX] Updated to 4 arguments: worldState, blockchain, p2pNetwork(nil), config
+	stateSyncer := NewStateSyncer(sr.worldState, sr.blockchain, nil, &SyncConfig{})
+
 	if err := stateSyncer.ApplyStateSnapshot(snapshot); err != nil {
 		return fmt.Errorf("failed to recover to height %d: %v", height, err)
 	}

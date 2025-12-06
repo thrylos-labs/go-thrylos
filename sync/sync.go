@@ -95,7 +95,7 @@ func NewSyncManager(
 
 	// Initialize synchronizer and state syncer - use same package types
 	sm.synchronizer = NewSynchronizer(blockchain, p2pNetwork, syncConfig)
-	sm.stateSyncer = NewStateSyncer(worldState, p2pNetwork, syncConfig)
+	sm.stateSyncer = NewStateSyncer(worldState, blockchain, p2pNetwork, syncConfig)
 
 	return sm
 }
