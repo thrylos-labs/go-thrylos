@@ -304,7 +304,10 @@ func (ce *ConsensusEngine) updateForkChoice() {
 			if len(newBlocks) > 0 {
 				if ce.blockchain != nil {
 					if err := ce.blockchain.ReorganizeChain(newBlocks); err != nil {
-						log.Printf("❌ Reorg failed during execution: %v", err)
+						// [FIX L-01] Critical Consensus Failure
+						// If we fail to reorg to a valid quorum-backed chain, our state is now inconsistent
+						// relative to the network. We must crash to trigger a restart/recovery.
+						panic(fmt.Sprintf("❌ CRITICAL: Reorg failed during execution! Database may be corrupted or state inconsistent: %v", err))
 					} else {
 						log.Printf("✅ Successfully reorganized chain to new head %s", head[:8])
 					}

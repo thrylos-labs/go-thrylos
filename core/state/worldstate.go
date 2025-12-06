@@ -2204,12 +2204,11 @@ func (ws *WorldState) LoadState() error {
 	}
 	ws.totalStaked = totalStaked
 
-	// FIX: Check height instead of ws.blocks length
-	// If transaction count wasn't found (0) but we have blocks (height >= 0), recalculate.
+	// Check height instead of ws.blocks length
 	if ws.totalTransactions == 0 && ws.height >= 0 {
 		fmt.Printf("🔍 LoadState: Calculating transaction count from height %d...\n", ws.height)
 
-		// This function now iterates DB by height (updated in previous step)
+		// This function now iterates DB by height
 		ws.recalculateTotalTransactions()
 
 		// Save the calculated value for future loads
@@ -2220,9 +2219,10 @@ func (ws *WorldState) LoadState() error {
 		}
 	}
 
-	// Load assets
+	// [FIX L-01] Treat asset loading failure as critical
+	// Previously logged a warning, now returns an error to prevent running with partial state
 	if err := ws.LoadAssetsFromStorage(); err != nil {
-		fmt.Printf("🔍 LoadState: Warning - could not load assets: %v\n", err)
+		return fmt.Errorf("failed to load assets from storage: %w", err)
 	}
 
 	fmt.Printf("✅ LoadState: State loaded successfully - Height: %d, Accounts: %d, Validators: %d, Transactions: %d\n",
