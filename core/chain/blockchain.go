@@ -429,15 +429,9 @@ func (bc *Blockchain) ReorganizeChain(newBlocks []*core.Block) error {
 		bc.worldState.GetHeight(), firstNewBlock.Header.Index)
 
 	// 2. Apply new blocks
-	// Note: In a production DB, you might need to "unwind" old blocks first.
-	// Since our WorldState.AddBlock overwrites based on height/hash, strictly applying
-	// the new fork works for this architecture, provided nonces/balances align.
 	for _, block := range newBlocks {
-		// Execute without validation checks that would fail due to "existing block" errors
-		// We use the internal execution logic
-		if _, err := bc.worldState.ExecuteBatchTransactions(block.Transactions); err != nil {
-			return fmt.Errorf("reorg failed: transaction execution error in block %d: %v", block.Header.Index, err)
-		}
+		// [FIX] Removed ExecuteBatchTransactions to prevent double execution.
+		// WorldState.AddBlock() already executes transactions internally.
 
 		// Force add the block (overwriting canonical pointer)
 		if err := bc.worldState.AddBlock(block); err != nil {
