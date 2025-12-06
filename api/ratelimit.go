@@ -15,21 +15,21 @@ import (
 
 // RateLimiter manages rate limits for different endpoint tiers
 type RateLimiter struct {
-	// Different rate limits for different endpoint types
 	limiters map[string]*IPRateLimiter
 	mu       sync.RWMutex
 
 	// Configuration
-	strictLimit     rate.Limit // For sensitive endpoints (fund, broadcast)
-	standardLimit   rate.Limit // For normal API endpoints
-	permissiveLimit rate.Limit // For read-only endpoints
+	strictLimit     rate.Limit
+	standardLimit   rate.Limit
+	permissiveLimit rate.Limit
+	faucetLimit     rate.Limit // [FIX M-04] New tier for faucet
 
 	// Burst allowances
 	strictBurst     int
 	standardBurst   int
 	permissiveBurst int
+	faucetBurst     int // [FIX M-04] New burst for faucet
 
-	// Cleanup
 	cleanupInterval time.Duration
 	maxIdleTime     time.Duration
 }
@@ -45,21 +45,19 @@ type IPRateLimiter struct {
 
 // RateLimitConfig holds rate limiting configuration
 type RateLimitConfig struct {
-	// Requests per second for different tiers
-	StrictRPS     float64 // Sensitive endpoints (default: 1/sec)
-	StandardRPS   float64 // Normal endpoints (default: 10/sec)
-	PermissiveRPS float64 // Read-only endpoints (default: 100/sec)
+	StrictRPS     float64
+	StandardRPS   float64
+	PermissiveRPS float64
+	FaucetRPS     float64 // [FIX M-04]
 
-	// Burst allowances
-	StrictBurst     int // Default: 3
-	StandardBurst   int // Default: 20
-	PermissiveBurst int // Default: 200
+	StrictBurst     int
+	StandardBurst   int
+	PermissiveBurst int
+	FaucetBurst     int // [FIX M-04]
 
-	// Cleanup settings
-	CleanupInterval time.Duration // Default: 1 minute
-	MaxIdleTime     time.Duration // Default: 5 minutes
+	CleanupInterval time.Duration
+	MaxIdleTime     time.Duration
 
-	// Enable/disable
 	Enabled bool
 }
 
@@ -70,9 +68,13 @@ func DefaultRateLimitConfig() *RateLimitConfig {
 		StandardRPS:   10.0,  // 10 requests per second
 		PermissiveRPS: 100.0, // 100 requests per second
 
-		StrictBurst:     3,   // Allow burst of 3
-		StandardBurst:   20,  // Allow burst of 20
-		PermissiveBurst: 200, // Allow burst of 200
+		// [FIX M-04] Faucet limit: 1 request every 60 seconds
+		FaucetRPS: 1.0 / 60.0,
+
+		StrictBurst:     3,
+		StandardBurst:   20,
+		PermissiveBurst: 200,
+		FaucetBurst:     1, // [FIX M-04] No burst allowed for faucet
 
 		CleanupInterval: 1 * time.Minute,
 		MaxIdleTime:     5 * time.Minute,
@@ -93,10 +95,12 @@ func NewRateLimiter(config *RateLimitConfig) *RateLimiter {
 		strictLimit:     rate.Limit(config.StrictRPS),
 		standardLimit:   rate.Limit(config.StandardRPS),
 		permissiveLimit: rate.Limit(config.PermissiveRPS),
+		faucetLimit:     rate.Limit(config.FaucetRPS), // [FIX M-04]
 
 		strictBurst:     config.StrictBurst,
 		standardBurst:   config.StandardBurst,
 		permissiveBurst: config.PermissiveBurst,
+		faucetBurst:     config.FaucetBurst, // [FIX M-04]
 
 		cleanupInterval: config.CleanupInterval,
 		maxIdleTime:     config.MaxIdleTime,
@@ -106,8 +110,8 @@ func NewRateLimiter(config *RateLimitConfig) *RateLimiter {
 	rl.limiters["strict"] = newIPRateLimiter(rl.strictLimit, rl.strictBurst)
 	rl.limiters["standard"] = newIPRateLimiter(rl.standardLimit, rl.standardBurst)
 	rl.limiters["permissive"] = newIPRateLimiter(rl.permissiveLimit, rl.permissiveBurst)
+	rl.limiters["faucet"] = newIPRateLimiter(rl.faucetLimit, rl.faucetBurst) // [FIX M-04]
 
-	// Start cleanup goroutine
 	go rl.cleanupRoutine()
 
 	return rl
@@ -130,7 +134,6 @@ func (rl *RateLimiter) getLimiter(ip string, tier string) *rate.Limiter {
 	rl.mu.RUnlock()
 
 	if !exists {
-		// Shouldn't happen, but fallback to standard
 		tier = "standard"
 		ipLimiter = rl.limiters[tier]
 	}
@@ -149,9 +152,7 @@ func (ipl *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
 		ipl.limiters[ip] = limiter
 	}
 
-	// Update last seen time
 	ipl.lastSeen[ip] = time.Now()
-
 	return limiter
 }
 
@@ -193,29 +194,6 @@ func (ipl *IPRateLimiter) cleanup(maxIdleTime time.Duration) {
 			delete(ipl.lastSeen, ip)
 		}
 	}
-}
-
-// getClientIP extracts the client IP from the request
-func getClientIP(r *http.Request) string {
-	// Try X-Forwarded-For header first (for proxies)
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// X-Forwarded-For can contain multiple IPs, take the first one
-		if ip := parseFirstIP(xff); ip != "" {
-			return ip
-		}
-	}
-
-	// Try X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-
-	// Fall back to RemoteAddr
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return ip
 }
 
 // parseFirstIP extracts the first IP from a comma-separated list
@@ -286,6 +264,9 @@ func (s *Server) getRateLimitHeader(tier string) string {
 	}
 
 	switch tier {
+	case "faucet":
+		// [FIX M-04] Display correct header
+		return fmt.Sprintf("%d/minute", int(s.rateLimiter.faucetLimit*60))
 	case "strict":
 		return fmt.Sprintf("%d/second", int(s.rateLimiter.strictLimit))
 	case "standard":
@@ -295,6 +276,19 @@ func (s *Server) getRateLimitHeader(tier string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// getClientIP extracts the client IP from the request
+// [FIX M-04] Security hardening: Do NOT trust X-Forwarded-For by default.
+// Attackers can spoof headers to bypass rate limits.
+// In a real production env behind a Load Balancer, you would enable a specific "TrustProxy" flag.
+// For this secure default, we rely on RemoteAddr.
+func getClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // GetStats returns rate limiting statistics
