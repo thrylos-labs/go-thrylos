@@ -3,7 +3,11 @@ package sync
 // network/sync/state_sync.go - World state synchronization implementation
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -519,10 +523,53 @@ func (ss *StateSyncer) restoreFromBackup(backup *p2p.StateSnapshot) {
 	}
 }
 
+// calculateChecksum calculates a deterministic hash of the entire snapshot content
+// [FIX M-05] Implements robust integrity check including all state data
 func (ss *StateSyncer) calculateChecksum(snapshot *p2p.StateSnapshot) string {
-	// Simple checksum calculation - in production use proper hash
-	checksum := fmt.Sprintf("%d-%s-%d", snapshot.Height, snapshot.StateRoot, snapshot.Timestamp)
-	return checksum
+	h := sha256.New()
+
+	// 1. Hash Metadata
+	binary.Write(h, binary.BigEndian, snapshot.Height)
+	h.Write([]byte(snapshot.StateRoot))
+	binary.Write(h, binary.BigEndian, snapshot.Timestamp)
+
+	// 2. Hash Accounts (Deterministically sorted by address)
+	var accountAddrs []string
+	for addr := range snapshot.Accounts {
+		accountAddrs = append(accountAddrs, addr)
+	}
+	sort.Strings(accountAddrs)
+
+	for _, addr := range accountAddrs {
+		acc := snapshot.Accounts[addr]
+		h.Write([]byte(acc.Address))
+		binary.Write(h, binary.BigEndian, acc.Balance)
+		binary.Write(h, binary.BigEndian, acc.Nonce)
+		binary.Write(h, binary.BigEndian, acc.StakedAmount)
+		binary.Write(h, binary.BigEndian, acc.Rewards)
+	}
+
+	// 3. Hash Validators (Deterministically sorted by address)
+	var valAddrs []string
+	for addr := range snapshot.Validators {
+		valAddrs = append(valAddrs, addr)
+	}
+	sort.Strings(valAddrs)
+
+	for _, addr := range valAddrs {
+		val := snapshot.Validators[addr]
+		h.Write([]byte(val.Address))
+		binary.Write(h, binary.BigEndian, val.Stake)
+		// Include other critical fields to prevent tampering
+		h.Write([]byte(fmt.Sprintf("%f", val.Commission)))
+		if val.Active {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+	}
+
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (ss *StateSyncer) compressSnapshot(snapshot *p2p.StateSnapshot) ([]byte, error) {

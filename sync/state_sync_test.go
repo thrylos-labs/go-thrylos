@@ -74,11 +74,11 @@ func TestStateSnapshotSecurity(t *testing.T) {
 		Accounts:  map[string]*core.Account{"0x1": {Address: "0x1"}}, // Dummy data
 		Timestamp: 0,
 	}
-	// [FIX] We must calculate and set the checksum so integrity checks pass
-	// The format matches the calculateChecksum implementation: Height-StateRoot-Timestamp
-	validSnapshot.Checksum = fmt.Sprintf("%d-%s-%d", validSnapshot.Height, validSnapshot.StateRoot, validSnapshot.Timestamp)
+	// [FIX] Use the Syncer's actual method to generate the valid checksum
+	// instead of manually constructing the string.
+	validSnapshot.Checksum = syncer.calculateChecksum(validSnapshot)
 
-	// validateSnapshot is private, but we are in package sync so we can call it
+	// validateSnapshot is private...
 	err = syncer.validateSnapshot(validSnapshot)
 	assert.NoError(t, err, "Should accept snapshot with matching state root and valid checksum")
 
@@ -89,8 +89,8 @@ func TestStateSnapshotSecurity(t *testing.T) {
 		Accounts:  map[string]*core.Account{"0x1": {Address: "0x1", Balance: 1000000000}},
 		Timestamp: 0,
 	}
-	// Even with a valid checksum for its own data, it should fail the Root check
-	maliciousSnapshot.Checksum = fmt.Sprintf("%d-%s-%d", maliciousSnapshot.Height, maliciousSnapshot.StateRoot, maliciousSnapshot.Timestamp)
+	// Calculate checksum based on malicious data (integrity check passes, but root check fails)
+	maliciousSnapshot.Checksum = syncer.calculateChecksum(maliciousSnapshot)
 
 	err = syncer.validateSnapshot(maliciousSnapshot)
 	assert.Error(t, err, "Should reject snapshot with mismatched state root")
