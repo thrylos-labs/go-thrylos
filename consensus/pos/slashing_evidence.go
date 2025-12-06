@@ -153,28 +153,54 @@ func NewSlashingEvidence(
 }
 
 // generateID creates a unique ID for the evidence
+// [FIX M-02] Deterministic ID generation based on (Validator, Height, Type)
 func (se *SlashingEvidence) generateID() string {
-	// Serialize evidence for hashing
-	data, _ := json.Marshal(struct {
-		Type             SlashingEvidenceType
-		ValidatorAddress string
-		Evidence         interface{}
-		Timestamp        int64
-	}{
-		Type:             se.Type,
-		ValidatorAddress: se.ValidatorAddress,
-		Evidence:         se.Evidence,
-		Timestamp:        se.Timestamp,
-	})
+	// 1. Determine height based on evidence type
+	var height int64
 
-	hash := sha256.Sum256(data)
-	return fmt.Sprintf("%x", hash[:8]) // Use first 8 bytes
+	switch se.Type {
+	case EvidenceDoubleVoting:
+		if e, ok := se.Evidence.(*DoubleVoteEvidence); ok && e.Attestation1 != nil {
+			height = e.Attestation1.BlockHeight
+		}
+	case EvidenceSurroundVoting:
+		if e, ok := se.Evidence.(*SurroundVoteEvidence); ok && e.InnerAttestation != nil {
+			height = e.InnerAttestation.BlockHeight
+		}
+	case EvidenceInvalidProposal:
+		if e, ok := se.Evidence.(*InvalidProposalEvidence); ok && e.Proposal != nil {
+			// Estimate height from Epoch if absolute height isn't available
+			height = int64(e.Proposal.Epoch * 32)
+		}
+	case EvidenceDowntime:
+		// For downtime, use the end timestamp/slot as a proxy for "height" uniqueness
+		if e, ok := se.Evidence.(*DowntimeEvidence); ok {
+			height = e.EndTime
+		}
+	default:
+		height = se.Timestamp
+	}
+
+	// 2. Create deterministic string: Type:Validator:Height
+	// This ensures we can only slash a validator ONCE per offense type at a specific height
+	rawID := fmt.Sprintf("%s:%s:%d", se.Type.String(), se.ValidatorAddress, height)
+
+	// 3. Hash it
+	hash := sha256.Sum256([]byte(rawID))
+	return fmt.Sprintf("%x", hash[:16]) // Use first 16 bytes
 }
 
 // Validate validates the evidence structure and content
 func (se *SlashingEvidence) Validate() error {
 	if se.ID == "" {
-		return fmt.Errorf("evidence ID cannot be empty")
+		// Auto-generate if missing
+		se.ID = se.generateID()
+	}
+
+	// Verify ID consistency
+	expectedID := se.generateID()
+	if se.ID != expectedID {
+		return fmt.Errorf("invalid evidence ID: matches content mismatch")
 	}
 
 	if se.ValidatorAddress == "" {
@@ -195,8 +221,11 @@ func (se *SlashingEvidence) Validate() error {
 		return fmt.Errorf("evidence timestamp is in the future")
 	}
 
-	if se.Timestamp < now-86400*7 { // 7 days past tolerance
-		return fmt.Errorf("evidence timestamp is too old")
+	// [FIX M-02] Enforce strict staleness check (e.g., 7 days)
+	// This prevents processing evidence from ancient history or different chains
+	const MaxEvidenceAge = 86400 * 7 // 7 days
+	if se.Timestamp < now-MaxEvidenceAge {
+		return fmt.Errorf("evidence is too old (stale): %d seconds", now-se.Timestamp)
 	}
 
 	// Validate type-specific evidence

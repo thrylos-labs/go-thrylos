@@ -160,6 +160,13 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	// [FIX M-02] Reject attestations that are too old for slashing consideration
+	// This prevents Long-Range attacks where an attacker generates old slashable events
+	if time.Since(time.Unix(att.Timestamp, 0)) > sm.config.AttestationWindow {
+		// We silently ignore old attestations for slashing purposes
+		return nil
+	}
+
 	// 🔐 Defensive: ensure maps are initialised
 	if sm.attestationsByValidator == nil {
 		sm.attestationsByValidator = make(map[string][]*storage.AttestationRecord)
@@ -600,8 +607,14 @@ func (sm *SlashingManager) slashDowntime(validatorAddress string, history *stora
 func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 	validatorAddress := record.ValidatorAddress
 
-	// Mark evidence as processed
+	// [FIX M-02] Use the deterministic hash from the evidence itself
+	// This relies on the fix we just made in slashing_evidence.go
 	evidenceHash := record.Evidence.Hash()
+
+	// Double-check if already processed (redundancy for safety)
+	if sm.processedEvidence[evidenceHash] {
+		return fmt.Errorf("evidence %s already processed", evidenceHash)
+	}
 	sm.processedEvidence[evidenceHash] = true
 
 	// Persist evidence
