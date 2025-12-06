@@ -36,6 +36,7 @@ package storage
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -220,9 +221,20 @@ func (bs *BadgerStorage) Flatten(workers int) error {
 }
 
 // Backup creates a backup of the database to a writer
+// [FIX L-03] Implemented online backup functionality
 func (bs *BadgerStorage) Backup(w interface{}, since uint64) (uint64, error) {
-	// Implementation depends on your backup requirements
-	return 0, fmt.Errorf("backup not implemented yet")
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+
+	// Ensure the interface passed is actually a writer
+	writer, ok := w.(io.Writer)
+	if !ok {
+		return 0, fmt.Errorf("invalid writer: must implement io.Writer")
+	}
+
+	// Delegate to native BadgerDB backup
+	// This is a non-blocking online backup (safe to run while node is active)
+	return bs.db.Backup(writer, since)
 }
 
 // Transaction interface for atomic operations
