@@ -309,6 +309,20 @@ func (bc *Blockchain) validateBlockStructure(block *core.Block) error {
 		return fmt.Errorf("block validator cannot be empty")
 	}
 
+	// [FIX M-03] Enforce strict timestamp drift control
+	// Blocks cannot be from the future (beyond threshold)
+	// We use the config value or a hard safe default of 15 seconds
+	maxDrift := 15 * time.Second
+	if bc.config != nil && bc.config.Consensus.MaxFutureBlockTime > 0 {
+		maxDrift = bc.config.Consensus.MaxFutureBlockTime
+	}
+
+	blockTime := time.Unix(block.Header.Timestamp, 0)
+	if blockTime.After(time.Now().Add(maxDrift)) {
+		return fmt.Errorf("block timestamp %s is too far in the future (limit: %s)",
+			blockTime.Format(time.RFC3339), maxDrift)
+	}
+
 	// Validate transaction count
 	if len(block.Transactions) > bc.config.Consensus.MaxTxPerBlock {
 		return fmt.Errorf("block contains too many transactions: %d > %d",

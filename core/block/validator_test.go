@@ -4,13 +4,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
 func TestValidateTimestamp(t *testing.T) {
-	// Setup validator
-	v := NewValidator(account.ShardID(0), 1)
+	// Setup config
+	cfg := &config.Config{
+		Consensus: config.ConsensusConfig{
+			MaxFutureBlockTime: 15 * time.Second,
+			MaxPastBlockTime:   2 * time.Hour,
+		},
+	}
+
+	// [FIX] Pass config to NewValidator
+	v := NewValidator(account.ShardID(0), 1, cfg)
 
 	// Define limits (matching your config)
 	maxFuture := 15 * time.Second

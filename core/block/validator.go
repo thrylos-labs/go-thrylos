@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
@@ -14,13 +15,15 @@ import (
 type Validator struct {
 	shardID     account.ShardID
 	totalShards int
+	config      *config.Config // [FIX] Add config field
 }
 
 // NewValidator creates a new block validator
-func NewValidator(shardID account.ShardID, totalShards int) *Validator {
+func NewValidator(shardID account.ShardID, totalShards int, cfg *config.Config) *Validator {
 	return &Validator{
 		shardID:     shardID,
 		totalShards: totalShards,
+		config:      cfg,
 	}
 }
 
@@ -34,6 +37,19 @@ func (v *Validator) ValidateBlock(block *core.Block, prevBlock *core.Block, publ
 	// Chain continuity validation
 	if err := v.validateChainContinuity(block, prevBlock); err != nil {
 		return fmt.Errorf("chain continuity validation failed: %v", err)
+	}
+
+	// [FIX M-03] Enforce Timestamp Validation
+	// Use safe defaults if config is nil
+	maxFuture := 15 * time.Second
+	maxPast := 2 * time.Hour
+	if v.config != nil {
+		maxFuture = v.config.Consensus.MaxFutureBlockTime
+		maxPast = v.config.Consensus.MaxPastBlockTime
+	}
+
+	if err := v.ValidateTimestamp(block, prevBlock, maxFuture, maxPast); err != nil {
+		return fmt.Errorf("timestamp validation failed: %v", err)
 	}
 
 	// Shard-specific validation
