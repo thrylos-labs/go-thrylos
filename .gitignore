@@ -21,3 +21,6 @@ server.key
 # Validator / node private keys
 keys/
 *.validator.key
+
+#REVM Integration
+revm_wrapper/target/

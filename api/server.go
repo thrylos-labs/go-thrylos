@@ -26,16 +26,21 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 	"github.com/thrylos-labs/go-thrylos/config"
+	"github.com/thrylos-labs/go-thrylos/core/chain"
+	"github.com/thrylos-labs/go-thrylos/core/evm"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
 // Server represents the HTTP API server
 type Server struct {
-	worldState *state.WorldState
-	router     *mux.Router
-	server     *http.Server
-	port       int
+	worldState  *state.WorldState
+	blockchain  *chain.Blockchain // <--- ADD THIS
+	config      *config.Config    // <--- ADD THIS
+	evmExecutor *evm.RevmExecutor
+	router      *mux.Router
+	server      *http.Server
+	port        int
 
 	// HTTPS configuration
 	enableTLS bool
@@ -125,12 +130,18 @@ func NewServerWithServerConfig(worldState *state.WorldState, serverConfig *Serve
 	return server
 }
 
-func NewServerWithConfig(worldState *state.WorldState, cfg *config.Config) *Server {
+func NewServerWithConfig(
+	worldState *state.WorldState,
+	blockchain *chain.Blockchain, // <--- Add arg
+	evmExecutor *evm.RevmExecutor,
+	cfg *config.Config, // <--- Add arg
+) *Server {
+
 	// Create rate limit config from main config
 	rateLimitConfig := &RateLimitConfig{
-		StrictRPS:       float64(cfg.API.RateLimit) / 10, // 1/10 of standard for strict
+		StrictRPS:       float64(cfg.API.RateLimit) / 10,
 		StandardRPS:     float64(cfg.API.RateLimit),
-		PermissiveRPS:   float64(cfg.API.RateLimit) * 10, // 10x for permissive
+		PermissiveRPS:   float64(cfg.API.RateLimit) * 10,
 		StrictBurst:     3,
 		StandardBurst:   20,
 		PermissiveBurst: 200,
@@ -141,11 +152,15 @@ func NewServerWithConfig(worldState *state.WorldState, cfg *config.Config) *Serv
 
 	server := &Server{
 		worldState:      worldState,
+		blockchain:      blockchain,  // <--- Assign
+		evmExecutor:     evmExecutor, // <--- Assign
+		config:          cfg,         // <--- Assign
 		port:            extractPortFromConfig(cfg.API.RESTAddr),
 		enableTLS:       cfg.API.EnableTLS,
 		certFile:        cfg.API.CertFile,
 		keyFile:         cfg.API.KeyFile,
 		rateLimitConfig: rateLimitConfig,
+		enableFaucet:    cfg.API.EnableFaucet,
 	}
 
 	server.rateLimiter = NewRateLimiter(server.rateLimitConfig)
@@ -179,36 +194,83 @@ func extractPortFromConfig(addr string) int {
 // 	return server
 // }
 
-// setupRoutes configures all API routes
-// setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
 	s.router = mux.NewRouter()
 
-	// API version prefix
+	// ---------------------------------------------------------
+	// 1. Initialize EVM RPC Handler
+	// ---------------------------------------------------------
+	// Try to parse ChainID from config, default to 1 (Mainnet) if fails
+	chainID := int64(1)
+	if s.config.Network.ChainID != "" {
+		if id, err := strconv.ParseInt(s.config.Network.ChainID, 10, 64); err == nil {
+			chainID = id
+		}
+	}
+
+	// Initialize the handler defined in ethereum_rpc.go
+	ethAPI := NewEthereumRPCHandler(s.blockchain, s.evmExecutor, chainID)
+
+	// ---------------------------------------------------------
+	// 2. Define Subrouters & Middleware
+	// ---------------------------------------------------------
+
+	// API version prefix for Thrylos Native Routes
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 
 	// ========== STRICT RATE LIMITING (1 req/sec) ==========
+	// Use for: State changes, Faucet, Broadcasting
 	strict := api.PathPrefix("").Subrouter()
 	strict.Use(s.RateLimitMiddleware("strict"))
 
-	// Only expose /fund in dev/testnet
-	// Only expose /fund when both the build config and environment say it's safe
-	if s.enableFaucet && isDevEnvironment() {
-		strict.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
-	}
-
-	strict.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
+	// We also need a strict router at the root level for EVM routes
+	strictRoot := s.router.PathPrefix("").Subrouter()
+	strictRoot.Use(s.RateLimitMiddleware("strict"))
 
 	// ========== STANDARD RATE LIMITING (10 req/sec) ==========
+	// Use for: Heavy computations (EVM calls, Gas estimation)
 	standard := api.PathPrefix("").Subrouter()
 	standard.Use(s.RateLimitMiddleware("standard"))
-	standard.HandleFunc("/estimate-gas", s.estimateGas).Methods("POST", "OPTIONS")
+
+	standardRoot := s.router.PathPrefix("").Subrouter()
+	standardRoot.Use(s.RateLimitMiddleware("standard"))
 
 	// ========== PERMISSIVE RATE LIMITING (100 req/sec) ==========
+	// Use for: Simple reads, Lookups, Health checks
 	permissive := api.PathPrefix("").Subrouter()
 	permissive.Use(s.RateLimitMiddleware("permissive"))
 
-	// Account endpoints
+	permissiveRoot := s.router.PathPrefix("").Subrouter()
+	permissiveRoot.Use(s.RateLimitMiddleware("permissive"))
+
+	// ---------------------------------------------------------
+	// 3. Register Routes
+	// ---------------------------------------------------------
+
+	// === STRICT ROUTES (Writes & Critical) ===
+
+	// Thrylos Native: Faucet (Dev only)
+	if s.enableFaucet && isDevEnvironment() {
+		strict.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
+	}
+	// Thrylos Native: Broadcast
+	strict.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
+
+	// EVM: Send Raw Transaction (Write)
+	strictRoot.HandleFunc("/eth_sendRawTransaction", ethAPI.SendRawTransaction).Methods("POST", "OPTIONS")
+
+	// === STANDARD ROUTES (Computation Heavy) ===
+
+	// Thrylos Native
+	standard.HandleFunc("/estimate-gas", s.estimateGas).Methods("POST", "OPTIONS")
+
+	// EVM: Execution & Simulation
+	standardRoot.HandleFunc("/eth_call", ethAPI.Call).Methods("POST", "OPTIONS")
+	standardRoot.HandleFunc("/eth_estimateGas", ethAPI.EstimateGas).Methods("POST", "OPTIONS")
+
+	// === PERMISSIVE ROUTES (Reads & Info) ===
+
+	// --- Thrylos Native Read Endpoints ---
 	permissive.HandleFunc("/account/{address}/balance", s.getAccountBalance).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/account/{address}", s.getAccount).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/account/{address}/transactions", s.getAccountTransactions).Methods("GET", "OPTIONS")
@@ -235,18 +297,39 @@ func (s *Server) setupRoutes() {
 	permissive.HandleFunc("/health", s.getHealth).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/validator/{address}/activity", s.getValidatorActivity).Methods("GET", "OPTIONS")
 
-	// FIXED: CORS Configuration (Strict Security)
-	// 1. Removed "*" and "chrome-extension://*"
-	// 2. Removed PUT/DELETE methods (not needed for public API)
-	// 3. Removed wildcard headers
+	// --- EVM Read Endpoints ---
+	// Network info
+	permissiveRoot.HandleFunc("/eth_chainId", ethAPI.ChainId).Methods("POST", "OPTIONS")
+	permissiveRoot.HandleFunc("/eth_networkId", ethAPI.NetworkId).Methods("POST", "OPTIONS")
 
+	// Account info
+	permissiveRoot.HandleFunc("/eth_getBalance", ethAPI.GetBalance).Methods("POST", "OPTIONS")
+	permissiveRoot.HandleFunc("/eth_getTransactionCount", ethAPI.GetTransactionCount).Methods("POST", "OPTIONS")
+	permissiveRoot.HandleFunc("/eth_getCode", ethAPI.GetCode).Methods("POST", "OPTIONS")
+
+	// Gas & blocks
+	permissiveRoot.HandleFunc("/eth_gasPrice", ethAPI.GasPrice).Methods("POST", "OPTIONS")
+	permissiveRoot.HandleFunc("/eth_blockNumber", ethAPI.BlockNumber).Methods("POST", "OPTIONS")
+	permissiveRoot.HandleFunc("/eth_getBlockByNumber", ethAPI.GetBlockByNumber).Methods("POST", "OPTIONS")
+	permissiveRoot.HandleFunc("/eth_getBlockByHash", ethAPI.GetBlockByHash).Methods("POST", "OPTIONS")
+
+	// Transaction info
+	permissiveRoot.HandleFunc("/eth_getTransactionByHash", ethAPI.GetTransactionByHash).Methods("POST", "OPTIONS")
+	permissiveRoot.HandleFunc("/eth_getTransactionReceipt", ethAPI.GetTransactionReceipt).Methods("POST", "OPTIONS")
+
+	// Storage
+	permissiveRoot.HandleFunc("/eth_getStorageAt", ethAPI.GetStorageAt).Methods("POST", "OPTIONS")
+
+	// ---------------------------------------------------------
+	// 4. CORS Configuration
+	// ---------------------------------------------------------
 	allowedOrigins := []string{
 		"https://thrylos.org",
 		"https://www.thrylos.org",
 		"https://app.thrylos.org",
 	}
 
-	// Add localhost for development (can be conditional based on env if needed)
+	// Add localhost for development
 	allowedOrigins = append(allowedOrigins,
 		"http://localhost:3000",
 		"http://localhost:5173",
@@ -257,7 +340,7 @@ func (s *Server) setupRoutes() {
 
 	c := cors.New(cors.Options{
 		AllowedOrigins: allowedOrigins,
-		AllowedMethods: []string{"GET", "POST", "OPTIONS"}, // Read & Submit only
+		AllowedMethods: []string{"GET", "POST", "OPTIONS"},
 		AllowedHeaders: []string{
 			"Content-Type",
 			"Authorization",
@@ -272,17 +355,14 @@ func (s *Server) setupRoutes() {
 			"Retry-After",
 		},
 		AllowCredentials: true,
-		MaxAge:           300, // 5 minutes cache for preflight
+		MaxAge:           300,
 		Debug:            false,
 	})
 
 	// Apply Middleware
-	s.router.Use(c.Handler) // Applies CORS to all routes
+	s.router.Use(c.Handler)
 	s.router.Use(s.loggingMiddleware)
 	s.router.Use(s.jsonMiddleware)
-
-	// REMOVED: The manual "s.router.Methods("OPTIONS").HandlerFunc..." block.
-	// The cors library handles OPTIONS requests automatically and securely.
 }
 
 // Start starts the HTTP server

@@ -12,9 +12,15 @@ package transaction
 
 import (
 	"fmt"
+	"log"
+	"math/big"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	"github.com/thrylos-labs/go-thrylos/core/evm"
 	"github.com/thrylos-labs/go-thrylos/core/math"
+	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
@@ -29,15 +35,24 @@ type ExecutionReceipt struct {
 
 // Executor handles transaction execution against account state
 type Executor struct {
-	shardID     account.ShardID
-	totalShards int
+	worldState  *state.WorldState
+	validator   *Validator
+	config      *config.Config
+	evmExecutor *evm.RevmExecutor // NEW
 }
 
 // NewExecutor creates a new transaction executor
-func NewExecutor(shardID account.ShardID, totalShards int) *Executor {
+func NewExecutor(
+	worldState *state.WorldState,
+	validator *Validator,
+	cfg *config.Config,
+	evmExecutor *evm.RevmExecutor, // NEW
+) *Executor {
 	return &Executor{
-		shardID:     shardID,
-		totalShards: totalShards,
+		worldState:  worldState,
+		validator:   validator,
+		config:      cfg,
+		evmExecutor: evmExecutor, // NEW
 	}
 }
 
@@ -69,6 +84,10 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 		err = e.executeUndelegate(tx, accountManager)
 	case core.TransactionType_CLAIM_REWARDS:
 		err = e.executeClaimRewards(tx, accountManager)
+	case core.TransactionType_EVM_CONTRACT_CALL:
+		return e.executeEVMCall(tx)
+	case core.TransactionType_EVM_CONTRACT_DEPLOY:
+		return e.executeEVMDeploy(tx)
 	default:
 		err = fmt.Errorf("unknown transaction type: %v", tx.Type)
 	}
@@ -81,6 +100,70 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 	// Mark as successful
 	receipt.Status = 1
 	return receipt, nil
+}
+
+func (e *Executor) executeEVMCall(tx *core.Transaction) error {
+	caller := common.HexToAddress(tx.From)
+	contract := common.HexToAddress(tx.To)
+
+	// Execute contract call
+	returnData, gasUsed, err := e.evmExecutor.ExecuteCall(
+		caller,
+		contract,
+		tx.Data,
+		uint64(tx.Gas),
+		big.NewInt(tx.Amount),
+	)
+
+	if err != nil {
+		return fmt.Errorf("EVM call failed: %v", err)
+	}
+
+	// Deduct gas cost
+	gasCost := gasUsed * uint64(tx.GasPrice)
+	balance, _ := e.worldState.GetBalance(tx.From)
+	newBalance := balance - int64(gasCost)
+	e.worldState.UpdateBalance(tx.From, newBalance)
+
+	// Increment nonce
+	nonce, _ := e.worldState.GetNonce(tx.From)
+	e.worldState.SetNonce(tx.From, nonce+1)
+
+	log.Printf("✅ EVM call executed: gas used %d, return data: %d bytes",
+		gasUsed, len(returnData))
+
+	return nil
+}
+
+func (e *Executor) executeEVMDeploy(tx *core.Transaction) error {
+	deployer := common.HexToAddress(tx.From)
+
+	// Deploy contract
+	contractAddr, gasUsed, err := e.evmExecutor.DeployContract(
+		deployer,
+		tx.Data,
+		uint64(tx.Gas),
+		big.NewInt(tx.Amount),
+	)
+
+	if err != nil {
+		return fmt.Errorf("contract deployment failed: %v", err)
+	}
+
+	// Deduct gas cost
+	gasCost := gasUsed * uint64(tx.GasPrice)
+	balance, _ := e.worldState.GetBalance(tx.From)
+	newBalance := balance - int64(gasCost)
+	e.worldState.UpdateBalance(tx.From, newBalance)
+
+	// Increment nonce
+	nonce, _ := e.worldState.GetNonce(tx.From)
+	e.worldState.SetNonce(tx.From, nonce+1)
+
+	log.Printf("✅ Contract deployed at %s, gas used: %d",
+		contractAddr.Hex(), gasUsed)
+
+	return nil
 }
 
 // ExecuteBatch executes multiple transactions in order

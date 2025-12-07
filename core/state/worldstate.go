@@ -2996,3 +2996,54 @@ func (ws *WorldState) ValidateAssetConsistency() error {
 
 	return nil
 }
+
+// GetContractCode returns the bytecode of a contract
+func (ws *WorldState) GetContractCode(address string) ([]byte, error) {
+	key := []byte("code:" + address)
+	code, err := ws.db.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	return code, nil
+}
+
+// SetContractCode stores contract bytecode
+func (ws *WorldState) SetContractCode(address string, code []byte) error {
+	key := []byte("code:" + address)
+	return ws.db.Put(key, code)
+}
+
+// GetContractStorage returns a storage value
+func (ws *WorldState) GetContractStorage(address, key string) ([]byte, error) {
+	storageKey := []byte("storage:" + address + ":" + key)
+	value, err := ws.db.Get(storageKey)
+	if err != nil {
+		return make([]byte, 32), nil // Return zero if not found
+	}
+	return value, nil
+}
+
+// SetContractStorage sets a storage value
+func (ws *WorldState) SetContractStorage(address, key string, value []byte) error {
+	storageKey := []byte("storage:" + address + ":" + key)
+	return ws.db.Put(storageKey, value)
+}
+
+// GetNonce returns account nonce
+func (ws *WorldState) GetNonce(address string) (uint64, error) {
+	account, err := ws.GetAccount(address)
+	if err != nil {
+		return 0, nil
+	}
+	return account.Nonce, nil
+}
+
+// SetNonce sets account nonce
+func (ws *WorldState) SetNonce(address string, nonce uint64) error {
+	account, err := ws.GetAccount(address)
+	if err != nil {
+		return err
+	}
+	account.Nonce = nonce
+	return ws.UpdateAccount(account)
+}

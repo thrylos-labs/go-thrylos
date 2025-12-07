@@ -16,6 +16,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/consensus/validator"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/chain"
+	"github.com/thrylos-labs/go-thrylos/core/evm"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/network"
@@ -78,6 +79,8 @@ type Node struct {
 	syncManager *thrylosSync.SyncManager
 
 	genesisValidators []*core.Validator
+
+	evmExecutor *evm.RevmExecutor
 }
 
 // NodeConfig represents comprehensive node configuration
@@ -127,6 +130,14 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		storage.Close() // Clean up storage if WorldState creation fails
 		cancelFunc()    // Prevent context leak
 		return nil, fmt.Errorf("failed to initialize world state: %v", err)
+	}
+
+	// nitialize revm Executor ===
+	revmExecutor, err := evm.NewRevmExecutor(nodeConfig.Config, worldState)
+	if err != nil {
+		storage.Close()
+		cancelFunc()
+		return nil, fmt.Errorf("failed to create revm executor: %v", err)
 	}
 
 	// Initialize Blockchain with WorldState
@@ -200,6 +211,7 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		config:            nodeConfig.Config,
 		storage:           storage,
 		worldState:        worldState,
+		evmExecutor:       revmExecutor,
 		blockchain:        bc,
 		p2pNetwork:        p2pNetwork,
 		bridge:            bridge,
@@ -236,10 +248,23 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 				KeyFile:      nodeConfig.Config.API.KeyFile,
 				EnableFaucet: nodeConfig.Config.API.EnableFaucet,
 			}
-			node.apiManager = api.NewAPIManagerWithConfig(worldState, apiConfig)
+			// PASS bc AND revmExecutor HERE
+			node.apiManager = api.NewAPIManagerWithConfig(
+				worldState,
+				bc,
+				revmExecutor,
+				nodeConfig.Config,
+				apiConfig,
+			)
 		} else {
-			// Dev HTTP: NewServer uses isDevEnvironment() to decide faucet
-			node.apiManager = api.NewAPIManager(worldState, apiPort)
+			// PASS bc AND revmExecutor HERE
+			node.apiManager = api.NewAPIManager(
+				worldState,
+				bc,
+				revmExecutor,
+				nodeConfig.Config,
+				apiPort,
+			)
 		}
 	}
 
@@ -396,6 +421,11 @@ func (n *Node) Stop() error {
 		if err := n.bridge.Stop(); err != nil {
 			return fmt.Errorf("failed to stop bridge: %v", err)
 		}
+	}
+
+	if n.evmExecutor != nil {
+		fmt.Println("Closing revm executor...")
+		n.evmExecutor.Close()
 	}
 
 	// Give goroutines time to stop gracefully

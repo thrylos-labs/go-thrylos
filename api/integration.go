@@ -17,6 +17,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/thrylos-labs/go-thrylos/config"
+	"github.com/thrylos-labs/go-thrylos/core/chain"
+	"github.com/thrylos-labs/go-thrylos/core/evm"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 )
 
@@ -38,11 +41,26 @@ type APIManagerConfig struct {
 }
 
 // NewAPIManager creates a new API manager (HTTP only - for development)
-func NewAPIManager(worldState *state.WorldState, port int) *APIManager {
+// Updated to accept Blockchain, EVM, and Config
+func NewAPIManager(
+	worldState *state.WorldState,
+	blockchain *chain.Blockchain,
+	// UPDATE THIS TYPE:
+	evmExecutor *evm.RevmExecutor,
+	cfg *config.Config,
+	port int,
+) *APIManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Pass it down
+	server := NewServerWithConfig(worldState, blockchain, evmExecutor, cfg)
+
+	if port != 0 {
+		server.port = port
+	}
+
 	return &APIManager{
-		server:     NewServer(worldState, port),
+		server:     server,
 		worldState: worldState,
 		ctx:        ctx,
 		cancel:     cancel,
@@ -50,19 +68,28 @@ func NewAPIManager(worldState *state.WorldState, port int) *APIManager {
 }
 
 // NewAPIManagerWithConfig creates a new API manager with full configuration (HTTP/HTTPS)
-func NewAPIManagerWithConfig(worldState *state.WorldState, config *APIManagerConfig) *APIManager {
+// Updated to accept Blockchain, EVM, and Global Config
+func NewAPIManagerWithConfig(
+	worldState *state.WorldState,
+	blockchain *chain.Blockchain,
+	// UPDATE THIS TYPE:
+	evmExecutor *evm.RevmExecutor,
+	mainConfig *config.Config,
+	apiConfig *APIManagerConfig,
+) *APIManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	serverConfig := &ServerConfig{
-		Port:         config.Port,
-		EnableTLS:    config.EnableTLS,
-		CertFile:     config.CertFile,
-		KeyFile:      config.KeyFile,
-		EnableFaucet: config.EnableFaucet,
-	}
+	// Pass it down
+	server := NewServerWithConfig(worldState, blockchain, evmExecutor, mainConfig)
+
+	server.port = apiConfig.Port
+	server.enableTLS = apiConfig.EnableTLS
+	server.certFile = apiConfig.CertFile
+	server.keyFile = apiConfig.KeyFile
+	server.enableFaucet = apiConfig.EnableFaucet
 
 	return &APIManager{
-		server:     NewServerWithServerConfig(worldState, serverConfig),
+		server:     server,
 		worldState: worldState,
 		ctx:        ctx,
 		cancel:     cancel,
@@ -80,7 +107,7 @@ func (am *APIManager) Start() error {
 	// Wait a moment for server to start
 	time.Sleep(100 * time.Millisecond)
 
-	log.Printf("✅ API server started successfully")
+	log.Printf("✅ API server started successfully on port %d", am.server.port)
 	return nil
 }
 
@@ -97,20 +124,20 @@ func IntegrateWithNode() {
 	fmt.Println("📝 Integration examples:")
 	fmt.Println("")
 	fmt.Println("// Development setup (HTTP)")
-	fmt.Println("apiManager := api.NewAPIManager(worldState, 8080)")
+	fmt.Println("apiManager := api.NewAPIManager(worldState, blockchain, evmExecutor, config, 8080)")
 	fmt.Println("if err := apiManager.Start(); err != nil {")
 	fmt.Println("    log.Fatalf(\"Failed to start API server: %v\", err)")
 	fmt.Println("}")
 	fmt.Println("defer apiManager.Stop()")
 	fmt.Println("")
 	fmt.Println("// Production setup (HTTPS)")
-	fmt.Println("config := &api.APIManagerConfig{")
+	fmt.Println("apiConfig := &api.APIManagerConfig{")
 	fmt.Println("    Port:      8080,")
 	fmt.Println("    EnableTLS: true,")
 	fmt.Println("    CertFile:  \"/etc/ssl/certs/your-domain.crt\",")
 	fmt.Println("    KeyFile:   \"/etc/ssl/private/your-domain.key\",")
 	fmt.Println("}")
-	fmt.Println("apiManager := api.NewAPIManagerWithConfig(worldState, config)")
+	fmt.Println("apiManager := api.NewAPIManagerWithConfig(worldState, blockchain, evmExecutor, nodeConfig, apiConfig)")
 	fmt.Println("if err := apiManager.Start(); err != nil {")
 	fmt.Println("    log.Fatalf(\"Failed to start HTTPS API server: %v\", err)")
 	fmt.Println("}")
@@ -126,26 +153,26 @@ func IntegrateWithNode() {
 func WalletExample() {
 	fmt.Println("🔗 Wallet Integration Example:")
 	fmt.Println(`
-	// Wallet connects to your blockchain
-	client := api.NewClient("http://localhost:8080")
-	
-	// Create smart poller for multiple wallet addresses
-	poller := api.NewSmartPoller(client)
-	
-	// Add user's addresses
-	poller.AddAddress("0x1111111111111111111111111111111111111111", func(oldBalance, newBalance int64) {
-		fmt.Printf("Main wallet: %d → %d\n", oldBalance, newBalance)
-		// Update UI
-	})
-	
-	poller.AddAddress("0x2222222222222222222222222222222222222222", func(oldBalance, newBalance int64) {
-		fmt.Printf("Savings: %d → %d\n", oldBalance, newBalance)
-		// Update UI
-	})
-	
-	// After user sends transaction
-	poller.SetAggressiveMode(30 * time.Second)
-	`)
+    // Wallet connects to your blockchain
+    client := api.NewClient("http://localhost:8080")
+    
+    // Create smart poller for multiple wallet addresses
+    poller := api.NewSmartPoller(client)
+    
+    // Add user's addresses
+    poller.AddAddress("0x1111111111111111111111111111111111111111", func(oldBalance, newBalance int64) {
+        fmt.Printf("Main wallet: %d → %d\n", oldBalance, newBalance)
+        // Update UI
+    })
+    
+    poller.AddAddress("0x2222222222222222222222222222222222222222", func(oldBalance, newBalance int64) {
+        fmt.Printf("Savings: %d → %d\n", oldBalance, newBalance)
+        // Update UI
+    })
+    
+    // After user sends transaction
+    poller.SetAggressiveMode(30 * time.Second)
+    `)
 }
 
 // TestAPIEndpoints provides a simple test function
