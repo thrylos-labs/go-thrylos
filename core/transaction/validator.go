@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/big"
 	"strings"
 	"time"
 
@@ -794,14 +795,23 @@ func (v *Validator) ValidateForMempool(tx *core.Transaction, stateReader StateIn
 }
 
 func (v *Validator) validateSufficientBalanceForNonce(tx *core.Transaction, sender *core.Account, stateReader StateInterface) error {
-	totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
-	if err != nil {
-		return fmt.Errorf("failed to calculate total cost: %v", err)
-	}
+	// 1. Parse Transaction Values
+	txAmount := math.ParseBigInt(tx.Amount)
+	txGasPrice := math.ParseBigInt(tx.GasPrice)
+	txGas := big.NewInt(tx.Gas)
 
-	if sender.Balance < totalCost {
-		return fmt.Errorf("insufficient balance for transaction: have %d, need %d",
-			sender.Balance, totalCost)
+	// 2. Calculate Fee (Gas * GasPrice)
+	fee := new(big.Int).Mul(txGas, txGasPrice)
+
+	// 3. Total Cost (Amount + Fee)
+	totalCost := new(big.Int).Add(txAmount, fee)
+
+	// 4. Get Sender Balance
+	senderBalance := math.ParseBigInt(sender.Balance)
+
+	// 5. Compare
+	if senderBalance.Cmp(totalCost) < 0 {
+		return fmt.Errorf("insufficient balance: have %s, need %s", senderBalance.String(), totalCost.String())
 	}
 
 	return nil

@@ -140,13 +140,13 @@ func (ValidatorTransactionType) EnumDescriptor() ([]byte, []int) {
 type Account struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Address       string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
-	Balance       int64                  `protobuf:"varint,2,opt,name=balance,proto3" json:"balance,omitempty"`
+	Balance       string                 `protobuf:"bytes,2,opt,name=balance,proto3" json:"balance,omitempty"`
 	Nonce         uint64                 `protobuf:"varint,3,opt,name=nonce,proto3" json:"nonce,omitempty"`
-	StakedAmount  int64                  `protobuf:"varint,4,opt,name=staked_amount,json=stakedAmount,proto3" json:"staked_amount,omitempty"`
-	DelegatedTo   map[string]int64       `protobuf:"bytes,5,rep,name=delegated_to,json=delegatedTo,proto3" json:"delegated_to,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"` // validator -> amount
-	Rewards       int64                  `protobuf:"varint,6,opt,name=rewards,proto3" json:"rewards,omitempty"`
-	CodeHash      []byte                 `protobuf:"bytes,7,opt,name=code_hash,json=codeHash,proto3" json:"code_hash,omitempty"`          // Future: smart contracts
-	StorageRoot   []byte                 `protobuf:"bytes,8,opt,name=storage_root,json=storageRoot,proto3" json:"storage_root,omitempty"` // Future: contract storage
+	StakedAmount  string                 `protobuf:"bytes,4,opt,name=staked_amount,json=stakedAmount,proto3" json:"staked_amount,omitempty"`                                                                        // ⚠️ CHANGED: int64 -> string (Must match balance precision)
+	DelegatedTo   map[string]string      `protobuf:"bytes,5,rep,name=delegated_to,json=delegatedTo,proto3" json:"delegated_to,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // ⚠️ CHANGED: map<string, int64> -> map<string, string>
+	Rewards       string                 `protobuf:"bytes,6,opt,name=rewards,proto3" json:"rewards,omitempty"`                                                                                                      // ⚠️ CHANGED: int64 -> string
+	CodeHash      []byte                 `protobuf:"bytes,7,opt,name=code_hash,json=codeHash,proto3" json:"code_hash,omitempty"`
+	StorageRoot   []byte                 `protobuf:"bytes,8,opt,name=storage_root,json=storageRoot,proto3" json:"storage_root,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -188,11 +188,11 @@ func (x *Account) GetAddress() string {
 	return ""
 }
 
-func (x *Account) GetBalance() int64 {
+func (x *Account) GetBalance() string {
 	if x != nil {
 		return x.Balance
 	}
-	return 0
+	return ""
 }
 
 func (x *Account) GetNonce() uint64 {
@@ -202,25 +202,25 @@ func (x *Account) GetNonce() uint64 {
 	return 0
 }
 
-func (x *Account) GetStakedAmount() int64 {
+func (x *Account) GetStakedAmount() string {
 	if x != nil {
 		return x.StakedAmount
 	}
-	return 0
+	return ""
 }
 
-func (x *Account) GetDelegatedTo() map[string]int64 {
+func (x *Account) GetDelegatedTo() map[string]string {
 	if x != nil {
 		return x.DelegatedTo
 	}
 	return nil
 }
 
-func (x *Account) GetRewards() int64 {
+func (x *Account) GetRewards() string {
 	if x != nil {
 		return x.Rewards
 	}
-	return 0
+	return ""
 }
 
 func (x *Account) GetCodeHash() []byte {
@@ -242,9 +242,9 @@ type Transaction struct {
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	From          string                 `protobuf:"bytes,2,opt,name=from,proto3" json:"from,omitempty"`
 	To            string                 `protobuf:"bytes,3,opt,name=to,proto3" json:"to,omitempty"`
-	Amount        int64                  `protobuf:"varint,4,opt,name=amount,proto3" json:"amount,omitempty"`
+	Amount        string                 `protobuf:"bytes,4,opt,name=amount,proto3" json:"amount,omitempty"`
 	Gas           int64                  `protobuf:"varint,5,opt,name=gas,proto3" json:"gas,omitempty"`
-	GasPrice      int64                  `protobuf:"varint,6,opt,name=gas_price,json=gasPrice,proto3" json:"gas_price,omitempty"`
+	GasPrice      string                 `protobuf:"bytes,6,opt,name=gas_price,json=gasPrice,proto3" json:"gas_price,omitempty"`
 	Nonce         uint64                 `protobuf:"varint,7,opt,name=nonce,proto3" json:"nonce,omitempty"`
 	Data          []byte                 `protobuf:"bytes,8,opt,name=data,proto3" json:"data,omitempty"`
 	Type          TransactionType        `protobuf:"varint,9,opt,name=type,proto3,enum=thrylos.core.TransactionType" json:"type,omitempty"`
@@ -307,11 +307,11 @@ func (x *Transaction) GetTo() string {
 	return ""
 }
 
-func (x *Transaction) GetAmount() int64 {
+func (x *Transaction) GetAmount() string {
 	if x != nil {
 		return x.Amount
 	}
-	return 0
+	return ""
 }
 
 func (x *Transaction) GetGas() int64 {
@@ -321,11 +321,11 @@ func (x *Transaction) GetGas() int64 {
 	return 0
 }
 
-func (x *Transaction) GetGasPrice() int64 {
+func (x *Transaction) GetGasPrice() string {
 	if x != nil {
 		return x.GasPrice
 	}
-	return 0
+	return ""
 }
 
 func (x *Transaction) GetNonce() uint64 {
@@ -584,11 +584,11 @@ type Validator struct {
 	Name           string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`               // Add validator name
 	Description    string                 `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"` // Add validator description
 	Website        string                 `protobuf:"bytes,5,opt,name=website,proto3" json:"website,omitempty"`         // Add validator website
-	Stake          int64                  `protobuf:"varint,6,opt,name=stake,proto3" json:"stake,omitempty"`            // Updated field numbers
-	SelfStake      int64                  `protobuf:"varint,7,opt,name=self_stake,json=selfStake,proto3" json:"self_stake,omitempty"`
-	DelegatedStake int64                  `protobuf:"varint,8,opt,name=delegated_stake,json=delegatedStake,proto3" json:"delegated_stake,omitempty"`
-	Delegators     map[string]int64       `protobuf:"bytes,9,rep,name=delegators,proto3" json:"delegators,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"` // delegator address -> amount
-	Commission     float64                `protobuf:"fixed64,10,opt,name=commission,proto3" json:"commission,omitempty"`                                                                         // commission rate (0.0 to 1.0)
+	Stake          string                 `protobuf:"bytes,6,opt,name=stake,proto3" json:"stake,omitempty"`             // Updated field numbers
+	SelfStake      string                 `protobuf:"bytes,7,opt,name=self_stake,json=selfStake,proto3" json:"self_stake,omitempty"`
+	DelegatedStake string                 `protobuf:"bytes,8,opt,name=delegated_stake,json=delegatedStake,proto3" json:"delegated_stake,omitempty"`
+	Delegators     map[string]string      `protobuf:"bytes,9,rep,name=delegators,proto3" json:"delegators,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // delegator address -> amount
+	Commission     float64                `protobuf:"fixed64,10,opt,name=commission,proto3" json:"commission,omitempty"`                                                                        // commission rate (0.0 to 1.0)
 	Active         bool                   `protobuf:"varint,11,opt,name=active,proto3" json:"active,omitempty"`
 	BlocksProposed int64                  `protobuf:"varint,12,opt,name=blocks_proposed,json=blocksProposed,proto3" json:"blocks_proposed,omitempty"`
 	BlocksMissed   int64                  `protobuf:"varint,13,opt,name=blocks_missed,json=blocksMissed,proto3" json:"blocks_missed,omitempty"`
@@ -664,28 +664,28 @@ func (x *Validator) GetWebsite() string {
 	return ""
 }
 
-func (x *Validator) GetStake() int64 {
+func (x *Validator) GetStake() string {
 	if x != nil {
 		return x.Stake
 	}
-	return 0
+	return ""
 }
 
-func (x *Validator) GetSelfStake() int64 {
+func (x *Validator) GetSelfStake() string {
 	if x != nil {
 		return x.SelfStake
 	}
-	return 0
+	return ""
 }
 
-func (x *Validator) GetDelegatedStake() int64 {
+func (x *Validator) GetDelegatedStake() string {
 	if x != nil {
 		return x.DelegatedStake
 	}
-	return 0
+	return ""
 }
 
-func (x *Validator) GetDelegators() map[string]int64 {
+func (x *Validator) GetDelegators() map[string]string {
 	if x != nil {
 		return x.Delegators
 	}
@@ -809,23 +809,23 @@ const file_proto_account_proto_rawDesc = "" +
 	"\x13proto/account.proto\x12\fthrylos.core\"\xdd\x02\n" +
 	"\aAccount\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x18\n" +
-	"\abalance\x18\x02 \x01(\x03R\abalance\x12\x14\n" +
+	"\abalance\x18\x02 \x01(\tR\abalance\x12\x14\n" +
 	"\x05nonce\x18\x03 \x01(\x04R\x05nonce\x12#\n" +
-	"\rstaked_amount\x18\x04 \x01(\x03R\fstakedAmount\x12I\n" +
+	"\rstaked_amount\x18\x04 \x01(\tR\fstakedAmount\x12I\n" +
 	"\fdelegated_to\x18\x05 \x03(\v2&.thrylos.core.Account.DelegatedToEntryR\vdelegatedTo\x12\x18\n" +
-	"\arewards\x18\x06 \x01(\x03R\arewards\x12\x1b\n" +
+	"\arewards\x18\x06 \x01(\tR\arewards\x12\x1b\n" +
 	"\tcode_hash\x18\a \x01(\fR\bcodeHash\x12!\n" +
 	"\fstorage_root\x18\b \x01(\fR\vstorageRoot\x1a>\n" +
 	"\x10DelegatedToEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\xd6\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd6\x02\n" +
 	"\vTransaction\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\tR\x04from\x12\x0e\n" +
 	"\x02to\x18\x03 \x01(\tR\x02to\x12\x16\n" +
-	"\x06amount\x18\x04 \x01(\x03R\x06amount\x12\x10\n" +
+	"\x06amount\x18\x04 \x01(\tR\x06amount\x12\x10\n" +
 	"\x03gas\x18\x05 \x01(\x03R\x03gas\x12\x1b\n" +
-	"\tgas_price\x18\x06 \x01(\x03R\bgasPrice\x12\x14\n" +
+	"\tgas_price\x18\x06 \x01(\tR\bgasPrice\x12\x14\n" +
 	"\x05nonce\x18\a \x01(\x04R\x05nonce\x12\x12\n" +
 	"\x04data\x18\b \x01(\fR\x04data\x121\n" +
 	"\x04type\x18\t \x01(\x0e2\x1d.thrylos.core.TransactionTypeR\x04type\x12\x1c\n" +
@@ -863,10 +863,10 @@ const file_proto_account_proto_rawDesc = "" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x04 \x01(\tR\vdescription\x12\x18\n" +
 	"\awebsite\x18\x05 \x01(\tR\awebsite\x12\x14\n" +
-	"\x05stake\x18\x06 \x01(\x03R\x05stake\x12\x1d\n" +
+	"\x05stake\x18\x06 \x01(\tR\x05stake\x12\x1d\n" +
 	"\n" +
-	"self_stake\x18\a \x01(\x03R\tselfStake\x12'\n" +
-	"\x0fdelegated_stake\x18\b \x01(\x03R\x0edelegatedStake\x12G\n" +
+	"self_stake\x18\a \x01(\tR\tselfStake\x12'\n" +
+	"\x0fdelegated_stake\x18\b \x01(\tR\x0edelegatedStake\x12G\n" +
 	"\n" +
 	"delegators\x18\t \x03(\v2'.thrylos.core.Validator.DelegatorsEntryR\n" +
 	"delegators\x12\x1e\n" +
@@ -885,7 +885,7 @@ const file_proto_account_proto_rawDesc = "" +
 	"updated_at\x18\x10 \x01(\x03R\tupdatedAt\x1a=\n" +
 	"\x0fDelegatorsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\x8d\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8d\x01\n" +
 	"\fValidatorSet\x127\n" +
 	"\n" +
 	"validators\x18\x01 \x03(\v2\x17.thrylos.core.ValidatorR\n" +

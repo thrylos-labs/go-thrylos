@@ -540,20 +540,28 @@ func (n *Node) SyncWithPeers() error {
 
 // Validator Operations
 
-func (n *Node) RegisterValidator(stake int64, commission float64) error {
+func (n *Node) RegisterValidator(stake string, commission float64) error {
 	pubkey := n.nodePrivateKey.PublicKey().Bytes()
 
 	validator := &core.Validator{
-		Address:        n.nodeAddress,
-		Pubkey:         pubkey,
-		Stake:          stake,
-		SelfStake:      stake,
-		DelegatedStake: 0,
-		Commission:     commission,
-		Active:         true,
-		Delegators:     make(map[string]int64),
-		CreatedAt:      time.Now().Unix(),
-		UpdatedAt:      time.Now().Unix(),
+		Address: n.nodeAddress,
+		Pubkey:  pubkey,
+
+		// Fix 1: Assign string directly (matches protobuf)
+		Stake:     stake,
+		SelfStake: stake,
+
+		// Fix 2: Use string "0" instead of integer 0
+		DelegatedStake: "0",
+
+		Commission: commission,
+		Active:     true,
+
+		// Fix 3: Use map[string]string (matches protobuf)
+		Delegators: make(map[string]string),
+
+		CreatedAt: time.Now().Unix(),
+		UpdatedAt: time.Now().Unix(),
 	}
 
 	if err := n.blockchain.AddValidator(validator); err != nil {
@@ -919,16 +927,24 @@ func (n *Node) initializeGenesis() error {
 	if len(genesisValidators) == 0 && n.isValidatorNode {
 		genesisValidators = []*core.Validator{
 			{
-				Address:        n.nodeAddress,
-				Pubkey:         n.nodePrivateKey.PublicKey().Bytes(),
-				Stake:          n.config.Staking.MinValidatorStake,
-				SelfStake:      n.config.Staking.MinValidatorStake,
-				DelegatedStake: 0,
-				Commission:     0.1,
-				Active:         true,
-				Delegators:     make(map[string]int64),
-				CreatedAt:      time.Now().Unix(),
-				UpdatedAt:      time.Now().Unix(),
+				Address: n.nodeAddress,
+				Pubkey:  n.nodePrivateKey.PublicKey().Bytes(),
+
+				// ✅ Now works: Assigning String to String
+				Stake:     n.config.Staking.MinValidatorStake,
+				SelfStake: n.config.Staking.MinValidatorStake,
+
+				// ⚠️ Update: Use "0" string instead of int 0
+				DelegatedStake: "0",
+
+				Commission: 0.1,
+				Active:     true,
+
+				// ⚠️ Update: Map now takes string values
+				Delegators: make(map[string]string),
+
+				CreatedAt: time.Now().Unix(),
+				UpdatedAt: time.Now().Unix(),
 			},
 		}
 	}
@@ -956,15 +972,15 @@ func (n *Node) initializeGenesis() error {
 }
 
 func (n *Node) registerAsValidator() error {
-	// Check if validator already exists first
+	// Check if validator already exists
 	_, err := n.blockchain.GetValidator(n.nodeAddress)
 	if err == nil {
-		// Validator already exists, just log and continue
 		fmt.Printf("✅ Validator %s already registered, skipping registration\n", n.nodeAddress)
 		return nil
 	}
 
-	// Only register if validator doesn't exist
+	// ✅ Fix: No changes needed here if you updated the method signature above!
+	// Both are now strings.
 	return n.RegisterValidator(n.config.Staking.MinValidatorStake, 0.1)
 }
 

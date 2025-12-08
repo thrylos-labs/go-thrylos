@@ -17,18 +17,20 @@ func createDummyTx(id string, payloadSize int) *core.Transaction {
 	payload := strings.Repeat("A", payloadSize)
 
 	return &core.Transaction{
-		Id:        id,
-		From:      "sender_wallet_address",
-		To:        "recipient_wallet_address",
-		Amount:    100,
-		Gas:       21000,
-		GasPrice:  10,
+		Id:   id,
+		From: "sender_wallet_address",
+		To:   "recipient_wallet_address",
+
+		// FIX: Wrap these in quotes because they are now strings
+		Amount:   "100",
+		Gas:      21000, // Gas limit is still int64, so this is fine
+		GasPrice: "10",  // FIX: Wrap in quotes
+
 		Timestamp: time.Now().Unix(),
-		Data:      []byte(payload), // json.Marshal will Base64 encode this (+33% size)
+		Data:      []byte(payload),
 		Signature: []byte("dummy_signature"),
 	}
 }
-
 func TestValidateBlockSize(t *testing.T) {
 	// Initialize the creator
 	creator := NewCreator(0, 4)
@@ -71,7 +73,7 @@ func TestValidateBlockSize(t *testing.T) {
 			name: "Invalid Block - Exceeds Max Byte Size",
 			setupBlock: func() *core.Block {
 				// 1MB payload becomes ~1.33MB after JSON Base64 encoding
-				tx := createDummyTx("large_tx", config.MaxBlockSize)
+				tx := createDummyTx("large_tx", int(config.MaxBlockSize))
 
 				return &core.Block{
 					Header:       &core.BlockHeader{Index: 3},

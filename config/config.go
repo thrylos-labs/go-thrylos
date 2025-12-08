@@ -3,75 +3,52 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"time"
+
+	"github.com/thrylos-labs/go-thrylos/core/math"
 )
 
-const (
-	// === UTILITY-BASED TOKEN ECONOMICS WITH DYNAMIC INFLATION ===
+var (
+	// === TOKEN ECONOMICS (18 Decimals) ===
 
-	// Chain ID
-	// MainnetChainID is the chain ID for production mainnet
+	// Chain IDs
 	MainnetChainID = "thrylos-1"
-
-	// TestnetChainID is the chain ID for public testnet
 	TestnetChainID = "thrylos-testnet-1"
+	DevnetChainID  = "thrylos-devnet-1"
 
-	// DevnetChainID is the chain ID for development
-	DevnetChainID = "thrylos-devnet-1"
+	// Base Unit (1 THRYLOS = 10^18 Wei)
+	BaseUnit = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 
-	// Token denomination (1 THRYLOS = 1e9 base units)
-	BaseUnit      = int64(1000000000) // 1 THRYLOS
-	TotalSupply   = int64(100000000)  // 100 million THRYLOS
-	GenesisSupply = int64(15000000)   // 15 million THRYLOS initial supply (15%) - Reduced for sustainability
+	// Total Supply: 100 Million THRYLOS
+	TotalSupply = new(big.Int).Mul(big.NewInt(100_000_000), BaseUnit)
 
-	// Economic thresholds
-	MinimumBalance     = BaseUnit / 1000 // 0.001 THRYLOS
-	MinimumTransfer    = BaseUnit / 100  // 0.01 THRYLOS
-	MinimumStakeAmount = BaseUnit * 1    // 1 THRYLOS
-	MinimumDelegation  = BaseUnit / 10   // 0.1 THRYLOS
+	// Genesis Supply: 15 Million THRYLOS (15%)
+	GenesisSupply = new(big.Int).Mul(big.NewInt(15_000_000), BaseUnit)
 
-	// At $0.10/token, this is a $250 entry cost (Secure but Accessible).
-	MinimumValidatorStake = BaseUnit * 2500
+	// Economic Thresholds
+	MinimumBalance     = new(big.Int).Div(BaseUnit, big.NewInt(1000)) // 0.001 THRYLOS
+	MinimumTransfer    = new(big.Int).Div(BaseUnit, big.NewInt(100))  // 0.01 THRYLOS
+	MinimumStakeAmount = new(big.Int).Mul(big.NewInt(1), BaseUnit)    // 1 THRYLOS
+	MinimumDelegation  = new(big.Int).Div(BaseUnit, big.NewInt(10))   // 0.1 THRYLOS
 
-	// Gas economics
-	BaseGasPrice   = int64(10)       // 0.00000001 THRYLOS (Low fees)
-	MaxGasPerBlock = int64(10000000) // 10M gas per block
-	StandardTxGas  = int64(21000)    // Standard transaction gas
-	StakingTxGas   = int64(50000)    // Staking transaction gas
+	// Validator Entry: 2500 THRYLOS
+	MinimumValidatorStake = new(big.Int).Mul(big.NewInt(2500), BaseUnit)
 
-	// Dynamic reward economics
-	BaseBlockReward = BaseUnit / 100 // 0.01 THRYLOS base (will be adjusted dynamically)
+	// Gas Economics
+	BaseGasPrice   = big.NewInt(10)    // 10 Wei (Low fees)
+	MaxGasPerBlock = int64(30_000_000) // Standard Ethereum block gas limit
+	StandardTxGas  = int64(21_000)
+	StakingTxGas   = int64(50_000)
 
-	// Added to enforce network stability and prevent congestion
-	MaxBlockSize            = 1_000_000 // 1MB max block size
-	MaxTransactionsPerBlock = 1000      // Max transactions per block
-	// === TRANSACTION POOL ===
-	// TransactionPoolTTL defines how long a transaction stays in the mempool
-	// before being expired (prevents bloat).
-	TransactionPoolTTL = 24 * time.Hour
-	// Block rewards and validator economics
-	BlockReward     = BaseUnit * 38 / 100 // 0.38 THRYLOS (Matches 4% Inflation)
-	ValidatorReward = BaseUnit * 30 / 100 // 0.30 THRYLOS (Primary incentive)
-	DelegatorReward = BaseUnit * 8 / 100  // 0.08 THRYLOS (Delegation incentive)
+	MaxTransactionsPerBlock = 1000
+	MaxBlockSize            = int64(2 * 1024 * 1024) // 2MB
 
-	// === OPTIMIZED DISTRIBUTION (No Advisors) ===
-	// Total: 100M THRYLOS distributed as follows:
-
-	// Genesis Distribution - Immediate circulation (15%)
-	GenesisDistribution = TotalSupply * 15 / 100 // 15M THRYLOS (15%) - Public launch, early adopters
-
-	// Validator Reward Pool - Long-term staking incentives (60%)
-	ValidatorRewardPool = TotalSupply * 60 / 100 // 60M THRYLOS (60%) - Increased for sustainability
-
-	// Liquidity & Market Making - DEX and trading support (15%)
-	LiquidityPool = TotalSupply * 15 / 100 // 15M THRYLOS (15%) - AMM liquidity, market making
-
-	// Development & Ecosystem - Core team and development (10%)
-	DevelopmentPool = TotalSupply * 10 / 100 // 10M THRYLOS (10%) - Team, development, partnerships
-
-	// Dynamic reward pool (60% of total supply for long-term rewards)
-	DynamicRewardPool = ValidatorRewardPool // 60M THRYLOS (60%) - distributed via inflation
+	// Rewards (calculated in init)
+	BlockReward     *big.Int
+	ValidatorReward *big.Int
+	DelegatorReward *big.Int
 )
 
 func GetChainIDForEnvironment(env string) string {
@@ -90,15 +67,15 @@ func GetChainIDForEnvironment(env string) string {
 // GenesisAccount represents an initial account with balance
 type GenesisAccount struct {
 	Address      string `json:"address"`
-	Balance      int64  `json:"balance"`
+	Balance      string `json:"balance"` // ⚠️ CHANGE THIS from int64 to string
 	Purpose      string `json:"purpose"`
-	Locked       bool   `json:"locked"`        // Whether tokens are locked initially
-	UnlockBlocks int64  `json:"unlock_blocks"` // Blocks until unlock (0 = immediate)
+	Locked       bool   `json:"locked"`
+	UnlockBlocks int64  `json:"unlock_blocks"`
 }
 
 // GenesisAllocation represents the genesis token allocation
 type GenesisAllocation struct {
-	TotalGenesis int64            `json:"total_genesis"`
+	TotalGenesis string           `json:"total_genesis"` // ✅ Changed from int64 to string
 	Accounts     []GenesisAccount `json:"accounts"`
 }
 
@@ -169,86 +146,76 @@ type ConsensusConfig struct {
 	BlockTime          time.Duration `json:"block_time"`
 	MaxTxPerBlock      int           `json:"max_tx_per_block"`
 	MaxBlockSize       int64         `json:"max_block_size"`
-	MinGasPrice        int64         `json:"min_gas_price"`
+	MinGasPrice        string        `json:"min_gas_price"`
 	MaxValidators      int           `json:"max_validators"`
 	ValidatorRotation  time.Duration `json:"validator_rotation"`
 	SlashingEnabled    bool          `json:"slashing_enabled"`
-	MaxFutureBlockTime time.Duration `json:"max_future_block_time"` // 15s
-	MaxPastBlockTime   time.Duration `json:"max_past_block_time"`   // 2h
+	MaxFutureBlockTime time.Duration `json:"max_future_block_time"`
+	MaxPastBlockTime   time.Duration `json:"max_past_block_time"`
 	MaxTimestampSkew   time.Duration `json:"max_timestamp_skew"`
 	MaxTimestampAge    time.Duration `json:"max_timestamp_age"`
 	MaxTxDataSize      int           `json:"max_tx_data_size"`
 	StakeCacheTTL      time.Duration `json:"stake_cache_ttl"`
 
-	SlashingDoubleVote      int    `json:"slashing_double_vote"`      // Percentage (50)
-	SlashingSurroundVote    int    `json:"slashing_surround_vote"`    // Percentage (30)
-	SlashingInvalidProposal int    `json:"slashing_invalid_proposal"` // Percentage (20)
-	SlashingDowntime        int    `json:"slashing_downtime"`         // Percentage (5)
-	SlashingInvalidSig      int    `json:"slashing_invalid_sig"`      // Percentage (10)
-	MaxMissedAttestations   uint64 `json:"max_missed_attestations"`   // Count (100)
-	JailDurationHours       int    `json:"jail_duration_hours"`       // Hours (168 = 7 days)
+	SlashingDoubleVote      int    `json:"slashing_double_vote"`
+	SlashingSurroundVote    int    `json:"slashing_surround_vote"`
+	SlashingInvalidProposal int    `json:"slashing_invalid_proposal"`
+	SlashingDowntime        int    `json:"slashing_downtime"`
+	SlashingInvalidSig      int    `json:"slashing_invalid_sig"`
+	MaxMissedAttestations   uint64 `json:"max_missed_attestations"`
+	JailDurationHours       int    `json:"jail_duration_hours"`
 }
 
 type StakingConfig struct {
-	MinValidatorStake          int64         `json:"min_validator_stake"` // 25 THRYLOS (reduced)
-	MinDelegation              int64         `json:"min_delegation"`      // 0.1 THRYLOS
-	MinSelfStake               int64         `json:"min_self_stake"`      // 2.5 THRYLOS (10% of validator stake)
+	MinValidatorStake          string        `json:"min_validator_stake"` // ✅ Changed to string
+	MinDelegation              string        `json:"min_delegation"`      // ✅ Changed to string
+	MinSelfStake               string        `json:"min_self_stake"`      // ✅ Changed to string
 	MaxCommission              float64       `json:"max_commission"`
 	CommissionChangeMax        float64       `json:"commission_change_max"`
 	UnbondingTime              time.Duration `json:"unbonding_time"`
 	MaxDelegationsPerValidator int           `json:"max_delegations_per_validator"`
-
-	// Slashing parameters
-	SlashFractionDoubleSign float64       `json:"slash_fraction_double_sign"`
-	SlashFractionDowntime   float64       `json:"slash_fraction_downtime"`
-	DowntimeJailDuration    time.Duration `json:"downtime_jail_duration"`
-	MinSignedPerWindow      float64       `json:"min_signed_per_window"`
-	SignedBlocksWindow      int64         `json:"signed_blocks_window"`
+	SlashFractionDoubleSign    float64       `json:"slash_fraction_double_sign"`
+	SlashFractionDowntime      float64       `json:"slash_fraction_downtime"`
+	DowntimeJailDuration       time.Duration `json:"downtime_jail_duration"`
+	MinSignedPerWindow         float64       `json:"min_signed_per_window"`
+	SignedBlocksWindow         int64         `json:"signed_blocks_window"`
 }
 
 type EconomicsConfig struct {
-	// Supply parameters
-	TotalSupply       int64 `json:"total_supply"`       // 100M THRYLOS
-	GenesisSupply     int64 `json:"genesis_supply"`     // 15M THRYLOS
-	CirculatingSupply int64 `json:"circulating_supply"` // Current circulating supply
+	TotalSupply       string `json:"total_supply"`       // ⚠️ CHANGE THIS from int64 to string
+	GenesisSupply     string `json:"genesis_supply"`     // ⚠️ CHANGE THIS from int64 to string
+	CirculatingSupply string `json:"circulating_supply"` // ⚠️ CHANGE THIS from int64 to string
 
-	// Inflation parameters (sustainable model)
-	InflationRate float64 `json:"inflation_rate"` // 4% annual (balanced)
-	InflationMax  float64 `json:"inflation_max"`  // 7% maximum
-	InflationMin  float64 `json:"inflation_min"`  // 2% minimum
-	GoalBonded    float64 `json:"goal_bonded"`    // 70% target bonded ratio (increased)
+	InflationRate float64 `json:"inflation_rate"`
+	InflationMax  float64 `json:"inflation_max"`
+	InflationMin  float64 `json:"inflation_min"`
+	GoalBonded    float64 `json:"goal_bonded"`
 
-	// Fee parameters
-	BaseGasPrice int64 `json:"base_gas_price"`
-	MinimumFee   int64 `json:"minimum_fee"`
+	BaseGasPrice string `json:"base_gas_price"` // ⚠️ CHANGE THIS
+	MinimumFee   string `json:"minimum_fee"`    // ⚠️ CHANGE THIS
 
-	// Gas limit constants
-	MinGasLimit int64 `json:"min_gas_limit"`
-	MaxGasPerTx int64 `json:"max_gas_per_tx"`
-	MaxGasPrice int64 `json:"max_gas_price"`
-	MaxBlockGas int64 `json:"max_block_gas"`
+	MinGasLimit int64  `json:"min_gas_limit"`
+	MaxGasPerTx int64  `json:"max_gas_per_tx"`
+	MaxGasPrice string `json:"max_gas_price"` // ⚠️ CHANGE THIS
+	MaxBlockGas int64  `json:"max_block_gas"`
 
-	// Rewards (optimized for sustainability)
-	BlockReward         int64   `json:"block_reward"`          // 0.02 THRYLOS per block
-	CommunityTax        float64 `json:"community_tax"`         // 3% community tax (increased)
-	BaseProposerReward  float64 `json:"base_proposer_reward"`  // 1.5% base proposer reward
-	BonusProposerReward float64 `json:"bonus_proposer_reward"` // 3.5% bonus proposer reward
+	BlockReward         string  `json:"block_reward"` // ⚠️ CHANGE THIS
+	CommunityTax        float64 `json:"community_tax"`
+	BaseProposerReward  float64 `json:"base_proposer_reward"`
+	BonusProposerReward float64 `json:"bonus_proposer_reward"`
 
-	// Validator economics
-	ValidatorRewardRate float64 `json:"validator_reward_rate"` // 9% annual for validators
-	DelegatorRewardRate float64 `json:"delegator_reward_rate"` // 7% annual for delegators
+	ValidatorRewardRate float64 `json:"validator_reward_rate"`
+	DelegatorRewardRate float64 `json:"delegator_reward_rate"`
 
-	// Thresholds
-	MinBalance    int64 `json:"min_balance"`
-	MinTransfer   int64 `json:"min_transfer"`
-	MinStake      int64 `json:"min_stake"`
-	MinDelegation int64 `json:"min_delegation"`
+	MinBalance    string `json:"min_balance"`    // ⚠️ CHANGE THIS
+	MinTransfer   string `json:"min_transfer"`   // ⚠️ CHANGE THIS
+	MinStake      string `json:"min_stake"`      // ⚠️ CHANGE THIS
+	MinDelegation string `json:"min_delegation"` // ⚠️ CHANGE THIS
 
-	// Distribution tracking
-	GenesisDistribution int64 `json:"genesis_distribution"`  // 15M THRYLOS
-	ValidatorRewardPool int64 `json:"validator_reward_pool"` // 60M THRYLOS
-	LiquidityPool       int64 `json:"liquidity_pool"`        // 15M THRYLOS
-	DevelopmentPool     int64 `json:"development_pool"`      // 10M THRYLOS
+	GenesisDistribution string `json:"genesis_distribution"`  // ⚠️ CHANGE THIS
+	ValidatorRewardPool string `json:"validator_reward_pool"` // ⚠️ CHANGE THIS
+	LiquidityPool       string `json:"liquidity_pool"`        // ⚠️ CHANGE THIS
+	DevelopmentPool     string `json:"development_pool"`      // ⚠️ CHANGE THIS
 }
 
 type ShardingConfig struct {
@@ -286,12 +253,10 @@ type ValidatorKeyConfig struct {
 }
 
 func Load() (*Config, error) {
-	// CHANGE: Assign to 'cfg' variable instead of returning immediately
 	cfg := &Config{
-		NodeID:   "thrylos-v2-node",
-		DataDir:  "./data",
-		LogLevel: "info",
-
+		NodeID:      "thrylos-v2-node",
+		DataDir:     "./data",
+		LogLevel:    "info",
 		Environment: "development",
 
 		Validator: ValidatorKeyConfig{
@@ -299,9 +264,8 @@ func Load() (*Config, error) {
 			KeyFilePath: "",
 		},
 
-		// SAFE DEFAULT: Empty genesis. Must be loaded from file.
 		Genesis: GenesisAllocation{
-			TotalGenesis: GenesisSupply,
+			TotalGenesis: math.BigIntToString(GenesisSupply),
 			Accounts:     []GenesisAccount{},
 		},
 
@@ -318,7 +282,7 @@ func Load() (*Config, error) {
 			BlockTime:          3 * time.Second,
 			MaxTxPerBlock:      1000,
 			MaxBlockSize:       2 * 1024 * 1024,
-			MinGasPrice:        BaseGasPrice,
+			MinGasPrice:        math.BigIntToString(BaseGasPrice), // FIX
 			MaxValidators:      100,
 			ValidatorRotation:  24 * time.Hour,
 			MaxFutureBlockTime: 15 * time.Second,
@@ -339,9 +303,9 @@ func Load() (*Config, error) {
 		},
 
 		Staking: StakingConfig{
-			MinValidatorStake:          MinimumValidatorStake,
-			MinDelegation:              MinimumDelegation,
-			MinSelfStake:               MinimumValidatorStake / 10,
+			MinValidatorStake:          math.BigIntToString(MinimumValidatorStake), // FIX
+			MinDelegation:              math.BigIntToString(MinimumDelegation),     // FIX
+			MinSelfStake:               math.BigIntToString(new(big.Int).Div(MinimumValidatorStake, big.NewInt(10))),
 			MaxCommission:              0.20,
 			CommissionChangeMax:        0.01,
 			UnbondingTime:              21 * 24 * time.Hour,
@@ -354,33 +318,35 @@ func Load() (*Config, error) {
 		},
 
 		Economics: EconomicsConfig{
-			TotalSupply:         TotalSupply,
-			GenesisSupply:       GenesisSupply,
-			CirculatingSupply:   GenesisSupply,
+			TotalSupply:         math.BigIntToString(TotalSupply),
+			GenesisSupply:       math.BigIntToString(GenesisSupply),
+			CirculatingSupply:   math.BigIntToString(GenesisSupply),
 			InflationRate:       0.04,
 			InflationMax:        0.07,
 			InflationMin:        0.02,
 			GoalBonded:          0.70,
-			BaseGasPrice:        BaseGasPrice,
-			MinimumFee:          BaseGasPrice * StandardTxGas,
+			BaseGasPrice:        math.BigIntToString(BaseGasPrice),
+			MinimumFee:          math.BigIntToString(new(big.Int).Mul(BaseGasPrice, big.NewInt(StandardTxGas))),
 			MinGasLimit:         StandardTxGas,
 			MaxGasPerTx:         2000000,
-			MaxGasPrice:         10000,
+			MaxGasPrice:         "10000", // Needs adjustment if using BigInt
 			MaxBlockGas:         MaxGasPerBlock,
-			BlockReward:         BlockReward,
+			BlockReward:         math.BigIntToString(BlockReward),
 			CommunityTax:        0.03,
 			BaseProposerReward:  0.015,
 			BonusProposerReward: 0.035,
 			ValidatorRewardRate: 0.12,
 			DelegatorRewardRate: 0.08,
-			MinBalance:          MinimumBalance,
-			MinTransfer:         MinimumTransfer,
-			MinStake:            MinimumStakeAmount,
-			MinDelegation:       MinimumDelegation,
-			GenesisDistribution: GenesisDistribution,
-			ValidatorRewardPool: ValidatorRewardPool,
-			LiquidityPool:       LiquidityPool,
-			DevelopmentPool:     DevelopmentPool,
+			MinBalance:          math.BigIntToString(MinimumBalance),
+			MinTransfer:         math.BigIntToString(MinimumTransfer),
+			MinStake:            math.BigIntToString(MinimumStakeAmount),
+			MinDelegation:       math.BigIntToString(MinimumDelegation),
+
+			// Percentages of Total Supply
+			GenesisDistribution: math.BigIntToString(new(big.Int).Div(new(big.Int).Mul(TotalSupply, big.NewInt(15)), big.NewInt(100))),
+			ValidatorRewardPool: math.BigIntToString(new(big.Int).Div(new(big.Int).Mul(TotalSupply, big.NewInt(60)), big.NewInt(100))),
+			LiquidityPool:       math.BigIntToString(new(big.Int).Div(new(big.Int).Mul(TotalSupply, big.NewInt(15)), big.NewInt(100))),
+			DevelopmentPool:     math.BigIntToString(new(big.Int).Div(new(big.Int).Mul(TotalSupply, big.NewInt(10)), big.NewInt(100))),
 		},
 
 		Sharding: ShardingConfig{
@@ -392,55 +358,40 @@ func Load() (*Config, error) {
 		},
 
 		API: APIConfig{
-			EnableAPI:     true,
-			RESTAddr:      ":8080",
-			EnableTLS:     false,
-			CertFile:      "",
-			KeyFile:       "",
-			EnableCORS:    true,
-			RateLimit:     10,
-			EnableMetrics: true,
-			EnableFaucet:  true,
+			EnableAPI:      true,
+			RESTAddr:       ":8080",
+			EnableTLS:      false,
+			CertFile:       "",
+			KeyFile:        "",
+			EnableCORS:     true,
+			AllowedOrigins: []string{"*"},
+			RateLimit:      10,
+			EnableMetrics:  true,
+			EnableFaucet:   true,
 		},
 
 		P2P: P2PConfig{
-			Enabled:        true,
-			ListenPort:     9000,
-			BootstrapPeers: []string{},
-			MaxPeers:       50,
-			EnableMDNS:     false,
-			EnableDHT:      true,
-			MaxMessageSize: 2 * 1024 * 1024, // Reduced to 2MB (tighten this up)
-
-			// FIX: Reduce block range size to prevent massive payload requests
-			MaxBlockRangeSize: 20, // Was 100
-
+			Enabled:            true,
+			ListenPort:         9000,
+			BootstrapPeers:     []string{},
+			MaxPeers:           50,
+			EnableMDNS:         false,
+			EnableDHT:          true,
+			MaxMessageSize:     2 * 1024 * 1024,
+			MaxBlockRangeSize:  20,
 			StreamReadTimeout:  30 * time.Second,
 			StreamWriteTimeout: 30 * time.Second,
-
-			// FIX: Reduce rate limit to prevent DoS
-			RequestRateLimit:   20, // Was 60 (Requests per minute per peer)
-			MaxPendingRequests: 20, // Was 100 (Max concurrent requests per peer)
+			RequestRateLimit:   20,
+			MaxPendingRequests: 20,
 		},
 	}
 
-	// === GENESIS LOADING LOGIC ===
-
-	// 2. Attempt to load genesis.json
+	// Load Genesis (Logic remains similar, just handle string conversion)
 	genesisFile := "genesis.json"
 	if _, err := os.Stat(genesisFile); os.IsNotExist(err) {
-		// Try config directory
 		genesisFile = "config/genesis.json"
 	}
-
-	if err := loadGenesisFromFile(genesisFile, cfg); err != nil {
-		fmt.Printf("⚠️  Warning: Could not load %s (%v). Using empty genesis.\n", genesisFile, err)
-	} else {
-		fmt.Printf("✅ Loaded genesis configuration from %s\n", genesisFile)
-	}
-
-	// [FIX L-04] Enforce Security Invariants
-	// This overrides configuration file settings if they are unsafe for the current environment.
+	loadGenesisFromFile(genesisFile, cfg)
 	sanitizeConfigForEnvironment(cfg)
 
 	return cfg, nil
@@ -644,7 +595,7 @@ func (c *Config) CalculateBlockRewards() map[string]interface{} {
 
 // ValidateConfig validates the configuration parameters
 func (c *Config) ValidateConfig() error {
-	// Validate economic parameters
+	// 1. Validate simple float parameters
 	if c.Economics.InflationRate < 0 || c.Economics.InflationRate > 1 {
 		return fmt.Errorf("inflation rate must be between 0 and 1")
 	}
@@ -653,8 +604,15 @@ func (c *Config) ValidateConfig() error {
 		return fmt.Errorf("max commission must be between 0 and 1")
 	}
 
-	if c.Economics.MinDelegation > c.Staking.MinValidatorStake {
-		return fmt.Errorf("min delegation cannot exceed min validator stake")
+	// 2. Validate BigInt comparisons (MinDelegation vs MinValidatorStake)
+	// Parse strings to BigInt
+	minDelegation := math.ParseBigInt(c.Economics.MinDelegation)
+	minValidatorStake := math.ParseBigInt(c.Staking.MinValidatorStake)
+
+	// Check: MinDelegation > MinValidatorStake ?
+	if minDelegation.Cmp(minValidatorStake) > 0 {
+		return fmt.Errorf("min delegation (%s) cannot exceed min validator stake (%s)",
+			minDelegation.String(), minValidatorStake.String())
 	}
 
 	if c.Consensus.MaxValidators <= 0 {
@@ -665,26 +623,36 @@ func (c *Config) ValidateConfig() error {
 		return fmt.Errorf("total shards must be positive")
 	}
 
-	// Validate supply distribution adds up to 100%
-	totalDistribution := c.Economics.GenesisDistribution +
-		c.Economics.ValidatorRewardPool +
-		c.Economics.LiquidityPool +
-		c.Economics.DevelopmentPool
+	// 3. Validate supply distribution adds up to TotalSupply
+	// We must sum the BigInts manually
+	totalDistribution := big.NewInt(0)
+	totalDistribution.Add(totalDistribution, math.ParseBigInt(c.Economics.GenesisDistribution))
+	totalDistribution.Add(totalDistribution, math.ParseBigInt(c.Economics.ValidatorRewardPool))
+	totalDistribution.Add(totalDistribution, math.ParseBigInt(c.Economics.LiquidityPool))
+	totalDistribution.Add(totalDistribution, math.ParseBigInt(c.Economics.DevelopmentPool))
 
-	if totalDistribution != c.Economics.TotalSupply {
-		return fmt.Errorf("distribution pools (%d) don't equal total supply (%d)",
-			totalDistribution, c.Economics.TotalSupply)
+	totalSupply := math.ParseBigInt(c.Economics.TotalSupply)
+
+	// Check: totalDistribution != totalSupply ?
+	if totalDistribution.Cmp(totalSupply) != 0 {
+		return fmt.Errorf("distribution pools (%s) don't equal total supply (%s)",
+			totalDistribution.String(), totalSupply.String())
 	}
 
-	// Validate genesis accounts total matches genesis supply
-	var totalGenesisBalance int64
+	// 4. Validate genesis accounts total matches GenesisSupply
+	// Use 'c.Genesis.Accounts' (not 'allocation')
+	totalAllocated := big.NewInt(0)
 	for _, account := range c.Genesis.Accounts {
-		totalGenesisBalance += account.Balance
+		bal := math.ParseBigInt(account.Balance)
+		totalAllocated.Add(totalAllocated, bal)
 	}
 
-	if totalGenesisBalance != c.Economics.GenesisSupply*BaseUnit {
-		return fmt.Errorf("genesis accounts total (%d) doesn't match genesis supply (%d)",
-			totalGenesisBalance, c.Economics.GenesisSupply*BaseUnit)
+	genesisSupply := math.ParseBigInt(c.Economics.GenesisSupply)
+
+	// Check: totalAllocated != genesisSupply ?
+	if totalAllocated.Cmp(genesisSupply) != 0 {
+		return fmt.Errorf("genesis accounts total (%s) doesn't match genesis supply (%s)",
+			totalAllocated.String(), genesisSupply.String())
 	}
 
 	return nil

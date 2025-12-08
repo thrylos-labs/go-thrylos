@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/core/chain"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/network"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
@@ -484,20 +485,19 @@ func (bv *BlockValidator) validateTransaction(tx *core.Transaction) error {
 		return fmt.Errorf("transaction from address is empty")
 	}
 
-	if tx.To == "" {
+	// Note: tx.To can be empty for Contract Creation (Deploy), so be careful enforcing this globally.
+	// If you want to enforce it for standard transfers only, check the type.
+	if tx.To == "" && tx.Type == core.TransactionType_TRANSFER {
 		return fmt.Errorf("transaction to address is empty")
 	}
 
-	if tx.Amount <= 0 {
+	// FIX: Parse BigInt string to check if <= 0
+	amount := math.ParseBigInt(tx.Amount)
+	if amount.Sign() <= 0 { // Sign() returns 0 if zero, -1 if negative
 		return fmt.Errorf("transaction amount must be positive")
 	}
 
-	// Additional validation would go here
-	// - Signature validation
-	// - Balance validation
-	// - Nonce validation
-	// etc.
-
+	// Additional validation...
 	return nil
 }
 

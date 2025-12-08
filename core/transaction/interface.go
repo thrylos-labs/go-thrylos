@@ -10,16 +10,13 @@ import (
 // StateInterface defines all methods required by Validator and Executor
 // This interface allows us to break the dependency cycle with core/state
 type StateInterface interface {
-	// Account access (Required by Validator & Executor)
 	GetAccount(address string) (*core.Account, error)
-	GetBalance(address string) (int64, error)
+	GetBalance(address string) (*big.Int, error) // Changed int64 -> *big.Int
 	GetNonce(address string) (uint64, error)
 
-	// State updates (Required by Executor)
-	UpdateBalance(address string, amount int64) error
+	UpdateBalance(address string, amount *big.Int) error // Changed int64 -> *big.Int
 	SetNonce(address string, nonce uint64) error
 
-	// EVM specific (Required by Executor)
 	GetContractCode(address string) ([]byte, error)
 	GetContractStorage(address, key string) ([]byte, error)
 	SetContractStorage(address, key string, value []byte) error

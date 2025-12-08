@@ -53,7 +53,7 @@ import (
 
 // StateReader interface prevents import cycles
 type StateReader interface {
-	GetBalance(address string) (int64, error)
+	GetBalance(address string) (*big.Int, error) // Changed int64 -> *big.Int
 	GetNonce(address string) (uint64, error)
 	GetContractCode(address string) ([]byte, error)
 	GetContractStorage(address, key string) ([]byte, error)
@@ -246,8 +246,14 @@ func getBalanceCallback(addr C.CAddress) C.CU256 {
 	if globalExecutor == nil {
 		return C.CU256{}
 	}
-	val, _ := globalExecutor.worldState.GetBalance(cToAddress(addr).Hex())
-	return bigIntToC(big.NewInt(val))
+
+	// FIX: Handle *big.Int return type
+	val, err := globalExecutor.worldState.GetBalance(cToAddress(addr).Hex())
+	if err != nil || val == nil {
+		return bigIntToC(big.NewInt(0))
+	}
+	// val is already *big.Int, pass directly
+	return bigIntToC(val)
 }
 
 //export getNonceCallback

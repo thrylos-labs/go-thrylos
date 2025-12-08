@@ -124,7 +124,8 @@ func (bc *Creator) ValidateBlockSize(block *core.Block) error {
 		return fmt.Errorf("failed to calculate block size: %v", err)
 	}
 
-	if blockSize > config.MaxBlockSize {
+	// FIX: Explicitly cast blockSize to int64
+	if int64(blockSize) > config.MaxBlockSize {
 		return fmt.Errorf("block too large: %d bytes > %d bytes limit", blockSize, config.MaxBlockSize)
 	}
 

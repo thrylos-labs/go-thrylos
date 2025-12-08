@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"sort"
 	"sync"
 	"time"
@@ -118,12 +119,13 @@ func (ws *WorldState) InitializeFromConfig() error {
 	// Initialize genesis accounts from config
 	totalGenesisBalance := int64(0)
 	for _, genesisAccount := range ws.config.Genesis.Accounts {
+		balanceWei := math.ParseBigInt(genesisAccount.Balance)
 		fmt.Printf("🏦 Creating genesis account: %s with %d tokens (%s)\n",
 			genesisAccount.Address, genesisAccount.Balance/BaseUnit, genesisAccount.Purpose)
 
 		account := &core.Account{
 			Address:      genesisAccount.Address,
-			Balance:      genesisAccount.Balance,
+			Balance:      math.BigIntToString(balanceWei), // Store as string
 			Nonce:        0,
 			StakedAmount: 0,
 			DelegatedTo:  make(map[string]int64),
@@ -496,15 +498,16 @@ func (ws *WorldState) GetAccount(address string) (*core.Account, error) {
 }
 
 // GetBalance returns the balance of an account
-func (ws *WorldState) GetBalance(address string) (int64, error) {
-	ws.accountMu.RLock(address)
-	defer ws.accountMu.RUnlock(address)
-
-	return ws.accountManager.GetBalance(address)
+func (ws *WorldState) GetBalance(address string) (*big.Int, error) {
+	acc, err := ws.GetAccount(address)
+	if err != nil {
+		return big.NewInt(0), err
+	}
+	return math.ParseBigInt(acc.Balance), nil
 }
 
 // UpdateBalance updates the balance for a given address (needed for slashing)
-func (ws *WorldState) UpdateBalance(address string, newBalance int64) error {
+func (ws *WorldState) UpdateBalance(address string, amount *big.Int) error {
 	ws.accountMu.Lock(address)
 	defer ws.accountMu.Unlock(address)
 
