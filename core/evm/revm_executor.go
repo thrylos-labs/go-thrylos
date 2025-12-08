@@ -65,6 +65,18 @@ type RevmExecutor struct {
 	chainID    uint64
 }
 
+func (e *RevmExecutor) GetStorageAt(address common.Address, key common.Hash) common.Hash {
+	// Uses the StateReader interface to fetch storage from WorldState
+	val, _ := e.worldState.GetContractStorage(address.Hex(), key.Hex())
+	return common.BytesToHash(val)
+}
+
+// GetCode returns the bytecode at a given address
+func (e *RevmExecutor) GetCode(address common.Address) []byte {
+	code, _ := e.worldState.GetContractCode(address.Hex())
+	return code
+}
+
 // NewRevmExecutor creates a new revm-based EVM executor
 func NewRevmExecutor(cfg *config.Config, worldState StateReader) (*RevmExecutor, error) {
 	chainID, _ := strconv.ParseUint(cfg.Network.ChainID, 10, 64)
