@@ -180,6 +180,14 @@ func extractPortFromConfig(addr string) int {
 	}
 }
 
+func parseChainID(chainIDStr string) int64 {
+	id, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return 1 // Default to 1 (Mainnet) if string (e.g. "thrylos-1") cannot be parsed
+	}
+	return id
+}
+
 // NewServerWithConfig creates a new API server with full configuration
 // func NewServerWithConfig(worldState *state.WorldState, config *ServerConfig) *Server {
 // 	server := &Server{

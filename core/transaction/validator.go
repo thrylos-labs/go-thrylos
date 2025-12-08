@@ -41,24 +41,14 @@ type Validator struct {
 	metrics      *ReplayProtectionMetrics
 }
 
-// StateReader defines the interface for accessing account state.
-type StateReader interface {
-	GetAccount(address string) (*core.Account, error)
-}
-
 // NewValidator creates a new transaction validator
 func NewValidator(shardID account.ShardID, totalShards int, cfg *config.Config) *Validator {
 	var replayConfig *ReplayProtectionConfig
 
-	// Check environment to determine security level
-	// We default to STRICT (Production) unless explicitly in development
 	if isDevelopmentEnvironment(cfg.Environment) {
 		replayConfig = DevelopmentReplayProtectionConfig()
 	} else {
-		// Production, Testnet, or Mainnet
 		replayConfig = DefaultReplayProtectionConfig()
-
-		// Double-check critical flags for production
 		replayConfig.RequireFinalizedBlock = true
 		replayConfig.AllowEmptyFinalizedBlock = false
 	}
@@ -570,7 +560,7 @@ func (v *Validator) SetReplayProtectionConfig(config *ReplayProtectionConfig) {
 	v.replayConfig = config
 }
 
-func (v *Validator) ValidateTransaction(tx *core.Transaction, stateReader StateReader) error {
+func (v *Validator) ValidateTransaction(tx *core.Transaction, stateReader StateInterface) error {
 	if tx == nil {
 		return fmt.Errorf("transaction cannot be nil")
 	}
@@ -590,7 +580,7 @@ func (v *Validator) ValidateTransaction(tx *core.Transaction, stateReader StateR
 		return fmt.Errorf("shard validation failed: %v", err)
 	}
 
-	// 🔐 NEW: Signature validation
+	// Signature validation
 	if err := v.validateSignature(tx); err != nil {
 		return fmt.Errorf("signature validation failed: %v", err)
 	}
@@ -773,7 +763,7 @@ func (v *Validator) validateNonce(txNonce, accountNonce uint64, address string) 
 
 // ValidateForMempool validates a transaction for mempool inclusion
 // This allows future nonces within a reasonable range for queued transactions
-func (v *Validator) ValidateForMempool(tx *core.Transaction, stateReader StateReader) error {
+func (v *Validator) ValidateForMempool(tx *core.Transaction, stateReader StateInterface) error {
 	// First, ensure signature is valid
 	if err := v.validateSignature(tx); err != nil {
 		return fmt.Errorf("signature validation failed: %v", err)
@@ -803,9 +793,7 @@ func (v *Validator) ValidateForMempool(tx *core.Transaction, stateReader StateRe
 	return v.validateSufficientBalanceForNonce(tx, sender, stateReader)
 }
 
-// validateSufficientBalanceForNonce checks if the sender has enough balance
-// to process all transactions up to and including this nonce
-func (v *Validator) validateSufficientBalanceForNonce(tx *core.Transaction, sender *core.Account, stateReader StateReader) error {
+func (v *Validator) validateSufficientBalanceForNonce(tx *core.Transaction, sender *core.Account, stateReader StateInterface) error {
 	totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
 	if err != nil {
 		return fmt.Errorf("failed to calculate total cost: %v", err)
@@ -820,7 +808,7 @@ func (v *Validator) validateSufficientBalanceForNonce(tx *core.Transaction, send
 }
 
 // validateBusinessLogic validates transaction business logic
-func (v *Validator) validateBusinessLogic(tx *core.Transaction, stateReader StateReader) error {
+func (v *Validator) validateBusinessLogic(tx *core.Transaction, stateReader StateInterface) error {
 	// Get sender account via Interface
 	sender, err := stateReader.GetAccount(tx.From)
 	if err != nil {
@@ -1080,7 +1068,7 @@ func (v *Validator) validateClaimRewards(tx *core.Transaction, sender *core.Acco
 }
 
 // ValidateBatch validates multiple transactions as a batch
-func (v *Validator) ValidateBatch(transactions []*core.Transaction, stateReader StateReader) error {
+func (v *Validator) ValidateBatch(transactions []*core.Transaction, stateReader StateInterface) error {
 	tempAccounts := make(map[string]*core.Account)
 
 	for i, tx := range transactions {

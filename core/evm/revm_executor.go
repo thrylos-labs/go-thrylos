@@ -1,7 +1,4 @@
 // core/evm/revm_executor.go
-// Ultra-fast EVM executor using revm (Rust)
-// 5-10x faster than go-ethereum
-
 package evm
 
 /*
@@ -9,65 +6,37 @@ package evm
 #include <stdlib.h>
 #include <stdint.h>
 
-// C types matching Rust FFI
-typedef struct {
-    uint8_t bytes[20];
-} CAddress;
+// 1. Types
+typedef struct { uint8_t bytes[20]; } CAddress;
+typedef struct { uint8_t bytes[32]; } CU256;
+typedef struct { const uint8_t* data; size_t len; } CByteSlice;
+typedef struct { uint8_t success; uint64_t gas_used; CByteSlice return_data; const char* error_message; } CExecutionResult;
 
-typedef struct {
-    uint8_t bytes[32];
-} CU256;
+// 2. Callback Typedefs
+typedef CU256 (*BalanceCallback)(CAddress);
+typedef uint64_t (*NonceCallback)(CAddress);
+typedef CByteSlice (*CodeCallback)(CAddress);
+typedef CU256 (*StorageCallback)(CAddress, CU256);
 
-typedef struct {
-    const uint8_t* data;
-    size_t len;
-} CBytes;
+// 3. Go Exports
+extern CU256 getBalanceCallback(CAddress);
+extern uint64_t getNonceCallback(CAddress);
+extern CByteSlice getCodeCallback(CAddress);
+extern CU256 getStorageCallback(CAddress, CU256);
 
-typedef struct {
-    uint8_t success;
-    uint64_t gas_used;
-    CBytes return_data;
-    const char* error_message;
-} CExecutionResult;
+// 4. Static Helpers
+static BalanceCallback get_balance_cb() { return &getBalanceCallback; }
+static NonceCallback get_nonce_cb() { return &getNonceCallback; }
+static CodeCallback get_code_cb() { return &getCodeCallback; }
+static StorageCallback get_storage_cb() { return &getStorageCallback; }
 
-// Function declarations
-void* revm_executor_new(
-    uint64_t chain_id,
-    CU256 (*get_balance_fn)(CAddress),
-    uint64_t (*get_nonce_fn)(CAddress),
-    CBytes (*get_code_fn)(CAddress),
-    CU256 (*get_storage_fn)(CAddress, CU256)
-);
-
+// 5. Rust Functions
+void* revm_executor_new(uint64_t chain_id, BalanceCallback b, NonceCallback n, CodeCallback c, StorageCallback s);
 void revm_executor_free(void* executor);
-
-CExecutionResult revm_execute_call(
-    void* executor,
-    CAddress caller,
-    CAddress to,
-    CBytes data,
-    uint64_t gas_limit,
-    CU256 value
-);
-
-CExecutionResult revm_deploy_contract(
-    void* executor,
-    CAddress deployer,
-    CBytes bytecode,
-    uint64_t gas_limit,
-    CU256 value
-);
-
+CExecutionResult revm_execute_call(void* executor, CAddress caller, CAddress to, CByteSlice data, uint64_t gas, CU256 value);
+CExecutionResult revm_deploy_contract(void* executor, CAddress deployer, CByteSlice code, uint64_t gas, CU256 value);
 CAddress revm_calculate_create_address(CAddress deployer, uint64_t nonce);
-
-uint64_t revm_estimate_gas(
-    void* executor,
-    CAddress caller,
-    CAddress to,
-    CBytes data,
-    CU256 value
-);
-
+uint64_t revm_estimate_gas(void* executor, CAddress caller, CAddress to, CByteSlice data, CU256 value);
 void revm_free_string(char* s);
 void revm_free_bytes(uint8_t* data, size_t len);
 */
@@ -75,34 +44,47 @@ import "C"
 import (
 	"fmt"
 	"math/big"
+	"strconv"
 	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/thrylos-labs/go-thrylos/config"
-	"github.com/thrylos-labs/go-thrylos/core/state"
 )
 
-// RevmExecutor is an ultra-fast EVM executor using revm (Rust)
+// StateReader interface prevents import cycles
+type StateReader interface {
+	GetBalance(address string) (int64, error)
+	GetNonce(address string) (uint64, error)
+	GetContractCode(address string) ([]byte, error)
+	GetContractStorage(address, key string) ([]byte, error)
+}
+
 type RevmExecutor struct {
 	executor   unsafe.Pointer
-	worldState *state.WorldState
+	worldState StateReader
 	chainID    uint64
 }
 
 // NewRevmExecutor creates a new revm-based EVM executor
-func NewRevmExecutor(cfg *config.Config, worldState *state.WorldState) (*RevmExecutor, error) {
-	executor := &RevmExecutor{
-		worldState: worldState,
-		chainID:    uint64(cfg.Network.ChainID),
+func NewRevmExecutor(cfg *config.Config, worldState StateReader) (*RevmExecutor, error) {
+	chainID, _ := strconv.ParseUint(cfg.Network.ChainID, 10, 64)
+	if chainID == 0 {
+		chainID = 1
 	}
 
-	// Create revm executor with callbacks
+	executor := &RevmExecutor{
+		worldState: worldState,
+		chainID:    chainID,
+	}
+
+	globalExecutor = executor
+
 	executor.executor = C.revm_executor_new(
 		C.uint64_t(executor.chainID),
-		C.CU256((*[1]byte)(C.getBalanceCallback)),
-		C.uint64_t((*[1]byte)(C.getNonceCallback)),
-		C.CBytes((*[1]byte)(C.getCodeCallback)),
-		C.CU256((*[1]byte)(C.getStorageCallback)),
+		C.get_balance_cb(),
+		C.get_nonce_cb(),
+		C.get_code_cb(),
+		C.get_storage_cb(),
 	)
 
 	if executor.executor == nil {
@@ -112,7 +94,6 @@ func NewRevmExecutor(cfg *config.Config, worldState *state.WorldState) (*RevmExe
 	return executor, nil
 }
 
-// Close frees the revm executor
 func (e *RevmExecutor) Close() {
 	if e.executor != nil {
 		C.revm_executor_free(e.executor)
@@ -120,106 +101,52 @@ func (e *RevmExecutor) Close() {
 	}
 }
 
-// ExecuteCall executes a smart contract call
-func (e *RevmExecutor) ExecuteCall(
-	caller common.Address,
-	contract common.Address,
-	input []byte,
-	gas uint64,
-	value *big.Int,
-) ([]byte, uint64, error) {
-
-	// Convert addresses
+func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte, gas uint64, value *big.Int) ([]byte, uint64, error) {
 	cCaller := addressToC(caller)
 	cContract := addressToC(contract)
 
-	// Convert input data
-	var cData C.CBytes
+	var cData C.CByteSlice
 	if len(input) > 0 {
 		cData.data = (*C.uint8_t)(unsafe.Pointer(&input[0]))
 		cData.len = C.size_t(len(input))
 	}
 
-	// Convert value
 	cValue := bigIntToC(value)
 
-	// Execute call
-	result := C.revm_execute_call(
-		e.executor,
-		cCaller,
-		cContract,
-		cData,
-		C.uint64_t(gas),
-		cValue,
-	)
-
-	return e.processResult(result)
+	res := C.revm_execute_call(e.executor, cCaller, cContract, cData, C.uint64_t(gas), cValue)
+	return e.processResult(res)
 }
 
-// DeployContract deploys a new smart contract
-func (e *RevmExecutor) DeployContract(
-	deployer common.Address,
-	bytecode []byte,
-	gas uint64,
-	value *big.Int,
-) (contractAddr common.Address, gasUsed uint64, err error) {
-
-	// Calculate contract address
+func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, gas uint64, value *big.Int) (common.Address, uint64, error) {
 	nonce, _ := e.worldState.GetNonce(deployer.Hex())
-	contractAddr = e.CalculateCreateAddress(deployer, nonce)
-
-	// Convert deployer address
 	cDeployer := addressToC(deployer)
 
-	// Convert bytecode
-	var cBytecode C.CBytes
+	// Calculate contract address via Rust helper
+	cAddr := C.revm_calculate_create_address(cDeployer, C.uint64_t(nonce))
+	contractAddr := cToAddress(cAddr)
+
+	var cCode C.CByteSlice
 	if len(bytecode) > 0 {
-		cBytecode.data = (*C.uint8_t)(unsafe.Pointer(&bytecode[0]))
-		cBytecode.len = C.size_t(len(bytecode))
+		cCode.data = (*C.uint8_t)(unsafe.Pointer(&bytecode[0]))
+		cCode.len = C.size_t(len(bytecode))
 	}
 
-	// Convert value
 	cValue := bigIntToC(value)
 
-	// Deploy contract
-	result := C.revm_deploy_contract(
-		e.executor,
-		cDeployer,
-		cBytecode,
-		C.uint64_t(gas),
-		cValue,
-	)
+	res := C.revm_deploy_contract(e.executor, cDeployer, cCode, C.uint64_t(gas), cValue)
 
-	returnData, gasUsed, err := e.processResult(result)
-	if err != nil {
-		return common.Address{}, gasUsed, err
-	}
-
-	// If deployment succeeded, return contract address
-	if len(returnData) > 0 {
-		// returnData contains deployed code address
-		return contractAddr, gasUsed, nil
-	}
-
-	return contractAddr, gasUsed, nil
+	_, gasUsed, err := e.processResult(res)
+	return contractAddr, gasUsed, err
 }
 
-// EstimateGas estimates gas needed for a transaction
-func (e *RevmExecutor) EstimateGas(
-	from common.Address,
-	to *common.Address,
-	data []byte,
-	value *big.Int,
-) (uint64, error) {
-
+func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data []byte, value *big.Int) (uint64, error) {
 	cFrom := addressToC(from)
 	var cTo C.CAddress
 	if to != nil {
 		cTo = addressToC(*to)
 	}
 
-	// Convert data
-	var cData C.CBytes
+	var cData C.CByteSlice
 	if len(data) > 0 {
 		cData.data = (*C.uint8_t)(unsafe.Pointer(&data[0]))
 		cData.len = C.size_t(len(data))
@@ -227,126 +154,88 @@ func (e *RevmExecutor) EstimateGas(
 
 	cValue := bigIntToC(value)
 
-	gasEstimate := C.revm_estimate_gas(
-		e.executor,
-		cFrom,
-		cTo,
-		cData,
-		cValue,
-	)
-
-	if gasEstimate == 0 {
+	gas := C.revm_estimate_gas(e.executor, cFrom, cTo, cData, cValue)
+	if gas == 0 {
 		return 0, fmt.Errorf("gas estimation failed")
 	}
-
-	return uint64(gasEstimate), nil
+	return uint64(gas), nil
 }
 
-// CalculateCreateAddress calculates the address for a new contract
-func (e *RevmExecutor) CalculateCreateAddress(deployer common.Address, nonce uint64) common.Address {
-	cDeployer := addressToC(deployer)
-	cAddr := C.revm_calculate_create_address(cDeployer, C.uint64_t(nonce))
-	return cToAddress(cAddr)
-}
-
-// GetCode returns the code at a given address
-func (e *RevmExecutor) GetCode(address common.Address) []byte {
-	code, _ := e.worldState.GetContractCode(address.Hex())
-	return code
-}
-
-// GetCodeHash returns the code hash at a given address
-func (e *RevmExecutor) GetCodeHash(address common.Address) common.Hash {
-	code := e.GetCode(address)
-	if len(code) == 0 {
-		return common.Hash{}
-	}
-	return common.BytesToHash(code) // Use Keccak256 in production
-}
-
-// GetStorageAt returns storage value at a specific key
-func (e *RevmExecutor) GetStorageAt(address common.Address, key common.Hash) common.Hash {
-	value, _ := e.worldState.GetContractStorage(address.Hex(), key.Hex())
-	return common.BytesToHash(value)
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-func (e *RevmExecutor) processResult(result C.CExecutionResult) ([]byte, uint64, error) {
-	gasUsed := uint64(result.gas_used)
-
-	// Extract return data
-	var returnData []byte
-	if result.return_data.len > 0 {
-		returnData = C.GoBytes(unsafe.Pointer(result.return_data.data), C.int(result.return_data.len))
-		// Free the data allocated by Rust
-		C.revm_free_bytes((*C.uint8_t)(result.return_data.data), result.return_data.len)
+// Helpers
+func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, error) {
+	gasUsed := uint64(res.gas_used)
+	var data []byte
+	if res.return_data.len > 0 {
+		data = C.GoBytes(unsafe.Pointer(res.return_data.data), C.int(res.return_data.len))
+		C.revm_free_bytes((*C.uint8_t)(res.return_data.data), res.return_data.len)
 	}
 
-	// Check for errors
-	if result.success == 0 {
-		var errMsg string
-		if result.error_message != nil {
-			errMsg = C.GoString(result.error_message)
-			C.revm_free_string((*C.char)(result.error_message))
+	if res.success == 0 {
+		var msg string
+		if res.error_message != nil {
+			msg = C.GoString(res.error_message)
+			C.revm_free_string((*C.char)(res.error_message))
 		} else {
-			errMsg = "execution failed"
+			msg = "execution failed"
 		}
-		return returnData, gasUsed, fmt.Errorf("%s", errMsg)
+		return data, gasUsed, fmt.Errorf("%s", msg)
 	}
-
-	return returnData, gasUsed, nil
+	return data, gasUsed, nil
 }
 
-// Convert Go address to C address
-func addressToC(addr common.Address) C.CAddress {
-	var cAddr C.CAddress
-	copy(cAddr.bytes[:], addr.Bytes())
-	return cAddr
+// === FIX: Manual casting loops to satisfy CGO types ===
+
+func addressToC(a common.Address) C.CAddress {
+	var c C.CAddress
+	bs := a.Bytes()
+	for i, b := range bs {
+		c.bytes[i] = C.uint8_t(b)
+	}
+	return c
 }
 
-// Convert C address to Go address
-func cToAddress(cAddr C.CAddress) common.Address {
-	return common.BytesToAddress(cAddr.bytes[:])
+func cToAddress(c C.CAddress) common.Address {
+	var bs [20]byte
+	for i, b := range c.bytes {
+		bs[i] = byte(b)
+	}
+	return common.BytesToAddress(bs[:])
 }
 
-// Convert big.Int to C U256
-func bigIntToC(value *big.Int) C.CU256 {
-	var cValue C.CU256
-	if value != nil {
-		valueBytes := value.Bytes()
-		// Pad to 32 bytes (big-endian)
-		start := 32 - len(valueBytes)
-		if start < 0 {
-			start = 0
+func bigIntToC(v *big.Int) C.CU256 {
+	var c C.CU256
+	if v != nil {
+		b := v.Bytes()
+		start := 32 - len(b)
+		if start >= 0 {
+			for i, byteVal := range b {
+				c.bytes[start+i] = C.uint8_t(byteVal)
+			}
 		}
-		copy(cValue.bytes[start:], valueBytes)
 	}
-	return cValue
+	return c
 }
 
-// Convert C U256 to big.Int
-func cToBigInt(cValue C.CU256) *big.Int {
-	return new(big.Int).SetBytes(cValue.bytes[:])
+func cToBigInt(c C.CU256) *big.Int {
+	var bs [32]byte
+	for i, b := range c.bytes {
+		bs[i] = byte(b)
+	}
+	return new(big.Int).SetBytes(bs[:])
 }
 
-// ============================================================================
-// State Callbacks (called by Rust)
-// ============================================================================
-
+// Global instance for C callbacks
 var globalExecutor *RevmExecutor
 
+// Callbacks exported to C
+//
 //export getBalanceCallback
 func getBalanceCallback(addr C.CAddress) C.CU256 {
 	if globalExecutor == nil {
 		return C.CU256{}
 	}
-
-	address := cToAddress(addr)
-	balance, _ := globalExecutor.worldState.GetBalance(address.Hex())
-	return bigIntToC(big.NewInt(balance))
+	val, _ := globalExecutor.worldState.GetBalance(cToAddress(addr).Hex())
+	return bigIntToC(big.NewInt(val))
 }
 
 //export getNonceCallback
@@ -354,27 +243,22 @@ func getNonceCallback(addr C.CAddress) C.uint64_t {
 	if globalExecutor == nil {
 		return 0
 	}
-
-	address := cToAddress(addr)
-	nonce, _ := globalExecutor.worldState.GetNonce(address.Hex())
-	return C.uint64_t(nonce)
+	val, _ := globalExecutor.worldState.GetNonce(cToAddress(addr).Hex())
+	return C.uint64_t(val)
 }
 
 //export getCodeCallback
-func getCodeCallback(addr C.CAddress) C.CBytes {
+func getCodeCallback(addr C.CAddress) C.CByteSlice {
 	if globalExecutor == nil {
-		return C.CBytes{}
+		return C.CByteSlice{}
 	}
-
-	address := cToAddress(addr)
-	code, _ := globalExecutor.worldState.GetContractCode(address.Hex())
-
-	var cBytes C.CBytes
+	code, _ := globalExecutor.worldState.GetContractCode(cToAddress(addr).Hex())
+	var c C.CByteSlice
 	if len(code) > 0 {
-		cBytes.data = (*C.uint8_t)(unsafe.Pointer(&code[0]))
-		cBytes.len = C.size_t(len(code))
+		c.data = (*C.uint8_t)(unsafe.Pointer(&code[0]))
+		c.len = C.size_t(len(code))
 	}
-	return cBytes
+	return c
 }
 
 //export getStorageCallback
@@ -383,14 +267,25 @@ func getStorageCallback(addr C.CAddress, key C.CU256) C.CU256 {
 		return C.CU256{}
 	}
 
-	address := cToAddress(addr)
-	keyHash := common.BytesToHash(key.bytes[:])
-	
-	value, _ := globalExecutor.worldState.GetContractStorage(address.Hex(), keyHash.Hex())
-	
-	var cValue C.CU256
-	if len(value) > 0 {
-		copy(cValue.bytes[:], value)
+	// Manual conversion for key hash
+	var kBytes [32]byte
+	for i, b := range key.bytes {
+		kBytes[i] = byte(b)
 	}
-	return cValue
+	kHash := common.BytesToHash(kBytes[:])
+
+	val, _ := globalExecutor.worldState.GetContractStorage(cToAddress(addr).Hex(), kHash.Hex())
+	var c C.CU256
+
+	// Manual conversion for value bytes
+	if len(val) > 0 {
+		// Pad to 32 bytes if necessary
+		start := 32 - len(val)
+		if start >= 0 {
+			for i, b := range val {
+				c.bytes[start+i] = C.uint8_t(b)
+			}
+		}
+	}
+	return c
 }

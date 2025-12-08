@@ -20,9 +20,10 @@ import (
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/block"
-	math "github.com/thrylos-labs/go-thrylos/core/math"
+	"github.com/thrylos-labs/go-thrylos/core/evm"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/transaction"
-	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 	"golang.org/x/crypto/blake2b"
 )
@@ -206,25 +207,32 @@ func (ws *WorldState) InitializeFromConfig() error {
 
 // NewWorldState creates a new world state for a shard with config-driven initialization
 func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg *config.Config, badgerStorage *storage.BadgerStorage) (*WorldState, error) {
-	// Use the provided storage instead of creating a new one
+	// 1. Initialize Storage & Managers
 	db := storage.NewDB(badgerStorage)
 	stateStorage := storage.NewStateStorage(badgerStorage)
 	acctMgr := account.NewAccountManager(stateStorage, shardID, totalShards)
 
+	// 2. Initialize Transaction Pool & Validator (Safe to do early)
+	txPool := transaction.NewPool(
+		shardID,
+		totalShards,
+		cfg.Consensus.MaxTxPerBlock,
+		cfg.Consensus.MinGasPrice,
+		acctMgr,
+	)
+
+	txValidator := transaction.NewValidator(shardID, totalShards, cfg)
+
+	// 3. PHASE ONE: Create WorldState struct WITHOUT Executor
+	// We leave txExecutor nil for a moment because it requires 'ws' itself
 	ws := &WorldState{
 		config:         cfg,
 		db:             db,
 		state:          stateStorage,
 		accountManager: acctMgr,
-		txPool: transaction.NewPool(
-			shardID,
-			totalShards,
-			cfg.Consensus.MaxTxPerBlock,
-			cfg.Consensus.MinGasPrice,
-			acctMgr,
-		),
-		txValidator:       transaction.NewValidator(shardID, totalShards, cfg),
-		txExecutor:        transaction.NewExecutor(shardID, totalShards),
+		txPool:         txPool,
+		txValidator:    txValidator,
+		// txExecutor:     nil, // Set in Phase Two
 		shardID:           shardID,
 		totalShards:       totalShards,
 		validators:        make(map[string]*core.Validator),
@@ -239,12 +247,30 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 		accountMu:         NewShardedMutex(),
 	}
 
-	// Initialize cross-shard manager
+	// 4. PHASE TWO: Initialize REVM & Executor
+
+	// Create REVM executor (needs 'ws' for state callbacks)
+	revmExec, err := evm.NewRevmExecutor(cfg, ws)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create revm executor: %v", err)
+	}
+
+	// Create Transaction Executor
+	// PASS shardID and totalShards as the first two arguments
+	ws.txExecutor = transaction.NewExecutor(
+		shardID,     // <--- Arg 1
+		totalShards, // <--- Arg 2
+		ws,          // Arg 3 (StateInterface)
+		txValidator, // Arg 4
+		cfg,         // Arg 5
+		revmExec,    // Arg 6
+	)
+
+	// 5. Initialize Cross-Shard Manager
 	ws.crossShardManager = NewCrossShardManager(ws)
 
-	// Try load state... (abbreviated for conciseness, logic remains same as original)
-	// In a real patch, we would keep the original logic.
-	// Assuming the user applies this fix to the existing file structure.
+	// ... (Keep your existing logic for loading state if present) ...
+	// Note: If you had logic here checking "if ws.height >= 0", keep it.
 
 	return ws, nil
 }
@@ -393,12 +419,12 @@ func (ws *WorldState) GetTransactionsByAddress(address string, limit int) ([]*co
 
 // ValidateTransaction validates a transaction using the transaction validator
 func (ws *WorldState) ValidateTransaction(tx *core.Transaction) error {
-	if tx.From != "" {
-		ws.accountMu.RLock(tx.From)
-		defer ws.accountMu.RUnlock(tx.From)
-	}
+	// FIX: Remove manual locking here to avoid deadlock.
+	// ws.GetAccount (called by validator) handles its own locking.
+	// Pass 'ws' instead of 'ws.accountManager' so it satisfies the StateReader interface
+	// (which now requires GetContractCode).
 
-	return ws.txValidator.ValidateTransaction(tx, ws.accountManager)
+	return ws.txValidator.ValidateTransaction(tx, ws)
 }
 
 // ExecuteTransaction executes a single transaction (helper method)
@@ -3029,15 +3055,6 @@ func (ws *WorldState) SetContractStorage(address, key string, value []byte) erro
 	return ws.db.Put(storageKey, value)
 }
 
-// GetNonce returns account nonce
-func (ws *WorldState) GetNonce(address string) (uint64, error) {
-	account, err := ws.GetAccount(address)
-	if err != nil {
-		return 0, nil
-	}
-	return account.Nonce, nil
-}
-
 // SetNonce sets account nonce
 func (ws *WorldState) SetNonce(address string, nonce uint64) error {
 	account, err := ws.GetAccount(address)
@@ -3045,5 +3062,7 @@ func (ws *WorldState) SetNonce(address string, nonce uint64) error {
 		return err
 	}
 	account.Nonce = nonce
-	return ws.UpdateAccount(account)
+
+	// FIX: Call the accountManager explicitly
+	return ws.accountManager.UpdateAccount(account)
 }

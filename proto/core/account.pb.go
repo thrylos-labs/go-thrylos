@@ -9,12 +9,11 @@
 package core
 
 import (
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
-
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -27,14 +26,14 @@ const (
 type TransactionType int32
 
 const (
-	TransactionType_TRANSFER                            TransactionType = 0
-	TransactionType_STAKE                               TransactionType = 1
-	TransactionType_UNSTAKE                             TransactionType = 2
-	TransactionType_DELEGATE                            TransactionType = 3
-	TransactionType_UNDELEGATE                          TransactionType = 4
-	TransactionType_CLAIM_REWARDS                       TransactionType = 5
-	TransactionType_EVM_CONTRACT_CALL                   TransactionType = 6
-	TransactionType_TransactionType_EVM_CONTRACT_DEPLOY TransactionType = 7
+	TransactionType_TRANSFER            TransactionType = 0
+	TransactionType_STAKE               TransactionType = 1
+	TransactionType_UNSTAKE             TransactionType = 2
+	TransactionType_DELEGATE            TransactionType = 3
+	TransactionType_UNDELEGATE          TransactionType = 4
+	TransactionType_CLAIM_REWARDS       TransactionType = 5
+	TransactionType_EVM_CONTRACT_CALL   TransactionType = 6
+	TransactionType_EVM_CONTRACT_DEPLOY TransactionType = 7
 )
 
 // Enum value maps for TransactionType.
@@ -47,17 +46,17 @@ var (
 		4: "UNDELEGATE",
 		5: "CLAIM_REWARDS",
 		6: "EVM_CONTRACT_CALL",
-		7: "TransactionType_EVM_CONTRACT_DEPLOY",
+		7: "EVM_CONTRACT_DEPLOY",
 	}
 	TransactionType_value = map[string]int32{
-		"TRANSFER":                            0,
-		"STAKE":                               1,
-		"UNSTAKE":                             2,
-		"DELEGATE":                            3,
-		"UNDELEGATE":                          4,
-		"CLAIM_REWARDS":                       5,
-		"EVM_CONTRACT_CALL":                   6,
-		"TransactionType_EVM_CONTRACT_DEPLOY": 7,
+		"TRANSFER":            0,
+		"STAKE":               1,
+		"UNSTAKE":             2,
+		"DELEGATE":            3,
+		"UNDELEGATE":          4,
+		"CLAIM_REWARDS":       5,
+		"EVM_CONTRACT_CALL":   6,
+		"EVM_CONTRACT_DEPLOY": 7,
 	}
 )
 
@@ -892,7 +891,7 @@ const file_proto_account_proto_rawDesc = "" +
 	"validators\x18\x01 \x03(\v2\x17.thrylos.core.ValidatorR\n" +
 	"validators\x12,\n" +
 	"\x12total_voting_power\x18\x02 \x01(\x03R\x10totalVotingPower\x12\x16\n" +
-	"\x06height\x18\x03 \x01(\x03R\x06height*\xa8\x01\n" +
+	"\x06height\x18\x03 \x01(\x03R\x06height*\x98\x01\n" +
 	"\x0fTransactionType\x12\f\n" +
 	"\bTRANSFER\x10\x00\x12\t\n" +
 	"\x05STAKE\x10\x01\x12\v\n" +
@@ -901,8 +900,8 @@ const file_proto_account_proto_rawDesc = "" +
 	"\n" +
 	"UNDELEGATE\x10\x04\x12\x11\n" +
 	"\rCLAIM_REWARDS\x10\x05\x12\x15\n" +
-	"\x11EVM_CONTRACT_CALL\x10\x06\x12'\n" +
-	"#TransactionType_EVM_CONTRACT_DEPLOY\x10\a*Z\n" +
+	"\x11EVM_CONTRACT_CALL\x10\x06\x12\x17\n" +
+	"\x13EVM_CONTRACT_DEPLOY\x10\a*Z\n" +
 	"\x18ValidatorTransactionType\x12\x14\n" +
 	"\x10CREATE_VALIDATOR\x10\x00\x12\x12\n" +
 	"\x0eEDIT_VALIDATOR\x10\x01\x12\x14\n" +

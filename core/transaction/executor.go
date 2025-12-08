@@ -18,9 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
-	"github.com/thrylos-labs/go-thrylos/core/evm"
 	"github.com/thrylos-labs/go-thrylos/core/math"
-	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
@@ -35,24 +33,30 @@ type ExecutionReceipt struct {
 
 // Executor handles transaction execution against account state
 type Executor struct {
-	worldState  *state.WorldState
+	shardID     account.ShardID // <--- ADD THIS
+	totalShards int             // <--- ADD THIS
+	worldState  StateInterface
 	validator   *Validator
 	config      *config.Config
-	evmExecutor *evm.RevmExecutor // NEW
+	evmExecutor EVMExecutorInterface
 }
 
 // NewExecutor creates a new transaction executor
 func NewExecutor(
-	worldState *state.WorldState,
+	shardID account.ShardID, // <--- ADD ARG
+	totalShards int, // <--- ADD ARG
+	worldState StateInterface,
 	validator *Validator,
 	cfg *config.Config,
-	evmExecutor *evm.RevmExecutor, // NEW
+	evmExecutor EVMExecutorInterface,
 ) *Executor {
 	return &Executor{
+		shardID:     shardID,     // <--- INIT
+		totalShards: totalShards, // <--- INIT
 		worldState:  worldState,
 		validator:   validator,
 		config:      cfg,
-		evmExecutor: evmExecutor, // NEW
+		evmExecutor: evmExecutor,
 	}
 }
 
@@ -62,15 +66,15 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 		return nil, fmt.Errorf("transaction cannot be nil")
 	}
 
-	// Create receipt
+	// Create initial receipt
 	receipt := &ExecutionReceipt{
 		TxHash:  tx.Hash,
 		GasUsed: tx.Gas,
 		Status:  0, // Default to failure
 	}
 
-	// Execute based on transaction type
 	var err error
+
 	switch tx.Type {
 	case core.TransactionType_TRANSFER:
 		err = e.executeTransfer(tx, accountManager)
@@ -84,25 +88,32 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 		err = e.executeUndelegate(tx, accountManager)
 	case core.TransactionType_CLAIM_REWARDS:
 		err = e.executeClaimRewards(tx, accountManager)
+
+	// EVM CASES
 	case core.TransactionType_EVM_CONTRACT_CALL:
+		// executeEVMCall returns (receipt, error), so we return immediately
 		return e.executeEVMCall(tx)
+
 	case core.TransactionType_EVM_CONTRACT_DEPLOY:
-		return e.executeEVMDeploy(tx)
+		// executeEVMDeploy returns ONLY error. We must assign it to err.
+		err = e.executeEVMDeploy(tx)
+
 	default:
 		err = fmt.Errorf("unknown transaction type: %v", tx.Type)
 	}
 
+	// Handle standard errors (Transfer, Stake, Deploy, etc.)
 	if err != nil {
 		receipt.Error = err.Error()
 		return receipt, err
 	}
 
-	// Mark as successful
+	// Mark as successful if no error
 	receipt.Status = 1
 	return receipt, nil
 }
 
-func (e *Executor) executeEVMCall(tx *core.Transaction) error {
+func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, error) {
 	caller := common.HexToAddress(tx.From)
 	contract := common.HexToAddress(tx.To)
 
@@ -116,7 +127,7 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) error {
 	)
 
 	if err != nil {
-		return fmt.Errorf("EVM call failed: %v", err)
+		return nil, fmt.Errorf("EVM call failed: %v", err)
 	}
 
 	// Deduct gas cost
@@ -132,7 +143,11 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) error {
 	log.Printf("✅ EVM call executed: gas used %d, return data: %d bytes",
 		gasUsed, len(returnData))
 
-	return nil
+	return &ExecutionReceipt{
+		TxHash:  tx.Hash,
+		Status:  1,
+		GasUsed: int64(gasUsed),
+	}, nil
 }
 
 func (e *Executor) executeEVMDeploy(tx *core.Transaction) error {

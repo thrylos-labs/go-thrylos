@@ -42,7 +42,7 @@ enum TransactionType {
   UNDELEGATE = 4;
   CLAIM_REWARDS = 5;
   EVM_CONTRACT_CALL = 6;
-  TransactionType_EVM_CONTRACT_DEPLOY = 7; 
+ EVM_CONTRACT_DEPLOY = 7;  
 }
 
 message Block {

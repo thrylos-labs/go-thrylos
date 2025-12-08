@@ -296,3 +296,13 @@ func (db *DB) GetBlockByHeight(height int64) (*core.Block, error) {
 
 	return &block, nil
 }
+
+// Get provides direct access to raw key-value storage (needed for contract code/storage)
+func (db *DB) Get(key []byte) ([]byte, error) {
+	return db.storage.Get(key)
+}
+
+// Put provides direct access to write raw key-value storage
+func (db *DB) Put(key, value []byte) error {
+	return db.storage.Set(key, value)
+}

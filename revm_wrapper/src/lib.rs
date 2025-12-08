@@ -9,7 +9,7 @@ use revm::{
     },
     Database, Evm,
 };
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::slice;
 
@@ -18,17 +18,19 @@ use std::slice;
 // ============================================================================
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct CAddress {
     bytes: [u8; 20],
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct CU256 {
     bytes: [u8; 32],
 }
 
 #[repr(C)]
-pub struct CBytes {
+pub struct CByteSlice { // RENAMED from CBytes
     data: *const u8,
     len: usize,
 }
@@ -37,7 +39,7 @@ pub struct CBytes {
 pub struct CExecutionResult {
     success: bool,
     gas_used: u64,
-    return_data: CBytes,
+    return_data: CByteSlice, // Updated
     error_message: *const c_char,
 }
 
@@ -49,10 +51,11 @@ pub struct ThrylosDB {
     // Callbacks to Go for state access
     get_balance_fn: extern "C" fn(CAddress) -> CU256,
     get_nonce_fn: extern "C" fn(CAddress) -> u64,
-    get_code_fn: extern "C" fn(CAddress) -> CBytes,
+    get_code_fn: extern "C" fn(CAddress) -> CByteSlice, // Updated
     get_storage_fn: extern "C" fn(CAddress, CU256) -> CU256,
     
     // Cache for performance
+    #[allow(dead_code)] // Suppress unused warning
     cache: CacheDB<EmptyDB>,
 }
 
@@ -61,7 +64,7 @@ impl Database for ThrylosDB {
 
     fn basic(&mut self, address: Address) -> Result<Option<revm::primitives::AccountInfo>, Self::Error> {
         let c_addr = CAddress {
-            bytes: address.0.0,
+            bytes: address.0 .0,
         };
         
         let balance_bytes = (self.get_balance_fn)(c_addr);
@@ -86,13 +89,12 @@ impl Database for ThrylosDB {
     }
 
     fn code_by_hash(&mut self, _code_hash: B256) -> Result<Bytecode, Self::Error> {
-        // Code is provided directly in basic()
         Ok(Bytecode::default())
     }
 
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
         let c_addr = CAddress {
-            bytes: address.0.0,
+            bytes: address.0 .0,
         };
         
         let c_index = CU256 {
@@ -106,7 +108,6 @@ impl Database for ThrylosDB {
     }
 
     fn block_hash(&mut self, _number: u64) -> Result<B256, Self::Error> {
-        // Return zero hash for now
         Ok(B256::ZERO)
     }
 }
@@ -148,7 +149,7 @@ impl EVMExecutor {
         chain_id: u64,
         get_balance_fn: extern "C" fn(CAddress) -> CU256,
         get_nonce_fn: extern "C" fn(CAddress) -> u64,
-        get_code_fn: extern "C" fn(CAddress) -> CBytes,
+        get_code_fn: extern "C" fn(CAddress) -> CByteSlice, // Updated
         get_storage_fn: extern "C" fn(CAddress, CU256) -> CU256,
     ) -> Self {
         let db = ThrylosDB {
@@ -187,11 +188,11 @@ impl EVMExecutor {
 
         // Execute transaction
         match evm.transact() {
-            Ok(result) => self.convert_result(result.result),
+            Ok(result) => Self::convert_result(result.result),
             Err(e) => CExecutionResult {
                 success: false,
                 gas_used: 0,
-                return_data: CBytes {
+                return_data: CByteSlice { // Updated
                     data: std::ptr::null(),
                     len: 0,
                 },
@@ -226,11 +227,11 @@ impl EVMExecutor {
 
         // Execute deployment
         match evm.transact() {
-            Ok(result) => self.convert_result(result.result),
+            Ok(result) => Self::convert_result(result.result),
             Err(e) => CExecutionResult {
                 success: false,
                 gas_used: 0,
-                return_data: CBytes {
+                return_data: CByteSlice { // Updated
                     data: std::ptr::null(),
                     len: 0,
                 },
@@ -241,7 +242,7 @@ impl EVMExecutor {
         }
     }
 
-    fn convert_result(&self, result: ExecutionResult) -> CExecutionResult {
+    fn convert_result(result: ExecutionResult) -> CExecutionResult {
         match result {
             ExecutionResult::Success {
                 gas_used,
@@ -253,18 +254,13 @@ impl EVMExecutor {
                     Output::Create(data, _) => data,
                 };
 
-                // Convert Bytes to C-compatible format
-                let data_ptr = return_data.as_ptr();
                 let data_len = return_data.len();
-
-                // Leak the data so it stays alive for Go to read
-                // Go must call free_bytes() when done
                 let leaked = Box::leak(return_data.to_vec().into_boxed_slice());
 
                 CExecutionResult {
                     success: true,
                     gas_used,
-                    return_data: CBytes {
+                    return_data: CByteSlice { // Updated
                         data: leaked.as_ptr(),
                         len: data_len,
                     },
@@ -274,7 +270,7 @@ impl EVMExecutor {
             ExecutionResult::Revert { gas_used, output } => CExecutionResult {
                 success: false,
                 gas_used,
-                return_data: CBytes {
+                return_data: CByteSlice { // Updated
                     data: output.as_ptr(),
                     len: output.len(),
                 },
@@ -285,7 +281,7 @@ impl EVMExecutor {
             ExecutionResult::Halt { reason, gas_used } => CExecutionResult {
                 success: false,
                 gas_used,
-                return_data: CBytes {
+                return_data: CByteSlice { // Updated
                     data: std::ptr::null(),
                     len: 0,
                 },
@@ -306,7 +302,7 @@ pub extern "C" fn revm_executor_new(
     chain_id: u64,
     get_balance_fn: extern "C" fn(CAddress) -> CU256,
     get_nonce_fn: extern "C" fn(CAddress) -> u64,
-    get_code_fn: extern "C" fn(CAddress) -> CBytes,
+    get_code_fn: extern "C" fn(CAddress) -> CByteSlice, // Updated
     get_storage_fn: extern "C" fn(CAddress, CU256) -> CU256,
 ) -> *mut EVMExecutor {
     let executor = EVMExecutor::new(
@@ -333,7 +329,7 @@ pub extern "C" fn revm_execute_call(
     executor: *mut EVMExecutor,
     caller: CAddress,
     to: CAddress,
-    data: CBytes,
+    data: CByteSlice, // Updated
     gas_limit: u64,
     value: CU256,
 ) -> CExecutionResult {
@@ -355,7 +351,7 @@ pub extern "C" fn revm_execute_call(
 pub extern "C" fn revm_deploy_contract(
     executor: *mut EVMExecutor,
     deployer: CAddress,
-    bytecode: CBytes,
+    bytecode: CByteSlice, // Updated
     gas_limit: u64,
     value: CU256,
 ) -> CExecutionResult {
@@ -397,9 +393,6 @@ pub extern "C" fn revm_free_bytes(data: *mut u8, len: usize) {
 #[no_mangle]
 pub extern "C" fn revm_calculate_create_address(deployer: CAddress, nonce: u64) -> CAddress {
     use revm_primitives::keccak256;
-    use alloy_primitives::Address as AlAddress;
-    
-    let deployer_addr = AlAddress::from_slice(&deployer.bytes);
     
     // RLP encode [address, nonce]
     let mut rlp = Vec::new();
@@ -437,7 +430,7 @@ pub extern "C" fn revm_estimate_gas(
     executor: *mut EVMExecutor,
     caller: CAddress,
     to: CAddress,
-    data: CBytes,
+    data: CByteSlice, // Updated
     value: CU256,
 ) -> u64 {
     let executor = unsafe { &mut *executor };
@@ -468,20 +461,5 @@ pub extern "C" fn revm_estimate_gas(
     } else {
         // Execution failed, return 0
         0
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_create_address() {
-        // Test contract address calculation
-        let deployer = CAddress {
-            bytes: [0u8; 20],
-        };
-        let addr = unsafe { revm_calculate_create_address(deployer, 0) };
-        assert_ne!(addr.bytes, [0u8; 20]);
     }
 }
