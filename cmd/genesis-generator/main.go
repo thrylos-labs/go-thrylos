@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/big" // ✅ Added math/big
 	"os"
 	"path/filepath"
 
@@ -29,11 +30,13 @@ func main() {
 	fmt.Printf("🔒 Generating %d secure validator keys...\n", *numValidators)
 
 	var genesisAccounts []config.GenesisAccount
-	var totalAllocated int64
+
+	// FIX: Use big.Int for total tracking
+	totalAllocated := big.NewInt(0)
 
 	// Amount to allocate per bootnode (e.g., 5M tokens)
-	// BaseUnit is 1e9, so 5,000,000 * 1e9
-	stakeAmount := int64(5000000) * config.BaseUnit
+	// FIX: Use BigInt math: 5,000,000 * BaseUnit (10^18)
+	stakeAmount := new(big.Int).Mul(big.NewInt(5_000_000), config.BaseUnit)
 
 	for i := 1; i <= *numValidators; i++ {
 		// 1. Generate secure random private key
@@ -49,16 +52,13 @@ func main() {
 			log.Fatalf("Failed to generate address: %v", err)
 		}
 
-		// 3. Save Private Key to disk (Hex encoded)
-		// Format: validator_N.key
+		// 3. Save Private Key to disk
 		keyFileName := fmt.Sprintf("validator_%d.key", i)
 		keyPath := filepath.Join(*outputDir, keyFileName)
 
-		// Get hex string of private key
 		privKeyBytes := privKey.Bytes()
 		privKeyHex := hex.EncodeToString(privKeyBytes)
 
-		// Write with strict permissions (0600)
 		if err := os.WriteFile(keyPath, []byte(privKeyHex), 0600); err != nil {
 			log.Fatalf("Failed to write key file %s: %v", keyPath, err)
 		}
@@ -67,29 +67,38 @@ func main() {
 
 		// 4. Add to Genesis Account list
 		genesisAccounts = append(genesisAccounts, config.GenesisAccount{
-			Address:      address,
-			Balance:      stakeAmount,
+			Address: address,
+
+			// FIX: Balance is now a string (BigInt string)
+			Balance: stakeAmount.String(),
+
 			Purpose:      fmt.Sprintf("Bootnode %d Stake", i),
 			Locked:       false,
 			UnlockBlocks: 0,
 		})
 
-		totalAllocated += stakeAmount
+		// FIX: Use BigInt Add
+		totalAllocated.Add(totalAllocated, stakeAmount)
 	}
 
 	// Add a foundation/reserve account (remainder of genesis supply)
-	// For this example, we just generate a random cold wallet key too,
-	// typically you'd put a specific hardware wallet address here manually later.
 	foundationKey, _ := crypto.NewPrivateKey()
 	foundationAddr, _ := account.GenerateAddress(foundationKey.PublicKey())
 	foundationPath := filepath.Join(*outputDir, "foundation_cold.key")
 	os.WriteFile(foundationPath, []byte(hex.EncodeToString(foundationKey.Bytes())), 0600)
 
-	foundationAmount := config.GenesisSupply*config.BaseUnit - totalAllocated
-	if foundationAmount > 0 {
+	// Calculate remainder: GenesisSupply - TotalAllocated
+	// Note: config.GenesisSupply is ALREADY scaled to 1e18 in config.go
+	foundationAmount := new(big.Int).Sub(config.GenesisSupply, totalAllocated)
+
+	// Check if positive
+	if foundationAmount.Sign() > 0 {
 		genesisAccounts = append(genesisAccounts, config.GenesisAccount{
-			Address:      foundationAddr,
-			Balance:      foundationAmount,
+			Address: foundationAddr,
+
+			// FIX: Use string conversion
+			Balance: foundationAmount.String(),
+
 			Purpose:      "Foundation Reserve (Cold Storage)",
 			Locked:       true,
 			UnlockBlocks: 1000000,
@@ -99,7 +108,9 @@ func main() {
 
 	// 5. Construct Genesis Allocation
 	genesis := config.GenesisAllocation{
-		TotalGenesis: config.GenesisSupply * config.BaseUnit, // Ensure units match
+		// FIX: Use string conversion.
+		// Note: config.GenesisSupply is already *BaseUnit, do NOT multiply again.
+		TotalGenesis: config.GenesisSupply.String(),
 		Accounts:     genesisAccounts,
 	}
 
@@ -109,7 +120,6 @@ func main() {
 		log.Fatalf("Failed to marshal genesis JSON: %v", err)
 	}
 
-	// Ensure directory for genesis file exists
 	genesisDir := filepath.Dir(*genesisPath)
 	if err := os.MkdirAll(genesisDir, 0755); err != nil {
 		log.Fatalf("Failed to create config directory: %v", err)
@@ -122,5 +132,4 @@ func main() {
 	fmt.Println("\n🎉 Generation Complete!")
 	fmt.Printf("📄 Genesis file written to: %s\n", *genesisPath)
 	fmt.Printf("🔑 Private keys saved in:   %s/\n", *outputDir)
-	fmt.Println("⚠️  IMPORTANT: Back up the 'keys' directory securely. These keys are irrecoverable if lost.")
 }

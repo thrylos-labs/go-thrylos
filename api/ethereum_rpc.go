@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/thrylos-labs/go-thrylos/core/chain"
 	"github.com/thrylos-labs/go-thrylos/core/evm"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
@@ -239,16 +240,22 @@ func (h *EthereumRPCHandler) EstimateGas(w http.ResponseWriter, r *http.Request)
 // ===== Gas Price =====
 
 func (h *EthereumRPCHandler) GasPrice(w http.ResponseWriter, r *http.Request) {
-	// FIX: Use config value directly if method is missing
-	gasPrice := h.blockchain.GetConfig().Economics.BaseGasPrice
-	response := (*hexutil.Big)(big.NewInt(gasPrice))
+	// Get the string value from config
+	gasPriceStr := h.blockchain.GetConfig().Economics.BaseGasPrice
+
+	// FIX: Parse string to *big.Int using your helper
+	gasPriceBig := math.ParseBigInt(gasPriceStr)
+
+	// Cast to hexutil.Big for the response
+	response := (*hexutil.Big)(gasPriceBig)
 	respondJSON(w, response)
 }
 
 func (h *EthereumRPCHandler) MaxPriorityFeePerGas(w http.ResponseWriter, r *http.Request) {
-	// FIX: Hardcode sensible default (1 gwei) if method missing
-	tip := int64(1000000000)
-	response := (*hexutil.Big)(big.NewInt(tip))
+	// If you want a hardcoded 1 Gwei tip:
+	tip := big.NewInt(1000000000)
+
+	response := (*hexutil.Big)(tip)
 	respondJSON(w, response)
 }
 
@@ -367,28 +374,30 @@ func (h *EthereumRPCHandler) convertEthTxToThrylosTx(ethTx *types.Transaction) (
 		txType = core.TransactionType_EVM_CONTRACT_CALL
 	}
 
-	// NOTE: Thrylos uses int64 for Amount/GasPrice in core.Transaction
-	// Ensure you handle potential overflows if Eth values > MaxInt64
-
 	thrylosTx := &core.Transaction{
-		From:      sender.Hex(),
-		To:        "",
-		Amount:    ethTx.Value().Int64(),
-		Gas:       int64(ethTx.Gas()),
-		GasPrice:  ethTx.GasPrice().Int64(),
+		From: sender.Hex(),
+		To:   "",
+
+		// ✅ FIX: Use .String() to convert BigInt to string
+		Amount: ethTx.Value().String(),
+
+		Gas: int64(ethTx.Gas()), // Gas limit fits in int64
+
+		// ✅ FIX: Use .String() to convert BigInt to string
+		GasPrice: ethTx.GasPrice().String(),
+
 		Nonce:     ethTx.Nonce(),
 		Data:      ethTx.Data(),
 		Type:      txType,
 		Timestamp: time.Now().Unix(),
 	}
 
-	// IMPORTANT: Generate ID/Hash for Thrylos system
-	// thrylosTx.Id = ...
-	// thrylosTx.Hash = ...
-
 	if ethTx.To() != nil {
 		thrylosTx.To = ethTx.To().Hex()
 	}
+
+	// Recommended: Calculate the hash immediately if possible, or let AddTransaction handle it
+	// thrylosTx.Hash = ...
 
 	return thrylosTx, nil
 }
@@ -428,17 +437,23 @@ func (h *EthereumRPCHandler) convertToEthBlock(block *core.Block, fullTx bool) m
 
 func (h *EthereumRPCHandler) convertToEthTx(tx *core.Transaction) map[string]interface{} {
 	return map[string]interface{}{
-		"hash":             tx.Hash,
-		"nonce":            hexutil.Uint64(tx.Nonce),
-		"from":             tx.From,
-		"to":               tx.To,
-		"value":            (*hexutil.Big)(big.NewInt(tx.Amount)),
-		"gas":              hexutil.Uint64(tx.Gas),
-		"gasPrice":         (*hexutil.Big)(big.NewInt(tx.GasPrice)),
+		"hash":  tx.Hash,
+		"nonce": hexutil.Uint64(tx.Nonce),
+		"from":  tx.From,
+		"to":    tx.To,
+
+		// ✅ FIX: Parse string -> BigInt -> HexUtil
+		"value": (*hexutil.Big)(math.ParseBigInt(tx.Amount)),
+
+		"gas": hexutil.Uint64(tx.Gas),
+
+		// ✅ FIX: Parse string -> BigInt -> HexUtil
+		"gasPrice": (*hexutil.Big)(math.ParseBigInt(tx.GasPrice)),
+
 		"input":            hexutil.Bytes(tx.Data),
-		"v":                "0x1c", // Dummy V
-		"r":                "0x0",  // Dummy R
-		"s":                "0x0",  // Dummy S
+		"v":                "0x1c",
+		"r":                "0x0",
+		"s":                "0x0",
 		"transactionIndex": hexutil.Uint64(0),
 		"blockHash":        "",
 		"blockNumber":      hexutil.Uint64(0),

@@ -93,7 +93,7 @@ type NodeConfig struct {
 	DataDir           string
 	CrossShardEnabled bool
 	GenesisAccount    string
-	GenesisSupply     int64
+	GenesisSupply     string
 	GenesisValidators []*core.Validator
 	EnableP2P         bool
 	P2PListenPort     int

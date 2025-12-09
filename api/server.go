@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"sort"
@@ -28,6 +29,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/chain"
 	"github.com/thrylos-labs/go-thrylos/core/evm"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
@@ -84,10 +86,10 @@ type TransactionResponse struct {
 	Hash      string `json:"hash"`
 	From      string `json:"from"`
 	To        string `json:"to"`
-	Amount    int64  `json:"amount"`
+	Amount    string `json:"amount"`
 	Nonce     uint64 `json:"nonce"`
 	Gas       int64  `json:"gas"`
-	GasPrice  int64  `json:"gas_price"`
+	GasPrice  string `json:"gas_price"`
 	Timestamp int64  `json:"timestamp"`
 	Status    string `json:"status"`
 	Signature string `json:"signature,omitempty"`
@@ -479,7 +481,6 @@ func (s *Server) estimateGas(w http.ResponseWriter, r *http.Request) {
 }
 
 // UPDATED Account endpoints for account-based system
-
 func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	address := vars["address"]
@@ -490,12 +491,14 @@ func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get additional staking information using existing methods
+	// Get additional staking information
 	stakedAmount := account.StakedAmount
 	rewards := account.Rewards
 	delegations := account.DelegatedTo
+
+	// FIX: Update type to map[string]string
 	if delegations == nil {
-		delegations = make(map[string]int64)
+		delegations = make(map[string]string)
 	}
 
 	response := map[string]interface{}{
@@ -522,14 +525,24 @@ func (s *Server) getAccountBalance(w http.ResponseWriter, r *http.Request) {
 
 	nonce, _ := s.worldState.GetNonce(address)
 
-	// Convert to THRYLOS (1 THRYLOS = 1e9 nano based on your BaseUnit)
-	const NANO_PER_THRYLOS = 1000000000
-	balanceThrylos := float64(balance) / NANO_PER_THRYLOS
+	// FIX: Use big.Float for safe conversion
+	// 1. Create a big.Float from the balance
+	fBalance := new(big.Float).SetInt(balance)
+
+	// 2. Define the Base Unit Divisor (10^18)
+	// We use SetString to ensure precision for large numbers
+	fDivisor := new(big.Float).SetInt(config.BaseUnit)
+
+	// 3. Perform Division
+	fResult := new(big.Float).Quo(fBalance, fDivisor)
+
+	// 4. Extract float64 for the JSON response
+	balanceThrylos, _ := fResult.Float64()
 
 	response := map[string]interface{}{
 		"address":        address,
-		"balance":        balance,
-		"balanceThrylos": balanceThrylos,
+		"balance":        balance.String(), // Send string to preserve full precision
+		"balanceThrylos": balanceThrylos,   // Approximate human-readable amount
 		"nonce":          nonce,
 	}
 
@@ -693,18 +706,16 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 }
 
 // Development endpoint to fund addresses (for testing)
-// SECURITY: Only enabled in development/testnet environments
 func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
-	// CRITICAL: Only allow in development/testnet
-	// Ethereum/Solana approach: use environment checks, not API keys
 	if !isDevEnvironment() {
 		s.writeError(w, "Funding endpoint not available in production", http.StatusForbidden)
 		return
 	}
 
+	// Change request to accept string to handle 18 decimals safeley
 	var req struct {
 		Address string `json:"address"`
-		Amount  int64  `json:"amount"`
+		Amount  string `json:"amount"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -712,15 +723,11 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Address == "" || req.Amount <= 0 {
-		s.writeError(w, "Invalid address or amount", http.StatusBadRequest)
-		return
-	}
+	// Parse Amount string to BigInt
+	amountBig := math.ParseBigInt(req.Amount)
 
-	// Additional safety: Limit funding amount
-	const MAX_FUND_AMOUNT = 1000 * 1000000000 // 1000 THRYLOS max per request
-	if req.Amount > MAX_FUND_AMOUNT {
-		s.writeError(w, fmt.Sprintf("Funding amount exceeds maximum of %d nano", MAX_FUND_AMOUNT), http.StatusBadRequest)
+	if req.Address == "" || amountBig.Sign() <= 0 {
+		s.writeError(w, "Invalid address or amount", http.StatusBadRequest)
 		return
 	}
 
@@ -730,35 +737,42 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		// Account doesn't exist, create a new one
 		account = &core.Account{
 			Address:      req.Address,
-			Balance:      req.Amount, // Set initial balance
+			Balance:      math.BigIntToString(amountBig), // ✅ Fix: Store as string
 			Nonce:        0,
-			StakedAmount: 0,
-			DelegatedTo:  make(map[string]int64),
-			Rewards:      0,
+			StakedAmount: "0",                     // ✅ Fix: Use string "0"
+			DelegatedTo:  make(map[string]string), // ✅ Fix: Use string map
+			Rewards:      "0",                     // ✅ Fix: Use string "0"
 		}
 	} else {
 		// Account exists, add funding to existing balance
-		account.Balance += req.Amount
+		// ✅ Fix: Use BigInt math instead of +=
+		currentBal := math.ParseBigInt(account.Balance)
+		newBal := new(big.Int).Add(currentBal, amountBig)
+		account.Balance = math.BigIntToString(newBal)
 	}
 
-	// Use the proper WorldState method to update with storage persistence
+	// Update storage
 	if err := s.worldState.UpdateAccountWithStorage(account); err != nil {
 		s.writeError(w, fmt.Sprintf("Failed to create/update account: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Convert to THRYLOS for display
-	const NANO_PER_THRYLOS = 1000000000
-	balanceThrylos := float64(account.Balance) / NANO_PER_THRYLOS
-	amountThrylos := float64(req.Amount) / NANO_PER_THRYLOS
+	// Convert to human-readable THRYLOS for display (Balance / 10^18)
+	// Use big.Float for display precision
+	fBalance := new(big.Float).SetInt(math.ParseBigInt(account.Balance))
+	fAmount := new(big.Float).SetInt(amountBig)
+	fBase := new(big.Float).SetInt(config.BaseUnit) // 10^18
+
+	balanceDisplay, _ := new(big.Float).Quo(fBalance, fBase).Float64()
+	amountDisplay, _ := new(big.Float).Quo(fAmount, fBase).Float64()
 
 	response := map[string]interface{}{
 		"message":         "Account funded successfully",
 		"address":         req.Address,
-		"amount_added":    req.Amount,
-		"amount_thrylos":  amountThrylos,
-		"new_balance":     account.Balance,
-		"balance_thrylos": balanceThrylos,
+		"amount_added":    req.Amount,      // Raw string
+		"amount_thrylos":  amountDisplay,   // Human readable
+		"new_balance":     account.Balance, // Raw string
+		"balance_thrylos": balanceDisplay,  // Human readable
 		"nonce":           account.Nonce,
 	}
 
@@ -1150,10 +1164,10 @@ type StakingValidatorResponse struct {
 	Description    string  `json:"description"` // Add this field
 	Website        string  `json:"website"`     // Add this field
 	Commission     float64 `json:"commission"`
-	TotalStaked    int64   `json:"totalStaked"`
+	TotalStaked    string  `json:"totalStaked"`
 	Uptime         float64 `json:"uptime"`
 	Status         string  `json:"status"`
-	SelfStake      int64   `json:"selfStake"`
+	SelfStake      string  `json:"selfStake"`
 	DelegatorCount int     `json:"delegatorCount"`
 	BlocksProposed int64   `json:"blocksProposed"`
 	BlocksMissed   int64   `json:"blocksMissed"`
@@ -1163,7 +1177,7 @@ type StakingValidatorResponse struct {
 
 type DelegationHistoryItem struct {
 	Validator string `json:"validator"`
-	Amount    int64  `json:"amount"`
+	Amount    string `json:"amount"`
 	Timestamp int64  `json:"timestamp"`
 	Status    string `json:"status"`
 	TxHash    string `json:"tx_hash"`
@@ -1519,36 +1533,58 @@ func (s *Server) getDetailedRewards(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate estimated rewards based on current delegations
-	estimatedDaily := float64(0)
-	estimatedMonthly := float64(0)
-	estimatedAnnual := float64(0)
+	// Use big.Float for precise APY calculations with 18 decimals
+	estimatedDaily := big.NewFloat(0)
+	estimatedMonthly := big.NewFloat(0)
+	estimatedAnnual := big.NewFloat(0)
 
-	baseAPY := 8.5 / 100 // 8.5% annual yield
+	baseAPY := 0.085 // 8.5%
 
 	if account.DelegatedTo != nil {
-		for validatorAddr, stakedAmount := range account.DelegatedTo {
+		for validatorAddr, stakedAmountStr := range account.DelegatedTo {
 			validator, err := s.worldState.GetValidator(validatorAddr)
 			if err != nil {
 				continue
 			}
 
-			// Calculate rewards considering validator commission
-			netAPY := baseAPY * (1 - validator.Commission/100)
-			annualReward := float64(stakedAmount) * netAPY
+			// 1. Parse staked amount string to BigFloat
+			stakeInt, ok := new(big.Int).SetString(stakedAmountStr, 10)
+			if !ok {
+				continue
+			}
+			stakeFloat := new(big.Float).SetInt(stakeInt)
 
-			estimatedAnnual += annualReward
-			estimatedMonthly += annualReward / 12
-			estimatedDaily += annualReward / 365
+			// 2. Calculate Net APY
+			// netAPY = baseAPY * (1 - commission/100)
+			commissionFactor := 1.0 - (validator.Commission / 100.0)
+			netAPY := baseAPY * commissionFactor
+
+			// 3. Calculate Annual Reward: stake * netAPY
+			annualReward := new(big.Float).Mul(stakeFloat, big.NewFloat(netAPY))
+
+			// 4. Calculate intervals
+			dailyReward := new(big.Float).Quo(annualReward, big.NewFloat(365))
+			monthlyReward := new(big.Float).Quo(annualReward, big.NewFloat(12))
+
+			// 5. Accumulate
+			estimatedAnnual.Add(estimatedAnnual, annualReward)
+			estimatedMonthly.Add(estimatedMonthly, monthlyReward)
+			estimatedDaily.Add(estimatedDaily, dailyReward)
 		}
 	}
 
+	// Convert BigFloats to BigInt strings for the response (to avoid overflow)
+	// We truncate decimals for the response by converting Float -> Int
+	estDailyInt, _ := estimatedDaily.Int(nil)
+	estMonthlyInt, _ := estimatedMonthly.Int(nil)
+	estAnnualInt, _ := estimatedAnnual.Int(nil)
+
 	response := map[string]interface{}{
 		"address":           address,
-		"current_rewards":   account.Rewards,
-		"estimated_daily":   int64(estimatedDaily),
-		"estimated_monthly": int64(estimatedMonthly),
-		"estimated_annual":  int64(estimatedAnnual),
+		"current_rewards":   account.Rewards, // Already a string
+		"estimated_daily":   estDailyInt.String(),
+		"estimated_monthly": estMonthlyInt.String(),
+		"estimated_annual":  estAnnualInt.String(),
 		"delegations":       account.DelegatedTo,
 		"staked_amount":     account.StakedAmount,
 	}
@@ -1727,10 +1763,13 @@ type ValidatorActivityItem struct {
 	Details   string `json:"details"`   // Human readable description
 	Time      string `json:"time"`      // Human readable time
 	Timestamp int64  `json:"timestamp"` // Unix timestamp
-	Reward    *int64 `json:"reward"`    // Reward amount in nano (nullable)
-	Amount    *int64 `json:"amount"`    // Transaction amount in nano (nullable)
-	TxHash    string `json:"tx_hash"`   // Transaction hash if applicable
-	From      string `json:"from"`      // Address for delegation events
+
+	// ✅ Change this from *int64 to *string
+	Reward *string `json:"reward"`
+
+	Amount *string `json:"amount"`  // Transaction amount in nano (nullable)
+	TxHash string  `json:"tx_hash"` // Transaction hash if applicable
+	From   string  `json:"from"`    // Address for delegation events
 }
 
 type ValidatorActivityResponse struct {
@@ -1801,12 +1840,12 @@ func (s *Server) getValidatorActivity(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getBlockValidationActivity(address string, validator *core.Validator) []ValidatorActivityItem {
 	var activity []ValidatorActivityItem
 
-	// Use actual block reward from config: 0.02 THRYLOS = 20,000,000 nano
-	const BASE_BLOCK_REWARD int64 = 20000000 // BlockReward from config.go
+	// 1. Get block reward from config (It is now a *big.Int)
+	// Convert to string to match the struct definition
+	rewardStr := math.BigIntToString(config.BlockReward)
 
 	// Generate recent block validation events based on blocks proposed
-	// This is a simplified version - in a real system you'd query actual block history
-	blocksToShow := int64(5) // Show last 5 blocks
+	blocksToShow := int64(5)
 	if validator.BlocksProposed < blocksToShow {
 		blocksToShow = validator.BlocksProposed
 	}
@@ -1815,16 +1854,22 @@ func (s *Server) getBlockValidationActivity(address string, validator *core.Vali
 
 	for i := int64(0); i < blocksToShow; i++ {
 		blockNumber := validator.BlocksProposed - i
-		timeAgo := currentTime - (i * 3) // 3 second block time from config
+		timeAgo := currentTime - (i * 3)
 
-		reward := BASE_BLOCK_REWARD // Now int64, matches the struct field type
+		// 2. Create a local copy of the string for this iteration
+		// (Needed to take a valid pointer address &currentReward)
+		currentReward := rewardStr
+
 		activity = append(activity, ValidatorActivityItem{
 			Type:      "block",
 			Details:   fmt.Sprintf("Block #%d validated", blockNumber),
 			Time:      formatTimeAgo(timeAgo),
 			Timestamp: timeAgo,
-			Reward:    &reward,
-			TxHash:    fmt.Sprintf("block_%d_%s", blockNumber, address[:8]),
+
+			// ✅ Fix: Pass the address of the string
+			Reward: &currentReward,
+
+			TxHash: fmt.Sprintf("block_%d_%s", blockNumber, address[:8]),
 		})
 	}
 
@@ -1835,17 +1880,23 @@ func (s *Server) getBlockValidationActivity(address string, validator *core.Vali
 func (s *Server) getDelegationActivity(address string, validator *core.Validator) []ValidatorActivityItem {
 	var activity []ValidatorActivityItem
 
-	// Get recent delegation events from the validator's delegators
-	for delegatorAddr, amount := range validator.Delegators {
-		// Simulate recent delegation event
+	for delegatorAddr, amountStr := range validator.Delegators {
+		// 1. Create a local copy to safely take the address
+		currentAmount := amountStr
+
+		readableAmount := formatToThrylos(currentAmount)
+
 		activity = append(activity, ValidatorActivityItem{
 			Type:      "delegation",
-			Details:   fmt.Sprintf("New delegation: %s THR", formatToThrylos(amount)),
-			Time:      formatTimeAgo(time.Now().Unix() - 3600), // 1 hour ago
+			Details:   fmt.Sprintf("New delegation: %s THR", readableAmount),
+			Time:      formatTimeAgo(time.Now().Unix() - 3600),
 			Timestamp: time.Now().Unix() - 3600,
-			Amount:    &amount,
-			From:      delegatorAddr,
-			TxHash:    fmt.Sprintf("del_%s_%s", delegatorAddr[:8], address[:8]),
+
+			// ✅ Fix: Use the address of the local copy
+			Amount: &currentAmount,
+
+			From:   delegatorAddr,
+			TxHash: fmt.Sprintf("del_%s_%s", delegatorAddr[:8], address[:8]),
 		})
 	}
 
@@ -1856,21 +1907,41 @@ func (s *Server) getDelegationActivity(address string, validator *core.Validator
 func (s *Server) getCommissionActivity(address string, validator *core.Validator) []ValidatorActivityItem {
 	var activity []ValidatorActivityItem
 
-	// Calculate commission earnings based on delegated stake
-	if validator.DelegatedStake > 0 {
-		// Use actual validator reward rate from config: 9% APR
-		validatorAPR := 0.09 // ValidatorRewardRate from config.go
-		dailyReward := float64(validator.DelegatedStake) * validatorAPR / 365
-		commissionEarning := int64(dailyReward * validator.Commission)
+	// 1. Parse DelegatedStake string to BigInt
+	delegatedStake := math.ParseBigInt(validator.DelegatedStake)
 
-		if commissionEarning > 0 {
+	// 2. Check if > 0 using Sign()
+	if delegatedStake.Sign() > 0 {
+		// Convert to BigFloat for math operations
+		stakeFloat := new(big.Float).SetInt(delegatedStake)
+
+		// Use actual validator reward rate: 9% APR
+		validatorAPR := 0.09
+
+		// Calculate Daily Reward: Stake * APR / 365
+		annualReward := new(big.Float).Mul(stakeFloat, big.NewFloat(validatorAPR))
+		dailyReward := new(big.Float).Quo(annualReward, big.NewFloat(365))
+
+		// Calculate Commission: DailyReward * CommissionRate
+		// (validator.Commission is likely float64 like 0.10)
+		commissionFloat := new(big.Float).Mul(dailyReward, big.NewFloat(validator.Commission))
+
+		// Convert result back to BigInt -> String
+		commissionInt, _ := commissionFloat.Int(nil)
+
+		if commissionInt.Sign() > 0 {
+			commissionStr := commissionInt.String()
+
 			activity = append(activity, ValidatorActivityItem{
 				Type:      "commission",
 				Details:   "Commission earned from delegations",
 				Time:      formatTimeAgo(time.Now().Unix() - 7200), // 2 hours ago
 				Timestamp: time.Now().Unix() - 7200,
-				Reward:    &commissionEarning,
-				TxHash:    fmt.Sprintf("comm_%s_%d", address[:8], time.Now().Unix()),
+
+				// ✅ Fix: Pass address of the string string
+				Reward: &commissionStr,
+
+				TxHash: fmt.Sprintf("comm_%s_%d", address[:8], time.Now().Unix()),
 			})
 		}
 	}
@@ -1879,10 +1950,25 @@ func (s *Server) getCommissionActivity(address string, validator *core.Validator
 }
 
 // Helper function to format amounts to THRYLOS
-func formatToThrylos(nanoAmount int64) string {
-	const NANO_PER_THRYLOS = 1000000000 // BaseUnit from config.go
-	thrylos := float64(nanoAmount) / NANO_PER_THRYLOS
-	return fmt.Sprintf("%.2f", thrylos)
+func formatToThrylos(amountStr string) string {
+	// 1. Parse the string value to BigInt
+	val, ok := new(big.Int).SetString(amountStr, 10)
+	if !ok {
+		return "0.00" // Handle invalid strings gracefully
+	}
+
+	// 2. Convert to BigFloat for precise division
+	fVal := new(big.Float).SetInt(val)
+
+	// 3. Get BaseUnit from config (10^18) as Float
+	fBase := new(big.Float).SetInt(config.BaseUnit)
+
+	// 4. Divide: Amount / BaseUnit
+	result := new(big.Float).Quo(fVal, fBase)
+
+	// 5. Return formatted string (e.g., "10.500000")
+	// 'f' = decimal notation, 6 = precision
+	return result.Text('f', 6)
 }
 
 // Helper function to format time ago

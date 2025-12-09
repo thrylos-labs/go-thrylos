@@ -455,7 +455,6 @@ func sanitizeConfigForEnvironment(c *Config) {
 	}
 }
 
-// loadGenesisFromFile reads the genesis allocation from a JSON file
 func loadGenesisFromFile(path string, cfg *Config) error {
 	file, err := os.ReadFile(path)
 	if err != nil {
@@ -468,15 +467,24 @@ func loadGenesisFromFile(path string, cfg *Config) error {
 	}
 
 	// Validate that the file matches the expected supply
-	var totalAllocated int64
+	// ✅ FIX: Use big.Int for the counter
+	totalAllocated := big.NewInt(0)
+
 	for _, acc := range allocation.Accounts {
-		totalAllocated += acc.Balance
+		// ✅ FIX: Parse string balance to BigInt using helper
+		bal := math.ParseBigInt(acc.Balance)
+		totalAllocated.Add(totalAllocated, bal)
 	}
 
-	// Allow small variance or exact match depending on your tokenomics strictness
-	if totalAllocated != cfg.Economics.GenesisSupply && totalAllocated != cfg.Economics.GenesisSupply*BaseUnit {
-		// This warning helps prevent inflation bugs
-		fmt.Printf("⚠️  Genesis allocation (%d) does not match Config Supply (%d)\n", totalAllocated, cfg.Economics.GenesisSupply)
+	// ✅ FIX: Parse expected supply from config string
+	expectedSupply := math.ParseBigInt(cfg.Economics.GenesisSupply)
+
+	// ✅ FIX: Compare using Cmp() (Returns 0 if equal)
+	// Note: We don't multiply by BaseUnit here because cfg.GenesisSupply
+	// is ALREADY initialized as the full 18-decimal value in Load().
+	if totalAllocated.Cmp(expectedSupply) != 0 {
+		fmt.Printf("⚠️  Genesis allocation (%s) does not match Config Supply (%s)\n",
+			totalAllocated.String(), expectedSupply.String())
 	}
 
 	cfg.Genesis = allocation
@@ -489,8 +497,8 @@ func (c *Config) GetGenesisAccounts() []GenesisAccount {
 }
 
 // GetMinimumBalances returns the minimum balance thresholds
-func (c *Config) GetMinimumBalances() map[string]int64 {
-	return map[string]int64{
+func (c *Config) GetMinimumBalances() map[string]string {
+	return map[string]string{
 		"balance":              c.Economics.MinBalance,
 		"transfer":             c.Economics.MinTransfer,
 		"stake":                c.Economics.MinStake,
@@ -502,6 +510,22 @@ func (c *Config) GetMinimumBalances() map[string]int64 {
 
 // GetSupplyBreakdown returns the optimized token distribution breakdown
 func (c *Config) GetSupplyBreakdown() map[string]interface{} {
+	// Helper to parse config strings to BigInt
+	parse := func(s string) *big.Int {
+		return math.ParseBigInt(s)
+	}
+
+	// 1. Calculate Total Validator Capacity (MinStake * MaxValidators)
+	minValStake := parse(c.Staking.MinValidatorStake)
+	maxVals := big.NewInt(int64(c.Consensus.MaxValidators))
+	totalCapacity := new(big.Int).Mul(minValStake, maxVals)
+
+	// 2. Calculate Genesis Details (Using BaseUnit which is *big.Int)
+	// Example: 10M * BaseUnit
+	immediateCirculation := new(big.Int).Mul(big.NewInt(10_000_000), BaseUnit)
+	ecosystemBootstrap := new(big.Int).Mul(big.NewInt(3_000_000), BaseUnit)
+	communityIncentives := new(big.Int).Mul(big.NewInt(2_000_000), BaseUnit)
+
 	return map[string]interface{}{
 		"total_supply": c.Economics.TotalSupply,
 		"distribution": map[string]interface{}{
@@ -510,16 +534,16 @@ func (c *Config) GetSupplyBreakdown() map[string]interface{} {
 				"percentage": 15.0,
 				"purpose":    "Public launch and early ecosystem bootstrap",
 				"details": map[string]interface{}{
-					"immediate_circulation": 10000000 * BaseUnit,
-					"ecosystem_bootstrap":   3000000 * BaseUnit,
-					"community_incentives":  2000000 * BaseUnit,
+					"immediate_circulation": immediateCirculation.String(),
+					"ecosystem_bootstrap":   ecosystemBootstrap.String(),
+					"community_incentives":  communityIncentives.String(),
 				},
 			},
 			"validator_rewards": map[string]interface{}{
 				"amount":             c.Economics.ValidatorRewardPool,
 				"percentage":         60.0,
 				"purpose":            "Long-term staking rewards (sustainable model)",
-				"distribution_years": 10, // Distributed over ~10 years
+				"distribution_years": 10,
 			},
 			"liquidity": map[string]interface{}{
 				"amount":     c.Economics.LiquidityPool,
@@ -536,7 +560,7 @@ func (c *Config) GetSupplyBreakdown() map[string]interface{} {
 		"validator_economics": map[string]interface{}{
 			"min_validator_stake":      c.Staking.MinValidatorStake,
 			"max_validators":           c.Consensus.MaxValidators,
-			"total_validator_capacity": c.Staking.MinValidatorStake * int64(c.Consensus.MaxValidators),
+			"total_validator_capacity": totalCapacity.String(), // ✅ Fixed: BigInt -> String
 			"accessibility": map[string]interface{}{
 				"min_delegation": c.Economics.MinDelegation,
 				"min_stake":      c.Economics.MinStake,
@@ -554,13 +578,14 @@ func (c *Config) GetSupplyBreakdown() map[string]interface{} {
 }
 
 // GetGasConfig returns gas-related configuration
-func (c *Config) GetGasConfig() map[string]int64 {
-	return map[string]int64{
-		"base_price":    c.Economics.BaseGasPrice,
-		"standard_tx":   StandardTxGas,
-		"staking_tx":    StakingTxGas,
+func (c *Config) GetGasConfig() map[string]string {
+	return map[string]string{
+		"base_price": c.Economics.BaseGasPrice,
+		// Convert int64 constants to strings
+		"standard_tx":   fmt.Sprintf("%d", StandardTxGas),
+		"staking_tx":    fmt.Sprintf("%d", StakingTxGas),
 		"minimum_fee":   c.Economics.MinimumFee,
-		"max_per_block": MaxGasPerBlock,
+		"max_per_block": fmt.Sprintf("%d", MaxGasPerBlock),
 	}
 }
 
@@ -581,15 +606,40 @@ func (c *Config) GetRewardConfig() map[string]interface{} {
 
 // CalculateBlockRewards calculates expected rewards over time
 func (c *Config) CalculateBlockRewards() map[string]interface{} {
-	blocksPerYear := int64(365 * 24 * 60 * 60 / 3) // 3-second blocks
-	annualBlockRewards := c.Economics.BlockReward * blocksPerYear
+	// 1. Calculate blocks per year (3-second block time)
+	blocksPerYear := int64(365 * 24 * 60 * 60 / 3)
+	blocksPerYearBig := big.NewInt(blocksPerYear)
+
+	// 2. Parse Block Reward (string -> BigInt)
+	blockRewardBig := math.ParseBigInt(c.Economics.BlockReward)
+
+	// 3. Calculate Annual Rewards (Reward * Blocks)
+	annualBlockRewards := new(big.Int).Mul(blockRewardBig, blocksPerYearBig)
+
+	// 4. Calculate Daily Rewards (Annual / 365)
+	dailyBlockRewards := new(big.Int).Div(annualBlockRewards, big.NewInt(365))
+
+	// 5. Calculate "Rewards in Thrylos" (Annual / BaseUnit) using Float for display
+	fAnnual := new(big.Float).SetInt(annualBlockRewards)
+	fBase := new(big.Float).SetInt(BaseUnit) // BaseUnit is *big.Int global
+	rewardsInThrylos, _ := new(big.Float).Quo(fAnnual, fBase).Float64()
+
+	// 6. Calculate Inflation (Annual Rewards / Total Supply)
+	totalSupplyBig := math.ParseBigInt(c.Economics.TotalSupply)
+	fTotalSupply := new(big.Float).SetInt(totalSupplyBig)
+
+	inflationRate := 0.0
+	if totalSupplyBig.Sign() > 0 {
+		fInflation, _ := new(big.Float).Quo(fAnnual, fTotalSupply).Float64()
+		inflationRate = fInflation
+	}
 
 	return map[string]interface{}{
 		"blocks_per_year":        blocksPerYear,
-		"annual_block_rewards":   annualBlockRewards,
-		"daily_block_rewards":    annualBlockRewards / 365,
-		"rewards_in_thrylos":     float64(annualBlockRewards) / float64(BaseUnit),
-		"inflation_from_rewards": float64(annualBlockRewards) / float64(c.Economics.TotalSupply),
+		"annual_block_rewards":   annualBlockRewards.String(), // Return string to avoid overflow
+		"daily_block_rewards":    dailyBlockRewards.String(),  // Return string
+		"rewards_in_thrylos":     rewardsInThrylos,            // float64 (safe for display)
+		"inflation_from_rewards": inflationRate,               // float64 (percentage)
 	}
 }
 
@@ -662,30 +712,56 @@ func (c *Config) ValidateConfig() error {
 func (c *Config) GetEconomicSummary() string {
 	rewardCalc := c.CalculateBlockRewards()
 
+	// Helper to convert Wei string to Thrylos float64
+	toThrylos := func(weiStr string) float64 {
+		val := math.ParseBigInt(weiStr)
+		if val == nil {
+			return 0.0
+		}
+
+		fVal := new(big.Float).SetInt(val)
+		fBase := new(big.Float).SetInt(BaseUnit) // 10^18
+
+		res, _ := new(big.Float).Quo(fVal, fBase).Float64()
+		return res
+	}
+
+	// Helper for total validator capacity calculation
+	calcValidatorCapacity := func() float64 {
+		minStake := math.ParseBigInt(c.Staking.MinValidatorStake)
+		maxVals := big.NewInt(int64(c.Consensus.MaxValidators))
+		totalCapWei := new(big.Int).Mul(minStake, maxVals)
+
+		fVal := new(big.Float).SetInt(totalCapWei)
+		fBase := new(big.Float).SetInt(BaseUnit)
+		res, _ := new(big.Float).Quo(fVal, fBase).Float64()
+		return res
+	}
+
 	return fmt.Sprintf(`
 THRYLOS Token Economics Summary (Optimized & Sustainable):
 =========================================================
-Total Supply: %d THRYLOS (100 Million)
-Genesis Supply: %d THRYLOS (15 Million, 15%%) - REDUCED for sustainability
+Total Supply: %.0f THRYLOS (100 Million)
+Genesis Supply: %.0f THRYLOS (15 Million, 15%%) - REDUCED for sustainability
 
 OPTIMIZED DISTRIBUTION (No Advisors):
-- Genesis/Launch: %d THRYLOS (15%%) - Public + ecosystem bootstrap
-- Validator Rewards: %d THRYLOS (60%%) - INCREASED for long-term sustainability  
-- Liquidity Pool: %d THRYLOS (15%%) - DEX and market making
-- Development: %d THRYLOS (10%%) - Core team (4-year vesting)
+- Genesis/Launch: %.0f THRYLOS (15%%) - Public + ecosystem bootstrap
+- Validator Rewards: %.0f THRYLOS (60%%) - INCREASED for long-term sustainability  
+- Liquidity Pool: %.0f THRYLOS (15%%) - DEX and market making
+- Development: %.0f THRYLOS (10%%) - Core team (4-year vesting)
 
 STAKING REQUIREMENTS (More Accessible):
-- Validator Stake: %d THRYLOS (25 THRYLOS) - REDUCED from 34
-- Minimum Delegation: %.1f THRYLOS
-- Minimum Stake: %d THRYLOS
-- Max Validators: %d (total capacity: %d THRYLOS)
+- Validator Stake: %.0f THRYLOS (25 THRYLOS) - REDUCED from 34
+- Minimum Delegation: %.3f THRYLOS
+- Minimum Stake: %.0f THRYLOS
+- Max Validators: %d (total capacity: %.0f THRYLOS)
 
 TRANSACTION COSTS:
-- Standard Transaction: ~%.3f THRYLOS
-- Gas Price: %.6f THRYLOS per gas unit
+- Standard Transaction: ~%.6f THRYLOS
+- Gas Price: %.9f THRYLOS per gas unit
 
 REWARDS & SUSTAINABILITY:
-- Block Reward: %.2f THRYLOS
+- Block Reward: %.4f THRYLOS
 - Validator APR: %.1f%% (INCREASED)
 - Delegator APR: %.1f%% (INCREASED)
 - Inflation Rate: %.1f%% (Balanced)
@@ -705,20 +781,20 @@ KEY IMPROVEMENTS:
 ✓ Higher staking APR (9%% validators, 7%% delegators) for participation
 ✓ No advisor allocation - community-focused distribution
 ✓ Gradual unlock mechanism for fair distribution`,
-		c.Economics.TotalSupply,
-		c.Economics.GenesisSupply,
-		c.Economics.GenesisDistribution,
-		c.Economics.ValidatorRewardPool,
-		c.Economics.LiquidityPool,
-		c.Economics.DevelopmentPool,
-		c.Staking.MinValidatorStake,
-		float64(c.Economics.MinDelegation)/float64(BaseUnit),
-		c.Economics.MinStake,
+		toThrylos(c.Economics.TotalSupply),
+		toThrylos(c.Economics.GenesisSupply),
+		toThrylos(c.Economics.GenesisDistribution),
+		toThrylos(c.Economics.ValidatorRewardPool),
+		toThrylos(c.Economics.LiquidityPool),
+		toThrylos(c.Economics.DevelopmentPool),
+		toThrylos(c.Staking.MinValidatorStake),
+		toThrylos(c.Economics.MinDelegation),
+		toThrylos(c.Economics.MinStake),
 		c.Consensus.MaxValidators,
-		c.Staking.MinValidatorStake*int64(c.Consensus.MaxValidators),
-		float64(c.Economics.MinimumFee)/float64(BaseUnit),
-		float64(c.Economics.BaseGasPrice)/float64(BaseUnit),
-		float64(c.Economics.BlockReward)/float64(BaseUnit),
+		calcValidatorCapacity(),
+		toThrylos(c.Economics.MinimumFee),
+		toThrylos(c.Economics.BaseGasPrice),
+		toThrylos(c.Economics.BlockReward),
 		c.Economics.ValidatorRewardRate*100,
 		c.Economics.DelegatorRewardRate*100,
 		c.Economics.InflationRate*100,
