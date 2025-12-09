@@ -65,14 +65,17 @@ func (h *EthereumRPCHandler) GetBalance(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// TODO: Handle BlockNumber (historical queries)
 	address := common.HexToAddress(req.Address)
+
+	// GetBalance returns (*big.Int, error)
 	balance, err := h.blockchain.GetBalance(address.Hex())
-	if err != nil {
-		balance = 0
+	if err != nil || balance == nil {
+		// ✅ Fix: Initialize explicit BigInt zero if missing/error
+		balance = big.NewInt(0)
 	}
 
-	response := (*hexutil.Big)(big.NewInt(balance))
+	// ✅ Fix: Cast *big.Int directly to *hexutil.Big (no big.NewInt wrapper needed)
+	response := (*hexutil.Big)(balance)
 	respondJSON(w, response)
 }
 

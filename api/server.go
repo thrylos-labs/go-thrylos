@@ -1149,7 +1149,7 @@ func (lrw *loggingResponseWriter) WriteHeader(code int) {
 }
 
 type StakingStatsResponse struct {
-	TotalStaked           int64   `json:"total_staked"`
+	TotalStaked           string  `json:"total_staked"`
 	AnnualPercentageYield float64 `json:"annual_percentage_yield"`
 	NextRewardTime        *int64  `json:"next_reward_time"`
 	UnbondingPeriod       int     `json:"unbonding_period"`
@@ -1218,7 +1218,7 @@ func (s *Server) getStakingStats(w http.ResponseWriter, r *http.Request) {
 	nextRewardTime := time.Now().Unix() + 200 // 200ms from your config
 
 	response := StakingStatsResponse{
-		TotalStaked:           totalStaked,
+		TotalStaked:           totalStaked.String(),
 		AnnualPercentageYield: baseAPY,
 		NextRewardTime:        &nextRewardTime,
 		UnbondingPeriod:       21, // Days
