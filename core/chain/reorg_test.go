@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"math/big"
 	"os"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -25,15 +27,15 @@ func TestReorgDoubleExecution(t *testing.T) {
 	require.NoError(t, err)
 	defer badgerStore.Close()
 
-	// [FIX] Moved MinGasPrice to ConsensusConfig and used BaseGasPrice for Economics
+	// [FIX] Use strings for GasPrice fields
 	cfg := &config.Config{
 		Consensus: config.ConsensusConfig{
 			MaxBlockSize:  1000000,
 			MaxTxPerBlock: 100,
-			MinGasPrice:   1, // Correct field location
+			MinGasPrice:   "1", // ✅ Fixed: String
 		},
 		Economics: config.EconomicsConfig{
-			BaseGasPrice: 1, // Correct field location
+			BaseGasPrice: "1", // ✅ Fixed: String
 		},
 	}
 
@@ -53,32 +55,36 @@ func TestReorgDoubleExecution(t *testing.T) {
 	privKey, _ := crypto.NewPrivateKey()
 	aliceAddr, _ := account.GenerateAddress(privKey.PublicKey())
 
-	initialBalance := int64(100000)
+	// ✅ Fixed: Use String for balance
+	initialBalanceStr := "100000"
 	ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: aliceAddr,
-		Balance: initialBalance,
+		Balance: initialBalanceStr,
 		Nonce:   0,
 	})
 
-	// 3. Create a "New Fork" Block containing 1 transaction
-	// Tx: Alice sends 1000 tokens. Total cost = 1000 + fees.
-	txAmount := int64(1000)
+	// 3. Create Tx: Alice sends 1000 tokens.
+	// ✅ Fixed: Use Strings for Amount and Price
+	txAmountStr := "1000"
 	txGas := int64(21000)
-	txGasPrice := int64(1)
-	totalCost := txAmount + (txGas * txGasPrice)
+	txGasPriceStr := "1"
 
 	tx := &core.Transaction{
-		Id: "tx1", From: aliceAddr, To: "0xRecipient",
-		Amount: txAmount, Gas: txGas, GasPrice: txGasPrice,
-		Nonce: 0, Timestamp: time.Now().Unix(),
+		Id:        "tx1",
+		From:      aliceAddr,
+		To:        "0xRecipient",
+		Amount:    txAmountStr, // ✅ Fixed
+		Gas:       txGas,
+		GasPrice:  txGasPriceStr, // ✅ Fixed
+		Nonce:     0,
+		Timestamp: time.Now().Unix(),
 	}
 
-	// [FIX] Moved Hash from Header to Block struct
+	// Genesis setup
 	genesis := &core.Block{
 		Header: &core.BlockHeader{Index: 0},
 		Hash:   "0xGenesis",
 	}
-	// Manually set genesis in WorldState to avoid initialization overhead
 	ws.AddBlock(genesis)
 
 	newBlock := &core.Block{
@@ -94,32 +100,42 @@ func TestReorgDoubleExecution(t *testing.T) {
 	}
 
 	// 4. Execute Reorg
-	// This calls the function we just fixed
 	err = bc.ReorganizeChain([]*core.Block{newBlock})
 
-	// Note: In a real env, this might fail signature checks without valid sigs.
-	// We are testing the logic flow. If it fails on validation, that's fine,
-	// but if it succeeds, we check balances.
-	// If validation fails, we can't verify the double-spend fix easily without valid sigs.
-	// However, we can check if `AddBlock` was called once or twice by inspecting the error or logs.
-
-	// Assuming we bypassed sig checks or provided valid ones:
+	// Validation
 	if err == nil {
 		updatedAccount, _ := ws.GetAccount(aliceAddr)
 
-		expectedBalance := initialBalance - totalCost
+		// ✅ Calculate Expected Balance using BigInt Math
+		initialBalBig := math.ParseBigInt(initialBalanceStr)
+		amountBig := math.ParseBigInt(txAmountStr)
+		gasPriceBig := math.ParseBigInt(txGasPriceStr)
+		gasLimitBig := big.NewInt(txGas)
 
-		// IF BUG EXISTS: Balance would be initial - (totalCost * 2)
-		assert.Equal(t, expectedBalance, updatedAccount.Balance,
-			"Balance should decrease by exactly one tx cost. If double, fixed failed.")
+		// Total Cost = Amount + (Gas * GasPrice)
+		gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+		totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
 
-		if updatedAccount.Balance == initialBalance-(totalCost*2) {
+		// Expected = Initial - TotalCost
+		expectedBalBig := new(big.Int).Sub(initialBalBig, totalCostBig)
+
+		// Actual Balance (from string)
+		actualBalBig := math.ParseBigInt(updatedAccount.Balance)
+
+		// Compare using BigInt
+		assert.Equal(t, expectedBalBig.String(), actualBalBig.String(),
+			"Balance should decrease by exactly one tx cost.")
+
+		// Check for double spend (Initial - 2*Cost)
+		doubleCostBig := new(big.Int).Mul(totalCostBig, big.NewInt(2))
+		doubleSpendBalBig := new(big.Int).Sub(initialBalBig, doubleCostBig)
+
+		if actualBalBig.Cmp(doubleSpendBalBig) == 0 {
 			t.Fatal("❌ CRITICAL FAILURE: Transaction was executed TWICE!")
 		} else {
 			t.Log("✅ Success: Transaction executed exactly once.")
 		}
 	} else {
-		t.Logf("Test setup note: Reorg returned error (likely signature): %v", err)
-		t.Log("To verify completely, ensure crypto signing is valid in test setup.")
+		t.Logf("Test setup note: Reorg returned error: %v", err)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/consensus/validator"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/chain"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -23,9 +24,10 @@ import (
 )
 
 // NewConsensusEngine creates a new PoS consensus engine
+// NewConsensusEngine creates a new PoS consensus engine
 func NewConsensusEngine(
 	cfg *config.Config,
-	blockchain *chain.Blockchain, // Added parameter
+	blockchain *chain.Blockchain,
 	worldState *state.WorldState,
 	nodePrivateKey crypto.PrivateKey,
 	broadcastChan chan interface{},
@@ -36,7 +38,7 @@ func NewConsensusEngine(
 
 	engine := &ConsensusEngine{
 		config:            cfg,
-		blockchain:        blockchain, // Initialized field
+		blockchain:        blockchain,
 		worldState:        worldState,
 		nodePrivateKey:    nodePrivateKey,
 		nodeAddress:       nodeAddress,
@@ -62,12 +64,11 @@ func NewConsensusEngine(
 
 	// Configure and Initialize Fork Choice
 	fcConfig := DefaultForkChoiceConfig()
-	// Use config value if set, otherwise default is kept
 	if cfg.Consensus.StakeCacheTTL > 0 {
 		fcConfig.StakeCacheTTL = cfg.Consensus.StakeCacheTTL
 	}
 
-	// Pass SlashingManager placeholder, it will be overwritten shortly but needed for initialization order
+	// Pass SlashingManager placeholder
 	engine.forkChoice = NewForkChoiceWithConfig(cfg, worldState, &SlashingManager{}, fcConfig)
 
 	// Initialize slashing manager with persistent storage
@@ -80,10 +81,12 @@ func NewConsensusEngine(
 		MaxMissedAttestations:   cfg.Consensus.MaxMissedAttestations,
 		AttestationWindow:       24 * time.Hour,
 		JailDurationHours:       cfg.Consensus.JailDurationHours,
-		MinimumStake:            cfg.Staking.MinValidatorStake,
+
+		// ✅ This line is now valid because we updated the struct to string
+		MinimumStake: cfg.Staking.MinValidatorStake,
 	}
 
-	// Create slashing storage if we have access to BadgerDB
+	// Create slashing storage
 	var slashingStorage *storage.SlashingStorage
 	badgerDB := worldState.GetBadgerDB()
 
@@ -95,18 +98,17 @@ func NewConsensusEngine(
 		log.Println("⚠️ Slashing persistence disabled")
 	}
 
+	// ✅ This is valid because we updated the WorldStateBalancer interface
 	engine.slashingManager = NewSlashingManager(slashingConfig, worldState, slashingStorage)
 
 	// Update fork choice with real slashing manager
 	engine.forkChoice.slashingManager = engine.slashingManager
 
-	// Initialize evidence tracker for slashing evidence broadcasting
+	// Initialize evidence tracker
 	engine.evidenceTracker = NewEvidenceTracker()
-	log.Println("✅ Slashing evidence tracker initialized")
 
-	// Initialize time validator for timestamp validation and drift monitoring
+	// Initialize time validator
 	engine.timeValidator = NewTimeValidator()
-	log.Println("✅ Time drift monitoring initialized")
 
 	return engine
 }
@@ -474,36 +476,45 @@ func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 }
 
 // selectValidatorByStake selects a validator based on stake weight and randomness
+// selectValidatorByStake selects a validator based on stake weight and randomness
 func (ce *ConsensusEngine) selectValidatorByStake(validators []*core.Validator, seed []byte) (*core.Validator, error) {
 	if len(validators) == 0 {
 		return nil, fmt.Errorf("no validators provided")
 	}
 
-	// Calculate total stake
-	totalStake := int64(0)
+	// 1. Calculate Total Stake using BigInt
+	totalStakeBig := big.NewInt(0)
 	for _, v := range validators {
-		totalStake += v.Stake
+		stakeVal := math.ParseBigInt(v.Stake)
+		totalStakeBig.Add(totalStakeBig, stakeVal)
 	}
 
-	if totalStake == 0 {
+	// Check if total stake is zero
+	if totalStakeBig.Sign() == 0 {
 		return nil, fmt.Errorf("total stake is zero")
 	}
 
-	// Generate random number from seed
+	// 2. Generate random number from seed (0 to TotalStake)
+	// We treat the seed bytes as a massive number, then Modulo by TotalStake
 	seedInt := new(big.Int).SetBytes(seed)
-	maxInt := big.NewInt(totalStake)
-	randomStake := new(big.Int).Mod(seedInt, maxInt).Int64()
+	randomStake := new(big.Int).Mod(seedInt, totalStakeBig)
 
-	// Select validator based on cumulative stake
-	cumulativeStake := int64(0)
+	// 3. Select validator based on cumulative stake
+	cumulativeStakeBig := big.NewInt(0)
+
 	for _, validator := range validators {
-		cumulativeStake += validator.Stake
-		if randomStake < cumulativeStake {
+		stakeVal := math.ParseBigInt(validator.Stake)
+
+		// Add current stake to cumulative
+		cumulativeStakeBig.Add(cumulativeStakeBig, stakeVal)
+
+		// Check: if randomStake < cumulativeStake
+		if randomStake.Cmp(cumulativeStakeBig) < 0 {
 			return validator, nil
 		}
 	}
 
-	// Fallback to last validator (should not happen)
+	// Fallback to last validator (should technically be unreachable if math is correct)
 	return validators[len(validators)-1], nil
 }
 

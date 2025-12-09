@@ -429,7 +429,7 @@ type SlashingConfig struct {
 	JailDurationHours int // Default: 168 (7 days)
 
 	// Minimum stake required to be a validator
-	MinimumStake int64 // Default: 1000 tokens
+	MinimumStake string // Default: 1000 tokens
 }
 
 // DefaultSlashingConfig returns sensible default configuration
@@ -443,7 +443,7 @@ func DefaultSlashingConfig() *SlashingConfig {
 		MaxMissedAttestations:   100,
 		AttestationWindow:       24 * time.Hour,
 		JailDurationHours:       168, // 7 days (168 hours)
-		MinimumStake:            1000,
+		MinimumStake:            "1000000000000000000000",
 	}
 }
 

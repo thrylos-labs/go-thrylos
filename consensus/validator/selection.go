@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"golang.org/x/crypto/blake2b"
 )
@@ -62,7 +63,7 @@ type SelectionResult struct {
 // Committee represents a selected committee of validators
 type Committee struct {
 	Members       []*core.Validator `json:"members"`
-	TotalStake    int64             `json:"total_stake"`
+	TotalStake    string            `json:"total_stake"`
 	SelectionSeed []byte            `json:"selection_seed"`
 	CreatedAt     int64             `json:"created_at"`
 	Purpose       string            `json:"purpose"`
@@ -211,6 +212,7 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 }
 
 // SelectCommittee selects a committee of validators for attestations or voting
+// SelectCommittee selects a committee of validators based on a seed
 func (vs *Set) SelectCommittee(seed []byte, committeeSize int, purpose string) (*Committee, error) {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
@@ -233,16 +235,24 @@ func (vs *Set) SelectCommittee(seed []byte, committeeSize int, purpose string) (
 
 	// Select top validators from shuffled list
 	selectedValidators := make([]*core.Validator, committeeSize)
-	totalCommitteeStake := int64(0)
+
+	// ✅ Fix: Initialize accumulator as BigInt
+	totalCommitteeStakeBig := big.NewInt(0)
 
 	for i := 0; i < committeeSize; i++ {
 		selectedValidators[i] = shuffledValidators[i]
-		totalCommitteeStake += shuffledValidators[i].Stake
+
+		// ✅ Fix: Parse string stake and add
+		stakeBig := math.ParseBigInt(shuffledValidators[i].Stake)
+		totalCommitteeStakeBig.Add(totalCommitteeStakeBig, stakeBig)
 	}
 
 	return &Committee{
-		Members:       selectedValidators,
-		TotalStake:    totalCommitteeStake,
+		Members: selectedValidators,
+
+		// ✅ Fix: Convert back to string (Assuming Committee.TotalStake is also a string now)
+		TotalStake: totalCommitteeStakeBig.String(),
+
 		SelectionSeed: seed,
 		CreatedAt:     time.Now().Unix(),
 		Purpose:       purpose,

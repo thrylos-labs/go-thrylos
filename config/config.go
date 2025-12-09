@@ -46,9 +46,10 @@ var (
 	MaxBlockSize            = int64(2 * 1024 * 1024) // 2MB
 
 	// Rewards (calculated in init)
-	BlockReward     *big.Int
-	ValidatorReward *big.Int
-	DelegatorReward *big.Int
+	BlockReward        *big.Int
+	ValidatorReward    *big.Int
+	DelegatorReward    *big.Int
+	TransactionPoolTTL = 24 * time.Hour // Max time a tx stays in the pool before expiry
 )
 
 func GetChainIDForEnvironment(env string) string {

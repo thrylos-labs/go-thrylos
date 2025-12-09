@@ -17,7 +17,6 @@ import (
 func TestStateRootDeterminism_WithBadger(t *testing.T) {
 	// 1. Setup Temp DB
 	t.Log("Setting up temp BadgerDB for fuzz test...")
-	// Use a unique dir
 	dir := t.TempDir()
 
 	// Initialize Storage
@@ -37,12 +36,15 @@ func TestStateRootDeterminism_WithBadger(t *testing.T) {
 
 	// Create Validators with VALID HEX addresses
 	for i := 0; i < 10; i++ {
-		// Use 'aa...' prefix for validators to distinguish them
 		addr := fmt.Sprintf("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%04x", i)
+
+		// Fix: Convert int64 stake to string
+		stakeVal := rng.Int63n(1000000000) + 1000000
+
 		val := &core.Validator{
 			Address: addr,
 			Pubkey:  []byte(fmt.Sprintf("pubkey-%d", i)),
-			Stake:   rng.Int63n(1000000000) + 1000000, // Ensure valid stake amount
+			Stake:   fmt.Sprintf("%d", stakeVal), // ✅ Fix: Convert to string
 			Active:  true,
 		}
 		ws.validators[addr] = val
@@ -50,15 +52,18 @@ func TestStateRootDeterminism_WithBadger(t *testing.T) {
 
 	// Create Accounts with Delegations and VALID HEX addresses
 	for i := 0; i < 50; i++ {
-		// Use 'bb...' prefix for accounts
 		addr := fmt.Sprintf("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb%04x", i)
+
+		// Fix: Convert int64 balance/rewards to string
+		balanceVal := rng.Int63n(1000000000)
+		rewardsVal := rng.Int63n(100000)
 
 		acc := &core.Account{
 			Address:     addr,
-			Balance:     rng.Int63n(1000000000),
+			Balance:     fmt.Sprintf("%d", balanceVal), // ✅ Fix: Convert to string
 			Nonce:       rng.Uint64(),
-			DelegatedTo: make(map[string]int64),
-			Rewards:     rng.Int63n(100000),
+			DelegatedTo: make(map[string]string),       // ✅ Fix: map[string]string
+			Rewards:     fmt.Sprintf("%d", rewardsVal), // ✅ Fix: Convert to string
 		}
 
 		// Random delegations pointing to valid validator addresses
@@ -67,26 +72,24 @@ func TestStateRootDeterminism_WithBadger(t *testing.T) {
 			valIndex := rng.Intn(10)
 			valAddr := fmt.Sprintf("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%04x", valIndex)
 
-			// Ensure we don't overwrite existing delegation to same validator (which would mess up total calc)
 			if _, exists := acc.DelegatedTo[valAddr]; !exists {
-				amount := rng.Int63n(100000) + 1 // Non-zero amount
-				acc.DelegatedTo[valAddr] = amount
+				amount := rng.Int63n(100000) + 1
+				acc.DelegatedTo[valAddr] = fmt.Sprintf("%d", amount) // ✅ Fix: Convert to string
 				totalDelegated += amount
 			}
 		}
 
-		// Ensure StakedAmount is >= TotalDelegated (Business Logic Constraint)
-		// We add some extra to the staked amount to simulate self-stake or just surplus
-		acc.StakedAmount = totalDelegated + rng.Int63n(50000)
+		// Ensure StakedAmount is >= TotalDelegated
+		// Fix: Convert total staked calculation to string
+		stakedVal := totalDelegated + rng.Int63n(50000)
+		acc.StakedAmount = fmt.Sprintf("%d", stakedVal) // ✅ Fix: Convert to string
 
-		// Save to AccountManager (which validates address format and saves to DB)
+		// Save to AccountManager
 		err := ws.accountManager.UpdateAccount(acc)
 		require.NoError(t, err)
 	}
 
 	// 3. Fuzz Test: Calculate StateRoot repeatedly
-	// If map iteration order affects the hash, this loop will fail.
-
 	t.Log("Calculating initial State Root...")
 	err = ws.updateStateRoot()
 	require.NoError(t, err)

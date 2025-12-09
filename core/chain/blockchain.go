@@ -4,6 +4,7 @@ package chain
 
 import (
 	"fmt"
+	"math/big"
 	"sync"
 	"time"
 
@@ -201,7 +202,7 @@ func (bc *Blockchain) SetConsensusEngine(engine ConsensusEngine) {
 
 // InitializeGenesis initializes the blockchain with a genesis block
 func (bc *Blockchain) InitializeGenesis(genesisAccount string, genesisValidator string,
-	initialSupply int64, genesisValidators []*core.Validator, privateKey crypto.PrivateKey) error {
+	initialSupply string, genesisValidators []*core.Validator, privateKey crypto.PrivateKey) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
@@ -489,8 +490,9 @@ func (bc *Blockchain) GetAccount(address string) (*core.Account, error) {
 	return bc.worldState.GetAccount(address)
 }
 
-// GetBalance returns account balance (delegates to WorldState)
-func (bc *Blockchain) GetBalance(address string) (int64, error) {
+// GetBalance retrieves the balance of an account
+// ✅ UPDATE: Return type changed from (int64, error) to (*big.Int, error)
+func (bc *Blockchain) GetBalance(address string) (*big.Int, error) {
 	return bc.worldState.GetBalance(address)
 }
 

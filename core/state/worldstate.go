@@ -36,16 +36,18 @@ type WorldState struct {
 	// Configuration
 	config *config.Config
 
-	db    *storage.DB           // For blocks, transactions, batch operations
-	state *storage.StateStorage // For accounts, validators, height, state root
+	db    *storage.DB
+	state *storage.StateStorage
 
 	// Account management
 	accountManager *account.AccountManager
 
 	// Transaction pool and services
-	txPool            *transaction.Pool
-	txValidator       *transaction.Validator
-	txExecutor        *transaction.Executor
+	txPool      *transaction.Pool
+	txValidator *transaction.Validator
+	txExecutor  *transaction.Executor
+
+	// ✅ KEEP: int64 is fine for counts (max 9 quintillion is enough for tx counts)
 	totalTransactions int64
 
 	// Shard configuration
@@ -53,14 +55,20 @@ type WorldState struct {
 	totalShards int
 
 	currentHash string
-	height      int64
+
+	// ✅ KEEP: int64 is fine for block height
+	height int64
 
 	// Blockchain validators (consensus participants)
 	validators map[string]*core.Validator
 
 	// Global statistics
-	totalSupply   int64
-	totalStaked   int64
+	totalSupply string
+
+	// 🔴 CHANGE: Aggregates validator stakes (which are 18-decimal BigInts)
+	totalStaked string
+
+	// ✅ KEEP: Unix timestamp fits in int64
 	lastTimestamp int64
 
 	// State root for Merkle tree
@@ -69,15 +77,18 @@ type WorldState struct {
 	// Cross-shard manager
 	crossShardManager *CrossShardManager
 
-	chainMu     sync.RWMutex  // Guards blocks, height, currentHash, lastTimestamp
-	validatorMu sync.RWMutex  // Guards validators map
-	accountMu   *ShardedMutex // Guards individual accounts (via AccountManager)
+	chainMu     sync.RWMutex
+	validatorMu sync.RWMutex
+	accountMu   *ShardedMutex
 
-	stateRootMu sync.RWMutex // Guards stateRoot generation
+	stateRootMu sync.RWMutex
 
-	assets        map[string]*AssetToken      // assetID -> asset
-	assetBalances map[string]map[string]int64 // assetID -> (address -> balance)
-	assetRegistry map[string]string           // assetID -> cr
+	assets map[string]*AssetToken
+
+	// Map: AssetID -> Address -> Balance (String)
+	assetBalances map[string]map[string]string
+
+	assetRegistry map[string]string
 	badgerStorage *storage.BadgerStorage
 }
 
@@ -87,7 +98,7 @@ type AssetToken struct {
 	AssetType        string `json:"asset_type"`     // "supply_chain", "carbon_credit", etc.
 	RealWorldRef     string `json:"real_world_ref"` // Required reference to physical asset
 	MaxDecimals      int32  `json:"max_decimals"`   // Capped at 4
-	TotalSupply      int64  `json:"total_supply"`
+	TotalSupply      string `json:"total_supply"`
 	Creator          string `json:"creator"`
 	Transferable     bool   `json:"transferable"`      // Some assets shouldn't be tradeable
 	RequiresApproval bool   `json:"requires_approval"` // KYC/compliance gating
@@ -290,11 +301,9 @@ func (ws *WorldState) GetBadgerDB() *badger.DB {
 }
 
 // InitializeGenesis initializes the world state with genesis data
-// InitializeGenesis initializes the world state with genesis data
-// Updated to use Granular Locking
-func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply int64, genesisValidators []*core.Validator) error {
-	// 1. Acquire Global Locks (Chain, Validator, StateRoot)
-	// We hold these for the duration to ensure atomic genesis setup
+// ✅ UPDATE: initialSupply changed from int64 -> string
+func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply string, genesisValidators []*core.Validator) error {
+	// 1. Acquire Global Locks
 	ws.chainMu.Lock()
 	defer ws.chainMu.Unlock()
 
@@ -310,15 +319,17 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply int
 	}
 
 	// Use config supply if not specified
-	if initialSupply <= 0 {
+	// ✅ Check for empty string or "0" instead of integer <= 0
+	if initialSupply == "" || initialSupply == "0" {
 		initialSupply = ws.config.Economics.GenesisSupply
 	}
 
 	// Create genesis account
-	// We must lock the specific account shard for this operation
 	ws.accountMu.Lock(genesisAccount)
+
+	// ✅ Pass string directly (CreateGenesisAccount must also accept string now)
 	err := ws.accountManager.CreateGenesisAccount(genesisAccount, initialSupply)
-	ws.accountMu.Unlock(genesisAccount) // Unlock immediately after creation
+	ws.accountMu.Unlock(genesisAccount)
 
 	if err != nil {
 		return fmt.Errorf("failed to create genesis account: %v", err)
@@ -326,18 +337,17 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply int
 
 	// Initialize validators
 	for _, validator := range genesisValidators {
-		// addValidator is internal and assumes ws.validatorMu is held
 		if err := ws.addValidator(validator); err != nil {
 			return fmt.Errorf("failed to add genesis validator %s: %v", validator.Address, err)
 		}
 	}
 
-	// Set initial state (Protected by chainMu)
+	// Set initial state
+	// ✅ Assign string directly
 	ws.totalSupply = initialSupply
 	ws.height = 0
 
 	// Calculate initial state root
-	// Protected by stateRootMu (write) and validatorMu (read - already held)
 	if err := ws.updateStateRoot(); err != nil {
 		return fmt.Errorf("failed to calculate initial state root: %v", err)
 	}
@@ -507,11 +517,19 @@ func (ws *WorldState) GetBalance(address string) (*big.Int, error) {
 }
 
 // UpdateBalance updates the balance for a given address (needed for slashing)
-func (ws *WorldState) UpdateBalance(address string, amount *big.Int) error {
+// UpdateBalance sets the balance of an account to a specific amount
+// ✅ FIX: Renamed argument 'amount' to 'newBalance' for clarity
+func (ws *WorldState) UpdateBalance(address string, newBalance *big.Int) error {
 	ws.accountMu.Lock(address)
 	defer ws.accountMu.Unlock(address)
 
-	if newBalance < 0 {
+	// Check if nil
+	if newBalance == nil {
+		return fmt.Errorf("new balance cannot be nil")
+	}
+
+	// ✅ FIX: Use .Sign() to check for negative BigInt
+	if newBalance.Sign() < 0 {
 		return fmt.Errorf("cannot set negative balance")
 	}
 
@@ -521,8 +539,8 @@ func (ws *WorldState) UpdateBalance(address string, amount *big.Int) error {
 		return fmt.Errorf("failed to get account %s: %w", address, err)
 	}
 
-	// Update the balance
-	account.Balance = newBalance
+	// ✅ FIX: Convert BigInt to string before assigning
+	account.Balance = newBalance.String()
 
 	// Save back using UpdateAccount
 	err = ws.accountManager.UpdateAccount(account)
@@ -681,23 +699,23 @@ func (ws *WorldState) UpdateValidator(validator *core.Validator) error {
 	return nil
 }
 
-// GetTotalSupply returns the total supply of tokens
-// GetTotalSupply returns the total supply of tokens
-func (ws *WorldState) GetTotalSupply() int64 {
-	// Use chainMu as this is a global chain statistic
+// ✅ UPDATE: Returns *big.Int instead of int64
+func (ws *WorldState) GetTotalSupply() *big.Int {
 	ws.chainMu.RLock()
 	defer ws.chainMu.RUnlock()
 
-	return ws.totalSupply
+	// Parse string -> BigInt safely
+	return math.ParseBigInt(ws.totalSupply)
 }
 
 // GetTotalStaked returns the total amount of staked tokens
-func (ws *WorldState) GetTotalStaked() int64 {
-	// Use chainMu as this is a global chain statistic
+// ✅ UPDATE: Returns *big.Int instead of int64
+func (ws *WorldState) GetTotalStaked() *big.Int {
 	ws.chainMu.RLock()
 	defer ws.chainMu.RUnlock()
 
-	return ws.totalStaked
+	// Parse string -> BigInt safely
+	return math.ParseBigInt(ws.totalStaked)
 }
 
 // GetShardID returns the shard ID
@@ -872,7 +890,8 @@ func (ws *WorldState) addValidator(validator *core.Validator) error {
 
 	// Initialize validator fields if needed
 	if validator.Delegators == nil {
-		validator.Delegators = make(map[string]int64)
+		// ✅ FIX: Change int64 to string
+		validator.Delegators = make(map[string]string)
 	}
 
 	// Set creation time if not set
@@ -1634,7 +1653,7 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 }
 
 // DistributeRewards distributes staking rewards to validators and delegators
-func (sm *StakingManager) DistributeRewards(totalRewards int64) error {
+func (sm *StakingManager) DistributeRewards(amount string) error {
 	ws := sm.worldState
 
 	// This is a heavy global operation.
@@ -2876,7 +2895,8 @@ func (ws *WorldState) InitializeAssetMaps() {
 		ws.assets = make(map[string]*AssetToken)
 	}
 	if ws.assetBalances == nil {
-		ws.assetBalances = make(map[string]map[string]int64)
+		// ✅ FIX: Change int64 to string
+		ws.assetBalances = make(map[string]map[string]string)
 	}
 	if ws.assetRegistry == nil {
 		ws.assetRegistry = make(map[string]string)
@@ -2925,11 +2945,12 @@ func (ws *WorldState) GetAssetStatistics() map[string]interface{} {
 	ws.chainMu.RLock()
 	defer ws.chainMu.RUnlock()
 
+	// Initialize stats with proper types
 	stats := map[string]interface{}{
 		"total_assets":  0,
 		"asset_types":   make(map[string]int),
 		"total_holders": 0,
-		"total_supply":  int64(0),
+		"total_supply":  "0", // ✅ Return string to avoid overflow
 	}
 
 	if ws.assets == nil {
@@ -2938,22 +2959,23 @@ func (ws *WorldState) GetAssetStatistics() map[string]interface{} {
 
 	assetTypes := make(map[string]int)
 	totalHolders := 0
-	totalSupply := int64(0)
+
+	// ✅ Use BigInt accumulator
+	totalSupplyBig := big.NewInt(0)
 
 	for _, asset := range ws.assets {
 		assetTypes[asset.AssetType]++
 
-		newTotal, err := math.SafeAdd(totalSupply, asset.TotalSupply)
-		if err != nil {
-			fmt.Printf("⚠️ GetAssetStatistics: overflow while summing asset supply for %s: %v\n", asset.ID, err)
-			continue
-		}
-		totalSupply = newTotal
+		// ✅ Parse and Add Total Supply
+		supplyBig := math.ParseBigInt(asset.TotalSupply)
+		totalSupplyBig.Add(totalSupplyBig, supplyBig)
 
 		// Count holders for this asset
 		if ws.assetBalances != nil && ws.assetBalances[asset.ID] != nil {
-			for _, balance := range ws.assetBalances[asset.ID] {
-				if balance > 0 {
+			for _, balanceStr := range ws.assetBalances[asset.ID] {
+				// ✅ Parse balance string to check if > 0
+				balBig := math.ParseBigInt(balanceStr)
+				if balBig.Sign() > 0 {
 					totalHolders++
 				}
 			}
@@ -2963,7 +2985,7 @@ func (ws *WorldState) GetAssetStatistics() map[string]interface{} {
 	stats["total_assets"] = len(ws.assets)
 	stats["asset_types"] = assetTypes
 	stats["total_holders"] = totalHolders
-	stats["total_supply"] = totalSupply
+	stats["total_supply"] = totalSupplyBig.String() // ✅ Return string
 
 	return stats
 }
@@ -2971,34 +2993,36 @@ func (ws *WorldState) GetAssetStatistics() map[string]interface{} {
 // ValidateAssetConsistency validates asset state consistency
 func (ws *WorldState) ValidateAssetConsistency() error {
 	if ws.assets == nil {
-		return nil // No assets to validate
+		return nil
 	}
 
 	for assetID, asset := range ws.assets {
-		// Validate asset structure
 		if asset.ID != assetID {
 			return fmt.Errorf("asset ID mismatch: key=%s, asset.ID=%s", assetID, asset.ID)
 		}
 
-		if asset.TotalSupply < 0 {
-			return fmt.Errorf("asset %s has negative total supply: %d", assetID, asset.TotalSupply)
+		// 1. Parse Total Supply (Now a String)
+		totalSupplyBig := math.ParseBigInt(asset.TotalSupply)
+
+		if totalSupplyBig.Sign() < 0 {
+			return fmt.Errorf("asset %s has negative total supply: %s", assetID, asset.TotalSupply)
 		}
 
 		// Validate asset balances don't exceed total supply
 		if ws.assetBalances != nil && ws.assetBalances[assetID] != nil {
-			circulatingSupply := int64(0)
-			for address, balance := range ws.assetBalances[assetID] {
-				if balance < 0 {
-					return fmt.Errorf("asset %s has negative balance for address %s: %d",
-						assetID, address, balance)
+			circulatingSupplyBig := big.NewInt(0)
+
+			for address, balanceStr := range ws.assetBalances[assetID] {
+				// Parse Balance String
+				balanceBig := math.ParseBigInt(balanceStr)
+
+				if balanceBig.Sign() < 0 {
+					return fmt.Errorf("asset %s has negative balance for address %s: %s",
+						assetID, address, balanceStr)
 				}
 
-				newSupply, err := math.SafeAdd(circulatingSupply, balance)
-				if err != nil {
-					return fmt.Errorf("asset %s circulating supply overflow while summing balances: %v",
-						assetID, err)
-				}
-				circulatingSupply = newSupply
+				// Accumulate
+				circulatingSupplyBig.Add(circulatingSupplyBig, balanceBig)
 
 				if err := account.ValidateAddress(address); err != nil {
 					return fmt.Errorf("asset %s has invalid holder address %s: %v",
@@ -3006,18 +3030,19 @@ func (ws *WorldState) ValidateAssetConsistency() error {
 				}
 			}
 
-			if circulatingSupply > asset.TotalSupply {
-				return fmt.Errorf("asset %s circulating supply (%d) exceeds total supply (%d)",
-					assetID, circulatingSupply, asset.TotalSupply)
+			// Compare Circulating vs Total
+			if circulatingSupplyBig.Cmp(totalSupplyBig) > 0 {
+				return fmt.Errorf("asset %s circulating supply (%s) exceeds total supply (%s)",
+					assetID, circulatingSupplyBig.String(), totalSupplyBig.String())
 			}
 		}
 
-		// Validate creator address
+		// Validate creator
 		if err := account.ValidateAddress(asset.Creator); err != nil {
 			return fmt.Errorf("asset %s has invalid creator address: %v", assetID, err)
 		}
 
-		// Validate expiration date
+		// Validate expiration
 		if asset.ExpirationDate != nil && *asset.ExpirationDate <= asset.CreatedAt {
 			return fmt.Errorf("asset %s has expiration date before creation date", assetID)
 		}

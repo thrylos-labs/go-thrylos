@@ -13,12 +13,14 @@ package validator
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
@@ -49,7 +51,7 @@ type ValidatorMetrics struct {
 	LastActivity       int64       `json:"last_activity"`
 	UptimePercentage   float64     `json:"uptime_percentage"`
 	SlashCount         int         `json:"slash_count"`
-	TotalSlashed       int64       `json:"total_slashed"`
+	TotalSlashed       string      `json:"total_slashed"`
 	JailHistory        []JailEvent `json:"jail_history"`
 }
 
@@ -57,10 +59,13 @@ type ValidatorMetrics struct {
 type SlashingEvent struct {
 	ValidatorAddress string         `json:"validator_address"`
 	Reason           SlashingReason `json:"reason"`
-	Amount           int64          `json:"amount"`
-	BlockHeight      int64          `json:"block_height"`
-	Timestamp        int64          `json:"timestamp"`
-	Evidence         []byte         `json:"evidence"`
+
+	// ✅ Change int64 -> string
+	Amount string `json:"amount"`
+
+	BlockHeight int64  `json:"block_height"`
+	Timestamp   int64  `json:"timestamp"`
+	Evidence    []byte `json:"evidence"`
 }
 
 // SlashingReason represents why a validator was slashed
@@ -92,10 +97,11 @@ func NewManager(config *config.Config, worldState *state.WorldState) *Manager {
 }
 
 // RegisterValidator registers a new validator
+// ✅ UPDATE: stake changed from int64 -> string
 func (vm *Manager) RegisterValidator(
 	address string,
 	pubkey []byte,
-	stake int64,
+	stake string,
 	commission float64,
 ) error {
 	vm.mu.Lock()
@@ -110,8 +116,13 @@ func (vm *Manager) RegisterValidator(
 		return fmt.Errorf("public key cannot be empty")
 	}
 
-	if stake < vm.config.Staking.MinValidatorStake {
-		return fmt.Errorf("stake %d below minimum %d",
+	// 1. Validate Stake Amount (String Comparison)
+	stakeBig := math.ParseBigInt(stake)
+	minStakeBig := math.ParseBigInt(vm.config.Staking.MinValidatorStake)
+
+	// Compare: if stake < minStake
+	if stakeBig.Cmp(minStakeBig) < 0 {
+		return fmt.Errorf("stake %s below minimum %s",
 			stake, vm.config.Staking.MinValidatorStake)
 	}
 
@@ -127,12 +138,19 @@ func (vm *Manager) RegisterValidator(
 
 	// Create validator
 	validator := &core.Validator{
-		Address:        address,
-		Pubkey:         pubkey,
-		Stake:          stake,
-		SelfStake:      stake, // Initially all stake is self-stake
-		DelegatedStake: 0,
-		Delegators:     make(map[string]int64),
+		Address: address,
+		Pubkey:  pubkey,
+
+		// ✅ Fix: Assign string directly
+		Stake:     stake,
+		SelfStake: stake, // Initially all stake is self-stake
+
+		// ✅ Fix: Use "0" string instead of int 0
+		DelegatedStake: "0",
+
+		// ✅ Fix: Initialize map as map[string]string
+		Delegators: make(map[string]string),
+
 		Commission:     commission,
 		Active:         false, // Not active until meeting requirements
 		BlocksProposed: 0,
@@ -217,6 +235,7 @@ func (vm *Manager) DeactivateValidator(address string, reason string) error {
 }
 
 // SlashValidator slashes a validator for misbehavior
+// SlashValidator slashes a validator for misbehavior
 func (vm *Manager) SlashValidator(
 	address string,
 	reason SlashingReason,
@@ -237,41 +256,61 @@ func (vm *Manager) SlashValidator(
 	switch reason {
 	case SlashingDoubleSign:
 		slashFraction = vm.config.Staking.SlashFractionDoubleSign
-		jailDuration = 30 * 24 * time.Hour // 30 days for double signing
+		jailDuration = 30 * 24 * time.Hour
 	case SlashingDowntime:
 		slashFraction = vm.config.Staking.SlashFractionDowntime
 		jailDuration = vm.config.Staking.DowntimeJailDuration
 	case SlashingInvalidBlock:
-		slashFraction = 0.01          // 1% for invalid blocks
-		jailDuration = 24 * time.Hour // 1 day
+		slashFraction = 0.01 // 1%
+		jailDuration = 24 * time.Hour
 	default:
 		return fmt.Errorf("unknown slashing reason: %s", reason)
 	}
 
-	slashAmount := int64(float64(validator.Stake) * slashFraction)
-	if slashAmount <= 0 {
-		slashAmount = 1 // Minimum slash of 1 unit
+	// 1. Parse Stake to BigInt
+	stakeBig := math.ParseBigInt(validator.Stake)
+
+	// 2. Calculate Slash Amount: (Stake * Fraction)
+	// Use BigFloat for precision multiplication
+	fStake := new(big.Float).SetInt(stakeBig)
+	fFraction := big.NewFloat(slashFraction)
+	fSlashResult := new(big.Float).Mul(fStake, fFraction)
+
+	// Convert result back to BigInt
+	slashAmountBig, _ := fSlashResult.Int(nil)
+
+	// Ensure minimum slash of 1 Wei if fraction > 0 but result is 0
+	if slashFraction > 0 && slashAmountBig.Sign() == 0 {
+		slashAmountBig = big.NewInt(1)
 	}
 
-	// Apply slashing
-	validator.Stake -= slashAmount
-	if validator.Stake < 0 {
-		validator.Stake = 0
+	// 3. Apply Slashing: Stake - SlashAmount
+	stakeBig.Sub(stakeBig, slashAmountBig)
+
+	// Clamp to 0 if negative
+	if stakeBig.Sign() < 0 {
+		stakeBig.SetInt64(0)
 	}
+
+	// 4. Update Validator State (Store as string)
+	validator.Stake = stakeBig.String()
 
 	// Jail the validator
 	validator.JailUntil = time.Now().Add(jailDuration).Unix()
 	validator.Active = false
 	validator.UpdatedAt = time.Now().Unix()
 
-	// Record slashing event
+	// 5. Record slashing event (Convert slash amount to string)
 	slashingEvent := &SlashingEvent{
 		ValidatorAddress: address,
 		Reason:           reason,
-		Amount:           slashAmount,
-		BlockHeight:      vm.worldState.GetHeight(),
-		Timestamp:        time.Now().Unix(),
-		Evidence:         evidence,
+
+		// ✅ Fix: Amount is likely now a string field in SlashingEvent too
+		Amount: slashAmountBig.String(),
+
+		BlockHeight: vm.worldState.GetHeight(),
+		Timestamp:   time.Now().Unix(),
+		Evidence:    evidence,
 	}
 
 	if vm.slashingEvents[address] == nil {
@@ -279,10 +318,15 @@ func (vm *Manager) SlashValidator(
 	}
 	vm.slashingEvents[address] = append(vm.slashingEvents[address], slashingEvent)
 
-	// Update metrics
+	// 6. Update metrics
 	if metrics, exists := vm.validatorMetrics[address]; exists {
 		metrics.SlashCount++
-		metrics.TotalSlashed += slashAmount
+
+		// Accumulate TotalSlashed (Parse -> Add -> Store)
+		currentSlashed := math.ParseBigInt(metrics.TotalSlashed)
+		currentSlashed.Add(currentSlashed, slashAmountBig)
+		metrics.TotalSlashed = currentSlashed.String()
+
 		metrics.JailHistory = append(metrics.JailHistory, JailEvent{
 			Reason:   string(reason),
 			JailTime: validator.JailUntil,
@@ -480,7 +524,9 @@ func (vm *Manager) updateUptimePercentage(metrics *ValidatorMetrics) {
 }
 
 // AddDelegation adds a delegation to a validator
-func (vm *Manager) AddDelegation(validatorAddr, delegatorAddr string, amount int64) error {
+// AddDelegation adds a delegation to a validator
+// ✅ UPDATE: amount changed from int64 -> string
+func (vm *Manager) AddDelegation(validatorAddr, delegatorAddr string, amount string) error {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
@@ -495,21 +541,49 @@ func (vm *Manager) AddDelegation(validatorAddr, delegatorAddr string, amount int
 			vm.config.Staking.MaxDelegationsPerValidator)
 	}
 
-	// Add delegation
+	// Initialize map correctly if nil
 	if validator.Delegators == nil {
-		validator.Delegators = make(map[string]int64)
+		// ✅ Fix: Initialize as map[string]string
+		validator.Delegators = make(map[string]string)
 	}
 
-	validator.Delegators[delegatorAddr] += amount
-	validator.DelegatedStake += amount
-	validator.Stake += amount
+	// 1. Parse Input Amount
+	amountBig := math.ParseBigInt(amount)
+
+	// 2. Update Specific Delegator Entry
+	// Get current delegation (default to "0" if missing)
+	currentDelegationStr := "0"
+	if val, exists := validator.Delegators[delegatorAddr]; exists {
+		currentDelegationStr = val
+	}
+
+	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+
+	// Add amount
+	currentDelegationBig.Add(currentDelegationBig, amountBig)
+
+	// Store back as string
+	validator.Delegators[delegatorAddr] = currentDelegationBig.String()
+
+	// 3. Update Total Delegated Stake
+	totalDelegatedBig := math.ParseBigInt(validator.DelegatedStake)
+	totalDelegatedBig.Add(totalDelegatedBig, amountBig)
+	validator.DelegatedStake = totalDelegatedBig.String()
+
+	// 4. Update Total Validator Stake (Self + Delegated)
+	// Note: Assuming 'Stake' includes delegated amounts. If Stake is only self-stake, remove this step.
+	totalStakeBig := math.ParseBigInt(validator.Stake)
+	totalStakeBig.Add(totalStakeBig, amountBig)
+	validator.Stake = totalStakeBig.String()
+
 	validator.UpdatedAt = time.Now().Unix()
 
 	return vm.worldState.UpdateValidator(validator)
 }
 
 // RemoveDelegation removes a delegation from a validator
-func (vm *Manager) RemoveDelegation(validatorAddr, delegatorAddr string, amount int64) error {
+// ✅ UPDATE: amount changed from int64 -> string
+func (vm *Manager) RemoveDelegation(validatorAddr, delegatorAddr string, amount string) error {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
@@ -518,24 +592,49 @@ func (vm *Manager) RemoveDelegation(validatorAddr, delegatorAddr string, amount 
 		return fmt.Errorf("validator not found: %v", err)
 	}
 
-	currentDelegation := validator.Delegators[delegatorAddr]
-	if currentDelegation < amount {
-		return fmt.Errorf("insufficient delegation: have %d, trying to remove %d",
-			currentDelegation, amount)
+	// 1. Parse Input Amount
+	amountBig := math.ParseBigInt(amount)
+
+	// 2. Get Current Delegation
+	currentDelegationStr := "0"
+	if val, exists := validator.Delegators[delegatorAddr]; exists {
+		currentDelegationStr = val
+	}
+	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+
+	// 3. Check Insufficient Funds: if current < amount
+	if currentDelegationBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient delegation: have %s, trying to remove %s",
+			currentDelegationStr, amount)
 	}
 
-	// Remove delegation
-	validator.Delegators[delegatorAddr] -= amount
-	if validator.Delegators[delegatorAddr] == 0 {
+	// 4. Remove Delegation: Current - Amount
+	currentDelegationBig.Sub(currentDelegationBig, amountBig)
+
+	// Update Map
+	if currentDelegationBig.Sign() == 0 {
 		delete(validator.Delegators, delegatorAddr)
+	} else {
+		validator.Delegators[delegatorAddr] = currentDelegationBig.String()
 	}
 
-	validator.DelegatedStake -= amount
-	validator.Stake -= amount
+	// 5. Update Total Delegated Stake
+	delegatedStakeBig := math.ParseBigInt(validator.DelegatedStake)
+	delegatedStakeBig.Sub(delegatedStakeBig, amountBig)
+	validator.DelegatedStake = delegatedStakeBig.String()
+
+	// 6. Update Total Stake (Self + Delegated)
+	totalStakeBig := math.ParseBigInt(validator.Stake)
+	totalStakeBig.Sub(totalStakeBig, amountBig)
+	validator.Stake = totalStakeBig.String()
+
 	validator.UpdatedAt = time.Now().Unix()
 
-	// Check if validator still meets minimum requirements
-	if validator.Active && validator.Stake < vm.config.Staking.MinValidatorStake {
+	// 7. Check Minimum Requirements
+	minStakeBig := math.ParseBigInt(vm.config.Staking.MinValidatorStake)
+
+	// if Stake < MinStake
+	if validator.Active && totalStakeBig.Cmp(minStakeBig) < 0 {
 		validator.Active = false
 	}
 
@@ -597,30 +696,42 @@ func (vm *Manager) GetValidatorStats() map[string]interface{} {
 	allValidators := vm.worldState.GetActiveValidators()
 	totalValidators := vm.worldState.GetValidatorCount()
 
-	totalStake := int64(0)
-	totalDelegatedStake := int64(0)
+	// 1. Initialize Accumulators as BigInts
+	totalStakeBig := big.NewInt(0)
+	totalDelegatedStakeBig := big.NewInt(0)
 	jailedCount := 0
 
+	// 2. Iterate and Accumulate
 	for _, validator := range allValidators {
-		totalStake += validator.Stake
-		totalDelegatedStake += validator.DelegatedStake
+		// Parse Stake String -> BigInt
+		stakeVal := math.ParseBigInt(validator.Stake)
+		totalStakeBig.Add(totalStakeBig, stakeVal)
+
+		// Parse DelegatedStake String -> BigInt
+		delegatedVal := math.ParseBigInt(validator.DelegatedStake)
+		totalDelegatedStakeBig.Add(totalDelegatedStakeBig, delegatedVal)
+
 		if vm.isJailed(validator) {
 			jailedCount++
 		}
 	}
 
-	avgStake := int64(0)
+	// 3. Calculate Average Stake
+	avgStakeBig := big.NewInt(0)
 	if len(allValidators) > 0 {
-		avgStake = totalStake / int64(len(allValidators))
+		// Avg = Total / Count
+		validatorCountBig := big.NewInt(int64(len(allValidators)))
+		avgStakeBig.Div(totalStakeBig, validatorCountBig)
 	}
 
+	// 4. Return results (as strings to preserve precision)
 	return map[string]interface{}{
 		"total_validators":      totalValidators,
 		"active_validators":     len(allValidators),
 		"jailed_validators":     jailedCount,
-		"total_stake":           totalStake,
-		"total_delegated_stake": totalDelegatedStake,
-		"average_stake":         avgStake,
+		"total_stake":           totalStakeBig.String(),          // ✅ Return String
+		"total_delegated_stake": totalDelegatedStakeBig.String(), // ✅ Return String
+		"average_stake":         avgStakeBig.String(),            // ✅ Return String
 		"metrics_tracked":       len(vm.validatorMetrics),
 		"slashing_events":       vm.getTotalSlashingEvents(),
 	}
@@ -666,9 +777,13 @@ func (vm *Manager) ValidateValidatorSet() error {
 	activeValidators := vm.worldState.GetActiveValidators()
 
 	for _, validator := range activeValidators {
-		// Check minimum stake
-		if validator.Stake < vm.config.Staking.MinValidatorStake {
-			return fmt.Errorf("validator %s has insufficient stake: %d < %d",
+		// 1. Check minimum stake (String vs String)
+		stakeBig := math.ParseBigInt(validator.Stake)
+		minStakeBig := math.ParseBigInt(vm.config.Staking.MinValidatorStake)
+
+		// Compare: if stake < minStake
+		if stakeBig.Cmp(minStakeBig) < 0 {
+			return fmt.Errorf("validator %s has insufficient stake: %s < %s",
 				validator.Address, validator.Stake, vm.config.Staking.MinValidatorStake)
 		}
 
@@ -677,21 +792,28 @@ func (vm *Manager) ValidateValidatorSet() error {
 			return fmt.Errorf("validator %s is jailed but marked as active", validator.Address)
 		}
 
-		// Validate commission
+		// Validate commission (Commission is likely still float64, so this is fine)
 		if validator.Commission < 0 || validator.Commission > vm.config.Staking.MaxCommission {
 			return fmt.Errorf("validator %s has invalid commission: %.4f",
 				validator.Address, validator.Commission)
 		}
 
-		// Validate delegations
-		totalDelegated := int64(0)
-		for _, amount := range validator.Delegators {
-			totalDelegated += amount
+		// 2. Validate delegations (Map Summation)
+		totalDelegatedBig := big.NewInt(0)
+
+		// Iterate over map[string]string
+		for _, amountStr := range validator.Delegators {
+			amountBig := math.ParseBigInt(amountStr)
+			totalDelegatedBig.Add(totalDelegatedBig, amountBig)
 		}
 
-		if totalDelegated != validator.DelegatedStake {
-			return fmt.Errorf("validator %s delegation mismatch: calculated %d, stored %d",
-				validator.Address, totalDelegated, validator.DelegatedStake)
+		// Compare calculated vs stored
+		storedDelegatedBig := math.ParseBigInt(validator.DelegatedStake)
+
+		// Compare: if calculated != stored
+		if totalDelegatedBig.Cmp(storedDelegatedBig) != 0 {
+			return fmt.Errorf("validator %s delegation mismatch: calculated %s, stored %s",
+				validator.Address, totalDelegatedBig.String(), validator.DelegatedStake)
 		}
 	}
 

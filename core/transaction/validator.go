@@ -18,13 +18,15 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"math"
+	stdmath "math"
 	"math/big"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
@@ -80,83 +82,76 @@ func NewValidatorWithReplayConfig(shardID account.ShardID, totalShards int, cfg 
 	}
 }
 
-// CreateTransaction creates a new transaction with proper hash calculation
-func (v *Validator) CreateTransaction(
-	from, to string,
-	amount int64,
-	gas int64,
-	gasPrice int64,
-	nonce uint64,
-	txType core.TransactionType,
-	data []byte,
-) (*core.Transaction, error) {
+// Validator method to create and sign a transaction
+// ✅ UPDATE: Added 'privateKey crypto.PrivateKey' as the last argument
+func (v *Validator) CreateTransaction(from, to string, amount string, gas int64, gasPrice string, nonce uint64, txType core.TransactionType, data []byte, privateKey crypto.PrivateKey) (*core.Transaction, error) {
 
-	// Validate input addresses
-	if err := account.ValidateAddress(from); err != nil {
-		return nil, fmt.Errorf("invalid sender address: %v", err)
-	}
-
-	// Validate recipient address for applicable transaction types
-	if to != "" {
-		if err := account.ValidateAddress(to); err != nil {
-			return nil, fmt.Errorf("invalid recipient address: %v", err)
-		}
-	}
-
-	// Normalize addresses to lowercase for consistency
-	from = strings.ToLower(from)
-	if to != "" {
-		to = strings.ToLower(to)
-	}
-
+	// Create the transaction
 	tx := &core.Transaction{
-		Id:        generateTransactionID(),
+		Id:        uuid.New().String(),
 		From:      from,
 		To:        to,
 		Amount:    amount,
 		Gas:       gas,
 		GasPrice:  gasPrice,
 		Nonce:     nonce,
-		Data:      data,
 		Type:      txType,
+		Data:      data,
 		Timestamp: time.Now().Unix(),
 	}
 
-	// Calculate hash
-	hash, err := v.CalculateTransactionHash(tx)
-	if err != nil {
-		return nil, err
+	// ✅ Fix: Pass the 'privateKey' argument to SignTransaction
+	if err := v.SignTransaction(tx, privateKey); err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %v", err)
 	}
-	tx.Hash = hash
 
 	return tx, nil
 }
 
 // CreateTransferTransaction creates a transfer transaction
-func (v *Validator) CreateTransferTransaction(from, to string, amount, gas, gasPrice int64, nonce uint64) (*core.Transaction, error) {
-	if amount < v.config.Economics.MinTransfer {
-		return nil, fmt.Errorf("transfer amount %d below minimum %d", amount, v.config.Economics.MinTransfer)
+// ✅ UPDATE: amount and gasPrice are now 'string'
+func (v *Validator) CreateTransferTransaction(from, to string, amount string, gas int64, gasPrice string, nonce uint64, privateKey crypto.PrivateKey) (*core.Transaction, error) {
+	amtBig := math.ParseBigInt(amount)
+	minTransferBig := math.ParseBigInt(v.config.Economics.MinTransfer)
+
+	if amtBig.Cmp(minTransferBig) < 0 {
+		return nil, fmt.Errorf("transfer amount %s below minimum %s", amount, v.config.Economics.MinTransfer)
 	}
-	return v.CreateTransaction(from, to, amount, gas, gasPrice, nonce, core.TransactionType_TRANSFER, nil)
+
+	// Pass privateKey down
+	return v.CreateTransaction(from, to, amount, gas, gasPrice, nonce, core.TransactionType_TRANSFER, nil, privateKey)
 }
 
 // CreateStakeTransaction creates a staking transaction
-func (v *Validator) CreateStakeTransaction(from string, amount, gas, gasPrice int64, nonce uint64) (*core.Transaction, error) {
-	if amount < v.config.Economics.MinStake {
-		return nil, fmt.Errorf("stake amount %d below minimum %d", amount, v.config.Economics.MinStake)
+// ✅ UPDATE: amount and gasPrice are now 'string'
+func (v *Validator) CreateStakeTransaction(from string, amount string, gas int64, gasPrice string, nonce uint64, privateKey crypto.PrivateKey) (*core.Transaction, error) {
+	amtBig := math.ParseBigInt(amount)
+	minStakeBig := math.ParseBigInt(v.config.Economics.MinStake)
+
+	if amtBig.Cmp(minStakeBig) < 0 {
+		return nil, fmt.Errorf("stake amount %s below minimum %s", amount, v.config.Economics.MinStake)
 	}
-	return v.CreateTransaction(from, "", amount, gas, gasPrice, nonce, core.TransactionType_STAKE, nil)
+
+	// Pass privateKey down
+	return v.CreateTransaction(from, "", amount, gas, gasPrice, nonce, core.TransactionType_STAKE, nil, privateKey)
 }
 
 // CreateDelegateTransaction creates a delegation transaction
-func (v *Validator) CreateDelegateTransaction(from, validator string, amount, gas, gasPrice int64, nonce uint64) (*core.Transaction, error) {
-	if amount < v.config.Economics.MinDelegation {
-		return nil, fmt.Errorf("delegation amount %d below minimum %d", amount, v.config.Economics.MinDelegation)
+// ✅ UPDATE: amount and gasPrice are now 'string'
+func (v *Validator) CreateDelegateTransaction(from, validator string, amount string, gas int64, gasPrice string, nonce uint64, privateKey crypto.PrivateKey) (*core.Transaction, error) {
+	amtBig := math.ParseBigInt(amount)
+	minDelegationBig := math.ParseBigInt(v.config.Economics.MinDelegation)
+
+	if amtBig.Cmp(minDelegationBig) < 0 {
+		return nil, fmt.Errorf("delegation amount %s below minimum %s", amount, v.config.Economics.MinDelegation)
 	}
+
 	if from == validator {
 		return nil, fmt.Errorf("cannot delegate to self")
 	}
-	return v.CreateTransaction(from, validator, amount, gas, gasPrice, nonce, core.TransactionType_DELEGATE, nil)
+
+	// Pass privateKey down
+	return v.CreateTransaction(from, validator, amount, gas, gasPrice, nonce, core.TransactionType_DELEGATE, nil, privateKey)
 }
 
 // CalculateTransactionHash calculates the Blake2b hash of a transaction
@@ -168,20 +163,16 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, erro
 	buf.WriteString(tx.From)
 	buf.WriteString(tx.To)
 
-	// Write amount as bytes
-	amountBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(amountBytes, uint64(tx.Amount))
-	buf.Write(amountBytes)
+	// ✅ FIX: Write Amount string directly (do not convert to uint64)
+	buf.WriteString(tx.Amount)
 
-	// Write gas as bytes
+	// Write gas as bytes (Gas is still int64, so this is fine)
 	gasBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
 	buf.Write(gasBytes)
 
-	// Write gas price as bytes
-	gasPriceBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(gasPriceBytes, uint64(tx.GasPrice))
-	buf.Write(gasPriceBytes)
+	// ✅ FIX: Write GasPrice string directly
+	buf.WriteString(tx.GasPrice)
 
 	// Write nonce as bytes
 	nonceBytes := make([]byte, 8)
@@ -331,7 +322,6 @@ func (v *Validator) validateSignature(tx *core.Transaction) error {
 }
 
 // calculateSignableHash creates a hash that includes chain ID and all transaction context
-// This prevents replay attacks across different chains and ensures complete transaction integrity
 func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) {
 	var buf bytes.Buffer
 
@@ -339,28 +329,24 @@ func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) 
 	chainID := v.config.Network.ChainID
 	buf.WriteString(chainID)
 
-	// 2. Include protocol version for future upgrades
+	// 2. Include protocol version
 	buf.WriteString("v1")
 
-	// 3. Include all transaction fields (same as hash calculation but with chain context)
+	// 3. Include all transaction fields
 	buf.WriteString(tx.Id)
 	buf.WriteString(tx.From)
 	buf.WriteString(tx.To)
 
-	// Write amount as bytes
-	amountBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(amountBytes, uint64(tx.Amount))
-	buf.Write(amountBytes)
+	// ✅ FIX: Write Amount string directly (do not convert to uint64)
+	buf.WriteString(tx.Amount)
 
-	// Write gas as bytes
+	// Write gas as bytes (Gas is still int64, so binary packing is fine)
 	gasBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
 	buf.Write(gasBytes)
 
-	// Write gas price as bytes
-	gasPriceBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(gasPriceBytes, uint64(tx.GasPrice))
-	buf.Write(gasPriceBytes)
+	// ✅ FIX: Write GasPrice string directly
+	buf.WriteString(tx.GasPrice)
 
 	// Write nonce as bytes - CRITICAL for replay protection
 	nonceBytes := make([]byte, 8)
@@ -389,15 +375,14 @@ func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) 
 func (v *Validator) calculateSignableHashWithReplayProtection(tx *core.Transaction, finalizedBlockHash string) ([]byte, error) {
 	var buf bytes.Buffer
 
-	// 1. Include chain ID to prevent cross-chain replay attacks
+	// 1. Include chain ID
 	chainID := v.config.Network.ChainID
 	buf.WriteString(chainID)
 
-	// 2. Include protocol version (v2 for enhanced replay protection)
+	// 2. Include protocol version
 	buf.WriteString("v2")
 
-	// 3. ✅ CRITICAL: Include finalized block hash for post-reorg replay protection
-	// This binds the transaction to a specific finalized state
+	// 3. Include finalized block hash
 	if finalizedBlockHash != "" {
 		buf.WriteString(finalizedBlockHash)
 	} else if v.replayConfig.RequireFinalizedBlock && !v.replayConfig.AllowEmptyFinalizedBlock {
@@ -409,22 +394,18 @@ func (v *Validator) calculateSignableHashWithReplayProtection(tx *core.Transacti
 	buf.WriteString(tx.From)
 	buf.WriteString(tx.To)
 
-	// Write amount as bytes
-	amountBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(amountBytes, uint64(tx.Amount))
-	buf.Write(amountBytes)
+	// ✅ FIX: Write Amount string directly (do not convert to uint64)
+	buf.WriteString(tx.Amount)
 
-	// Write gas as bytes
+	// Write gas as bytes (Gas is still int64, so this is fine)
 	gasBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
 	buf.Write(gasBytes)
 
-	// Write gas price as bytes
-	gasPriceBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(gasPriceBytes, uint64(tx.GasPrice))
-	buf.Write(gasPriceBytes)
+	// ✅ FIX: Write GasPrice string directly
+	buf.WriteString(tx.GasPrice)
 
-	// Write nonce as bytes - CRITICAL for replay protection
+	// Write nonce as bytes
 	nonceBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(nonceBytes, tx.Nonce)
 	buf.Write(nonceBytes)
@@ -609,12 +590,12 @@ func (v *Validator) validateStructure(tx *core.Transaction) error {
 		return fmt.Errorf("sender address cannot be empty")
 	}
 
-	// Validate sender address format (tl format)
+	// Validate sender address format
 	if err := account.ValidateAddress(tx.From); err != nil {
 		return fmt.Errorf("invalid sender address format: %v", err)
 	}
 
-	// Validate recipient address for applicable transaction types
+	// Validate recipient
 	if tx.Type == core.TransactionType_TRANSFER ||
 		tx.Type == core.TransactionType_DELEGATE ||
 		tx.Type == core.TransactionType_UNDELEGATE {
@@ -626,32 +607,39 @@ func (v *Validator) validateStructure(tx *core.Transaction) error {
 		}
 	}
 
-	// Amount validation
-	if tx.Amount < 0 {
+	// ✅ FIX: Parse Amount String to BigInt
+	amountBig := math.ParseBigInt(tx.Amount)
+
+	// Amount validation: Check if negative
+	if amountBig.Sign() < 0 {
 		return fmt.Errorf("transaction amount cannot be negative")
 	}
 
-	// Type-specific amount validation
+	// Type-specific amount validation using BigInt comparison
 	switch tx.Type {
 	case core.TransactionType_TRANSFER:
-		if tx.Amount < v.config.Economics.MinTransfer {
-			return fmt.Errorf("transfer amount %d below minimum %d", tx.Amount, v.config.Economics.MinTransfer)
+		minTransfer := math.ParseBigInt(v.config.Economics.MinTransfer)
+		if amountBig.Cmp(minTransfer) < 0 {
+			return fmt.Errorf("transfer amount %s below minimum %s", tx.Amount, v.config.Economics.MinTransfer)
 		}
 	case core.TransactionType_STAKE:
-		if tx.Amount < v.config.Economics.MinStake {
-			return fmt.Errorf("stake amount %d below minimum %d", tx.Amount, v.config.Economics.MinStake)
+		minStake := math.ParseBigInt(v.config.Economics.MinStake)
+		if amountBig.Cmp(minStake) < 0 {
+			return fmt.Errorf("stake amount %s below minimum %s", tx.Amount, v.config.Economics.MinStake)
 		}
 	case core.TransactionType_DELEGATE:
-		if tx.Amount < v.config.Economics.MinDelegation {
-			return fmt.Errorf("delegation amount %d below minimum %d", tx.Amount, v.config.Economics.MinDelegation)
+		minDelegation := math.ParseBigInt(v.config.Economics.MinDelegation)
+		if amountBig.Cmp(minDelegation) < 0 {
+			return fmt.Errorf("delegation amount %s below minimum %s", tx.Amount, v.config.Economics.MinDelegation)
 		}
 	case core.TransactionType_CLAIM_REWARDS:
-		if tx.Amount != 0 {
-			return fmt.Errorf("claim rewards transaction should have zero amount, got %d", tx.Amount)
+		// Check if explicitly 0
+		if amountBig.Sign() != 0 {
+			return fmt.Errorf("claim rewards transaction should have zero amount, got %s", tx.Amount)
 		}
 	}
 
-	// Gas validation with upper and lower bounds
+	// Gas validation (Gas Limit is typically still int64)
 	if tx.Gas < v.config.Economics.MinGasLimit {
 		return fmt.Errorf("gas too low: minimum %d, got %d", v.config.Economics.MinGasLimit, tx.Gas)
 	}
@@ -660,13 +648,20 @@ func (v *Validator) validateStructure(tx *core.Transaction) error {
 		return fmt.Errorf("gas too high: maximum %d, got %d", v.config.Economics.MaxGasPerTx, tx.Gas)
 	}
 
-	// Gas price validation with upper and lower bounds
-	if tx.GasPrice < v.config.Economics.BaseGasPrice {
-		return fmt.Errorf("gas price %d below minimum %d", tx.GasPrice, v.config.Economics.BaseGasPrice)
+	// ✅ FIX: Gas Price validation (Gas Price is now a String/BigInt)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	baseGasPrice := math.ParseBigInt(v.config.Economics.BaseGasPrice)
+
+	// Check minimum gas price
+	if gasPriceBig.Cmp(baseGasPrice) < 0 {
+		return fmt.Errorf("gas price %s below minimum %s", tx.GasPrice, v.config.Economics.BaseGasPrice)
 	}
 
-	if tx.GasPrice > v.config.Economics.MaxGasPrice {
-		return fmt.Errorf("gas price too high: maximum %d, got %d", v.config.Economics.MaxGasPrice, tx.GasPrice)
+	// Check maximum gas price (Assuming MaxGasPrice is also string in config)
+	// If MaxGasPrice is still int64 in config, you need to cast it: big.NewInt(v.config...)
+	maxGasPrice := math.ParseBigInt(v.config.Economics.MaxGasPrice)
+	if gasPriceBig.Cmp(maxGasPrice) > 0 {
+		return fmt.Errorf("gas price too high: maximum %s, got %s", v.config.Economics.MaxGasPrice, tx.GasPrice)
 	}
 
 	// Signature validation
@@ -674,7 +669,7 @@ func (v *Validator) validateStructure(tx *core.Transaction) error {
 		return fmt.Errorf("transaction signature cannot be empty")
 	}
 
-	// Timestamp validation using config values
+	// Timestamp validation
 	currentTime := time.Now().Unix()
 	maxFutureTime := currentTime + int64(v.config.Consensus.MaxTimestampSkew.Seconds())
 	maxPastTime := currentTime - int64(v.config.Consensus.MaxTimestampAge.Seconds())
@@ -865,28 +860,34 @@ func safeMultiply(a, b int64, operation string) (int64, error) {
 		return 0, nil
 	}
 
-	// Check for overflow: if a * b would overflow, then a > MaxInt64 / b
-	if a > 0 && b > 0 && a > math.MaxInt64/b {
-		return 0, fmt.Errorf("%s would overflow (tried to multiply %d * %d)", operation, a, b)
+	// Use stdmath.MaxInt64 instead of math.MaxInt64
+	if a > 0 && b > 0 && a > stdmath.MaxInt64/b {
+		return 0, fmt.Errorf("%s would overflow", operation)
 	}
-	if a < 0 && b < 0 && a < math.MaxInt64/b {
-		return 0, fmt.Errorf("%s would overflow (tried to multiply %d * %d)", operation, a, b)
+	if a < 0 && b < 0 && a < stdmath.MaxInt64/b {
+		return 0, fmt.Errorf("%s would overflow", operation)
 	}
-	if (a > 0 && b < 0 && b < math.MinInt64/a) || (a < 0 && b > 0 && a < math.MinInt64/b) {
-		return 0, fmt.Errorf("%s would underflow (tried to multiply %d * %d)", operation, a, b)
+	if (a > 0 && b < 0 && b < stdmath.MinInt64/a) || (a < 0 && b > 0 && a < stdmath.MinInt64/b) {
+		return 0, fmt.Errorf("%s would underflow", operation)
 	}
 
 	return a * b, nil
 }
 
+// Define constants locally to avoid conflict with your custom 'math' package
+const (
+	MaxInt64 = 1<<63 - 1
+	MinInt64 = -1 << 63
+)
+
 // safeAdd performs addition with overflow check
 func safeAdd(a, b int64, operation string) (int64, error) {
 	// Check for positive overflow
-	if a > 0 && b > 0 && a > math.MaxInt64-b {
+	if a > 0 && b > 0 && a > MaxInt64-b {
 		return 0, fmt.Errorf("%s would overflow (tried to add %d + %d)", operation, a, b)
 	}
 	// Check for negative overflow (underflow)
-	if a < 0 && b < 0 && a < math.MinInt64-b {
+	if a < 0 && b < 0 && a < MinInt64-b {
 		return 0, fmt.Errorf("%s would underflow (tried to add %d + %d)", operation, a, b)
 	}
 
@@ -926,23 +927,33 @@ func (v *Validator) calculateTotalCost(amount, gas, gasPrice int64) (int64, erro
 
 // validateTransfer validates transfer transaction logic
 func (v *Validator) validateTransfer(tx *core.Transaction, sender *core.Account) error {
-	// Validate amount is non-negative
-	if err := validateAmountNonNegative(tx.Amount, "transfer amount"); err != nil {
-		return err
+	// 1. Parse Inputs
+	amountBig := math.ParseBigInt(tx.Amount)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	senderBalanceBig := math.ParseBigInt(sender.Balance)
+	gasLimitBig := big.NewInt(tx.Gas)
+
+	// 2. Validate amount is non-negative
+	// Using Sign() instead of validateAmountNonNegative helper
+	if amountBig.Sign() < 0 {
+		return fmt.Errorf("transfer amount cannot be negative")
 	}
 
-	// Calculate total cost with overflow protection
-	totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
-	if err != nil {
-		return fmt.Errorf("transfer validation failed: %v", err)
+	// 3. Calculate Total Cost
+	// GasCost = GasLimit * GasPrice
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+
+	// TotalCost = Amount + GasCost
+	totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
+
+	// 4. Check sufficient balance
+	// Compare: if Balance < TotalCost
+	if senderBalanceBig.Cmp(totalCostBig) < 0 {
+		return fmt.Errorf("insufficient balance: have %s, need %s",
+			sender.Balance, totalCostBig.String())
 	}
 
-	// Check sufficient balance
-	if sender.Balance < totalCost {
-		return fmt.Errorf("insufficient balance: have %d, need %d", sender.Balance, totalCost)
-	}
-
-	// Prevent self-transfer
+	// 5. Prevent self-transfer
 	if tx.From == tx.To {
 		return fmt.Errorf("cannot transfer to self")
 	}
@@ -952,20 +963,30 @@ func (v *Validator) validateTransfer(tx *core.Transaction, sender *core.Account)
 
 // validateStake validates stake transaction logic
 func (v *Validator) validateStake(tx *core.Transaction, sender *core.Account) error {
-	// Validate amount is non-negative
-	if err := validateAmountNonNegative(tx.Amount, "stake amount"); err != nil {
-		return err
+	// 1. Parse Inputs to BigInt
+	amountBig := math.ParseBigInt(tx.Amount)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	senderBalanceBig := math.ParseBigInt(sender.Balance)
+	gasLimitBig := big.NewInt(tx.Gas)
+
+	// 2. Validate amount is non-negative
+	// Replaces validateAmountNonNegative helper
+	if amountBig.Sign() < 0 {
+		return fmt.Errorf("stake amount cannot be negative")
 	}
 
-	// Calculate total cost with overflow protection
-	totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
-	if err != nil {
-		return fmt.Errorf("stake validation failed: %v", err)
-	}
+	// 3. Calculate Total Cost
+	// GasCost = GasLimit * GasPrice
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
 
-	// Check sufficient balance
-	if sender.Balance < totalCost {
-		return fmt.Errorf("insufficient balance for staking: have %d, need %d", sender.Balance, totalCost)
+	// TotalCost = Amount + GasCost
+	totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
+
+	// 4. Check sufficient balance
+	// Compare: if Balance < TotalCost
+	if senderBalanceBig.Cmp(totalCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for staking: have %s, need %s",
+			sender.Balance, totalCostBig.String())
 	}
 
 	return nil
@@ -973,25 +994,35 @@ func (v *Validator) validateStake(tx *core.Transaction, sender *core.Account) er
 
 // validateUnstake validates unstake transaction logic
 func (v *Validator) validateUnstake(tx *core.Transaction, sender *core.Account) error {
-	// Validate amount is non-negative
-	if err := validateAmountNonNegative(tx.Amount, "unstake amount"); err != nil {
-		return err
+	// 1. Parse Inputs
+	amountBig := math.ParseBigInt(tx.Amount)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	senderBalanceBig := math.ParseBigInt(sender.Balance)
+	stakedAmountBig := math.ParseBigInt(sender.StakedAmount)
+	gasLimitBig := big.NewInt(tx.Gas)
+
+	// 2. Validate amount is non-negative
+	// Using Sign() replaces validateAmountNonNegative helper
+	if amountBig.Sign() < 0 {
+		return fmt.Errorf("unstake amount cannot be negative")
 	}
 
-	// Calculate gas cost with overflow protection
-	gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
-	if err != nil {
-		return fmt.Errorf("unstake validation failed: %v", err)
+	// 3. Calculate Gas Cost
+	// GasCost = GasLimit * GasPrice
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+
+	// 4. Check sufficient balance for gas
+	// Compare: if Balance < GasCost
+	if senderBalanceBig.Cmp(gasCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for gas: have %s, need %s",
+			sender.Balance, gasCostBig.String())
 	}
 
-	// Check sufficient balance for gas
-	if sender.Balance < gasCost {
-		return fmt.Errorf("insufficient balance for gas: have %d, need %d", sender.Balance, gasCost)
-	}
-
-	// Check sufficient staked amount
-	if sender.StakedAmount < tx.Amount {
-		return fmt.Errorf("insufficient staked amount: have %d, need %d", sender.StakedAmount, tx.Amount)
+	// 5. Check sufficient staked amount
+	// Compare: if StakedAmount < tx.Amount
+	if stakedAmountBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient staked amount: have %s, need %s",
+			sender.StakedAmount, tx.Amount)
 	}
 
 	return nil
@@ -999,23 +1030,33 @@ func (v *Validator) validateUnstake(tx *core.Transaction, sender *core.Account) 
 
 // validateDelegate validates delegate transaction logic
 func (v *Validator) validateDelegate(tx *core.Transaction, sender *core.Account) error {
-	// Validate amount is non-negative
-	if err := validateAmountNonNegative(tx.Amount, "delegation amount"); err != nil {
-		return err
+	// 1. Parse Inputs
+	amountBig := math.ParseBigInt(tx.Amount)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	senderBalanceBig := math.ParseBigInt(sender.Balance)
+	gasLimitBig := big.NewInt(tx.Gas)
+
+	// 2. Validate amount is non-negative
+	// Using Sign() replaces validateAmountNonNegative helper
+	if amountBig.Sign() < 0 {
+		return fmt.Errorf("delegation amount cannot be negative")
 	}
 
-	// Calculate total cost with overflow protection
-	totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
-	if err != nil {
-		return fmt.Errorf("delegation validation failed: %v", err)
+	// 3. Calculate Total Cost
+	// GasCost = GasLimit * GasPrice
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+
+	// TotalCost = Amount + GasCost
+	totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
+
+	// 4. Check sufficient balance
+	// Compare: if Balance < TotalCost
+	if senderBalanceBig.Cmp(totalCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for delegation: have %s, need %s",
+			sender.Balance, totalCostBig.String())
 	}
 
-	// Check sufficient balance
-	if sender.Balance < totalCost {
-		return fmt.Errorf("insufficient balance for delegation: have %d, need %d", sender.Balance, totalCost)
-	}
-
-	// Prevent self-delegation
+	// 5. Prevent self-delegation
 	if tx.From == tx.To {
 		return fmt.Errorf("cannot delegate to self")
 	}
@@ -1025,32 +1066,48 @@ func (v *Validator) validateDelegate(tx *core.Transaction, sender *core.Account)
 
 // validateUndelegate validates undelegate transaction logic
 func (v *Validator) validateUndelegate(tx *core.Transaction, sender *core.Account) error {
-	// Validate amount is non-negative
-	if err := validateAmountNonNegative(tx.Amount, "undelegation amount"); err != nil {
-		return err
+	// 1. Parse Transaction Amount
+	amountBig := math.ParseBigInt(tx.Amount)
+
+	// Validate amount is non-negative (Check Sign)
+	if amountBig.Sign() < 0 {
+		return fmt.Errorf("undelegation amount cannot be negative")
 	}
 
-	// Calculate gas cost with overflow protection
-	gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
-	if err != nil {
-		return fmt.Errorf("undelegation validation failed: %v", err)
+	// 2. Parse Gas Price & Calculate Gas Cost
+	// Gas Cost = GasLimit (int64) * GasPrice (BigInt)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	gasLimitBig := big.NewInt(tx.Gas)
+
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+
+	// 3. Check sufficient balance for gas
+	// sender.Balance is now a string, parse it
+	senderBalanceBig := math.ParseBigInt(sender.Balance)
+
+	if senderBalanceBig.Cmp(gasCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for gas: have %s, need %s",
+			sender.Balance, gasCostBig.String())
 	}
 
-	// Check sufficient balance for gas
-	if sender.Balance < gasCost {
-		return fmt.Errorf("insufficient balance for gas: have %d, need %d", sender.Balance, gasCost)
-	}
-
-	// Check if delegation exists
+	// 4. Check if delegation exists
 	if sender.DelegatedTo == nil {
 		return fmt.Errorf("no delegations found")
 	}
 
-	// Check sufficient delegated amount to specific validator
-	delegatedAmount, exists := sender.DelegatedTo[tx.To]
-	if !exists || delegatedAmount < tx.Amount {
-		return fmt.Errorf("insufficient delegation to validator %s: have %d, need %d",
-			tx.To, delegatedAmount, tx.Amount)
+	// 5. Check sufficient delegated amount to specific validator
+	// sender.DelegatedTo is now map[string]string
+	delegatedAmountStr, exists := sender.DelegatedTo[tx.To]
+	if !exists {
+		return fmt.Errorf("no delegation found to validator %s", tx.To)
+	}
+
+	delegatedAmountBig := math.ParseBigInt(delegatedAmountStr)
+
+	// Compare: if delegatedAmount < undelegateAmount
+	if delegatedAmountBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient delegation to validator %s: have %s, need %s",
+			tx.To, delegatedAmountStr, tx.Amount)
 	}
 
 	return nil
@@ -1058,19 +1115,30 @@ func (v *Validator) validateUndelegate(tx *core.Transaction, sender *core.Accoun
 
 // validateClaimRewards validates claim rewards transaction logic
 func (v *Validator) validateClaimRewards(tx *core.Transaction, sender *core.Account) error {
-	// Calculate gas cost with overflow protection
-	gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
-	if err != nil {
-		return fmt.Errorf("claim rewards validation failed: %v", err)
+	// 1. Calculate Gas Cost
+	// Gas Limit (int64) * Gas Price (String->BigInt)
+	gasLimitBig := big.NewInt(tx.Gas)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+
+	// Gas Cost = Gas * GasPrice
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+
+	// 2. Check sufficient balance for gas
+	// sender.Balance is String->BigInt
+	senderBalanceBig := math.ParseBigInt(sender.Balance)
+
+	// Compare: if Balance < GasCost
+	if senderBalanceBig.Cmp(gasCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for gas: have %s, need %s",
+			sender.Balance, gasCostBig.String())
 	}
 
-	// Check sufficient balance for gas
-	if sender.Balance < gasCost {
-		return fmt.Errorf("insufficient balance for gas: have %d, need %d", sender.Balance, gasCost)
-	}
+	// 3. Check if there are rewards to claim
+	// sender.Rewards is String->BigInt
+	rewardsBig := math.ParseBigInt(sender.Rewards)
 
-	// Check if there are rewards to claim
-	if sender.Rewards <= 0 {
+	// Check if Rewards <= 0
+	if rewardsBig.Sign() <= 0 {
 		return fmt.Errorf("no rewards to claim")
 	}
 
@@ -1078,41 +1146,47 @@ func (v *Validator) validateClaimRewards(tx *core.Transaction, sender *core.Acco
 }
 
 // ValidateBatch validates multiple transactions as a batch
+// ValidateBatch validates multiple transactions as a batch
 func (v *Validator) ValidateBatch(transactions []*core.Transaction, stateReader StateInterface) error {
 	tempAccounts := make(map[string]*core.Account)
 
 	for i, tx := range transactions {
 		var sender *core.Account
+
 		if tempAccount, exists := tempAccounts[tx.From]; exists {
 			sender = tempAccount
 		} else {
-			// Get current account state via Interface
+			// Get current account state
 			currentAccount, err := stateReader.GetAccount(tx.From)
 			if err != nil {
 				return fmt.Errorf("failed to get account %s for transaction %d: %v", tx.From, i, err)
 			}
 
-			// Create copy for temporary state (deep copy logic remains same)
+			// Create copy for temporary state
 			sender = &core.Account{
 				Address:      currentAccount.Address,
 				Balance:      currentAccount.Balance,
 				Nonce:        currentAccount.Nonce,
 				StakedAmount: currentAccount.StakedAmount,
-				DelegatedTo:  make(map[string]int64),
-				Rewards:      currentAccount.Rewards,
-				CodeHash:     currentAccount.CodeHash,
-				StorageRoot:  currentAccount.StorageRoot,
+
+				// ✅ FIX: Initialize as map[string]string
+				DelegatedTo: make(map[string]string),
+
+				Rewards:     currentAccount.Rewards,
+				CodeHash:    currentAccount.CodeHash,
+				StorageRoot: currentAccount.StorageRoot,
 			}
+
+			// Copy existing delegations
+			// Since currentAccount.DelegatedTo is already map[string]string, this works directly
 			for k, val := range currentAccount.DelegatedTo {
 				sender.DelegatedTo[k] = val
 			}
+
 			tempAccounts[tx.From] = sender
 		}
 
 		// Validate transaction against temporary state
-		// NOTE: We recursively call ValidateTransaction.
-		// Ideally, we refactor validation to separate "Check Statless" from "Check State".
-		// For now, to fix your compile error, we pass the reader:
 		if err := v.ValidateTransaction(tx, stateReader); err != nil {
 			return fmt.Errorf("transaction %d validation failed: %v", i, err)
 		}
@@ -1128,170 +1202,178 @@ func (v *Validator) ValidateBatch(transactions []*core.Transaction, stateReader 
 
 // updateTempAccountState updates temporary account state for batch validation
 func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.Account) error {
+	// 1. Common Parsing (used across most cases)
+	amountBig := math.ParseBigInt(tx.Amount)
+	gasLimitBig := big.NewInt(tx.Gas)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	balanceBig := math.ParseBigInt(account.Balance)
+	stakedBig := math.ParseBigInt(account.StakedAmount)
+	rewardsBig := math.ParseBigInt(account.Rewards)
+
+	// Calculate Gas Cost = Gas * GasPrice
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+
 	switch tx.Type {
 	case core.TransactionType_TRANSFER:
-		// Calculate total cost with overflow protection
-		totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
-		if err != nil {
-			return fmt.Errorf("transfer state update failed: %v", err)
+		// Total Cost = Amount + GasCost
+		totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
+
+		// Check for underflow: Balance < TotalCost
+		if balanceBig.Cmp(totalCostBig) < 0 {
+			return fmt.Errorf("balance underflow: balance %s < total cost %s",
+				account.Balance, totalCostBig.String())
 		}
 
-		// Check for underflow
-		if account.Balance < totalCost {
-			return fmt.Errorf("balance underflow: balance %d < total cost %d", account.Balance, totalCost)
-		}
-
-		account.Balance -= totalCost
+		// Update Balance
+		balanceBig.Sub(balanceBig, totalCostBig)
+		account.Balance = balanceBig.String()
 		account.Nonce++
 
 	case core.TransactionType_STAKE:
-		// Calculate total cost with overflow protection
-		totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
-		if err != nil {
-			return fmt.Errorf("stake state update failed: %v", err)
-		}
+		// Total Cost = Amount + GasCost
+		totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
 
 		// Check for underflow
-		if account.Balance < totalCost {
-			return fmt.Errorf("balance underflow: balance %d < total cost %d", account.Balance, totalCost)
+		if balanceBig.Cmp(totalCostBig) < 0 {
+			return fmt.Errorf("balance underflow: balance %s < total cost %s",
+				account.Balance, totalCostBig.String())
 		}
 
-		account.Balance -= totalCost
+		// Update Balance
+		balanceBig.Sub(balanceBig, totalCostBig)
+		account.Balance = balanceBig.String()
 
-		// Check for overflow when adding to staked amount
-		newStakedAmount, err := safeAdd(account.StakedAmount, tx.Amount, "staked amount update")
-		if err != nil {
-			return fmt.Errorf("stake state update failed: %v", err)
-		}
-		account.StakedAmount = newStakedAmount
+		// Update Staked Amount: Staked + Amount
+		stakedBig.Add(stakedBig, amountBig)
+		account.StakedAmount = stakedBig.String()
+
 		account.Nonce++
 
 	case core.TransactionType_UNSTAKE:
-		// Calculate gas cost with overflow protection
-		gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
-		if err != nil {
-			return fmt.Errorf("unstake state update failed: %v", err)
+		// Check Balance for Gas
+		if balanceBig.Cmp(gasCostBig) < 0 {
+			return fmt.Errorf("balance underflow: balance %s < gas cost %s",
+				account.Balance, gasCostBig.String())
 		}
 
-		// Check for underflow on balance for gas
-		if account.Balance < gasCost {
-			return fmt.Errorf("balance underflow: balance %d < gas cost %d", account.Balance, gasCost)
-		}
-
-		// Check for underflow on staked amount
-		if account.StakedAmount < tx.Amount {
-			return fmt.Errorf("staked amount underflow: staked %d < unstake amount %d",
+		// Check Staked Amount: Staked < Amount
+		if stakedBig.Cmp(amountBig) < 0 {
+			return fmt.Errorf("staked amount underflow: staked %s < unstake amount %s",
 				account.StakedAmount, tx.Amount)
 		}
 
-		account.Balance -= gasCost
+		// Deduct Gas from Balance
+		balanceBig.Sub(balanceBig, gasCostBig)
 
-		// Check for overflow when adding unstaked amount back to balance
-		newBalance, err := safeAdd(account.Balance, tx.Amount, "balance update after unstake")
-		if err != nil {
-			return fmt.Errorf("unstake state update failed: %v", err)
-		}
-		account.Balance = newBalance
-		account.StakedAmount -= tx.Amount
+		// Add Unstaked Amount back to Balance
+		balanceBig.Add(balanceBig, amountBig)
+		account.Balance = balanceBig.String()
+
+		// Deduct from Staked Amount
+		stakedBig.Sub(stakedBig, amountBig)
+		account.StakedAmount = stakedBig.String()
+
 		account.Nonce++
 
 	case core.TransactionType_DELEGATE:
-		// Calculate total cost with overflow protection
-		totalCost, err := v.calculateTotalCost(tx.Amount, tx.Gas, tx.GasPrice)
-		if err != nil {
-			return fmt.Errorf("delegate state update failed: %v", err)
+		// Total Cost = Amount + GasCost
+		totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
+
+		// Check Balance
+		if balanceBig.Cmp(totalCostBig) < 0 {
+			return fmt.Errorf("balance underflow: balance %s < total cost %s",
+				account.Balance, totalCostBig.String())
 		}
 
-		// Check for underflow
-		if account.Balance < totalCost {
-			return fmt.Errorf("balance underflow: balance %d < total cost %d", account.Balance, totalCost)
-		}
+		// Update Balance
+		balanceBig.Sub(balanceBig, totalCostBig)
+		account.Balance = balanceBig.String()
 
-		account.Balance -= totalCost
+		// Update Total Staked Amount (Delegation counts as stake on account level too?)
+		// Assuming your model tracks total staked including delegations:
+		stakedBig.Add(stakedBig, amountBig)
+		account.StakedAmount = stakedBig.String()
 
-		// Check for overflow when adding to staked amount
-		newStakedAmount, err := safeAdd(account.StakedAmount, tx.Amount, "staked amount update")
-		if err != nil {
-			return fmt.Errorf("delegate state update failed: %v", err)
-		}
-		account.StakedAmount = newStakedAmount
-
+		// Initialize map if nil
 		if account.DelegatedTo == nil {
-			account.DelegatedTo = make(map[string]int64)
+			account.DelegatedTo = make(map[string]string)
 		}
 
-		// Check for overflow when adding to delegation
-		currentDelegation := account.DelegatedTo[tx.To]
-		newDelegation, err := safeAdd(currentDelegation, tx.Amount, "delegation update")
-		if err != nil {
-			return fmt.Errorf("delegate state update failed: %v", err)
+		// Update Specific Delegation
+		currentDelegationStr := "0"
+		if val, exists := account.DelegatedTo[tx.To]; exists {
+			currentDelegationStr = val
 		}
-		account.DelegatedTo[tx.To] = newDelegation
+		currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+
+		currentDelegationBig.Add(currentDelegationBig, amountBig)
+		account.DelegatedTo[tx.To] = currentDelegationBig.String()
+
 		account.Nonce++
 
 	case core.TransactionType_UNDELEGATE:
-		// Calculate gas cost with overflow protection
-		gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
-		if err != nil {
-			return fmt.Errorf("undelegate state update failed: %v", err)
+		// Check Balance for Gas
+		if balanceBig.Cmp(gasCostBig) < 0 {
+			return fmt.Errorf("balance underflow: balance %s < gas cost %s",
+				account.Balance, gasCostBig.String())
 		}
 
-		// Check for underflow on balance for gas
-		if account.Balance < gasCost {
-			return fmt.Errorf("balance underflow: balance %d < gas cost %d", account.Balance, gasCost)
-		}
-
-		// Check for underflow on staked amount
-		if account.StakedAmount < tx.Amount {
-			return fmt.Errorf("staked amount underflow: staked %d < undelegate amount %d",
+		// Check Total Staked Amount
+		if stakedBig.Cmp(amountBig) < 0 {
+			return fmt.Errorf("staked amount underflow: staked %s < undelegate amount %s",
 				account.StakedAmount, tx.Amount)
 		}
 
-		// Check for underflow on delegation
-		currentDelegation := account.DelegatedTo[tx.To]
-		if currentDelegation < tx.Amount {
-			return fmt.Errorf("delegation underflow: delegated %d < undelegate amount %d",
-				currentDelegation, tx.Amount)
+		// Check Specific Delegation
+		currentDelegationStr := "0"
+		if val, exists := account.DelegatedTo[tx.To]; exists {
+			currentDelegationStr = val
+		}
+		currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+
+		if currentDelegationBig.Cmp(amountBig) < 0 {
+			return fmt.Errorf("delegation underflow: delegated %s < undelegate amount %s",
+				currentDelegationStr, tx.Amount)
 		}
 
-		account.Balance -= gasCost
+		// Deduct Gas
+		balanceBig.Sub(balanceBig, gasCostBig)
 
-		// Check for overflow when adding undelegated amount back to balance
-		newBalance, err := safeAdd(account.Balance, tx.Amount, "balance update after undelegate")
-		if err != nil {
-			return fmt.Errorf("undelegate state update failed: %v", err)
-		}
-		account.Balance = newBalance
-		account.StakedAmount -= tx.Amount
-		account.DelegatedTo[tx.To] -= tx.Amount
+		// Add Undelegated Amount back to Balance
+		balanceBig.Add(balanceBig, amountBig)
+		account.Balance = balanceBig.String()
 
-		if account.DelegatedTo[tx.To] == 0 {
+		// Deduct from Total Staked
+		stakedBig.Sub(stakedBig, amountBig)
+		account.StakedAmount = stakedBig.String()
+
+		// Deduct from Specific Delegation
+		currentDelegationBig.Sub(currentDelegationBig, amountBig)
+
+		if currentDelegationBig.Sign() == 0 {
 			delete(account.DelegatedTo, tx.To)
+		} else {
+			account.DelegatedTo[tx.To] = currentDelegationBig.String()
 		}
+
 		account.Nonce++
 
 	case core.TransactionType_CLAIM_REWARDS:
-		// Calculate gas cost with overflow protection
-		gasCost, err := v.calculateGasCost(tx.Gas, tx.GasPrice)
-		if err != nil {
-			return fmt.Errorf("claim rewards state update failed: %v", err)
+		// Check Balance for Gas
+		if balanceBig.Cmp(gasCostBig) < 0 {
+			return fmt.Errorf("balance underflow: balance %s < gas cost %s",
+				account.Balance, gasCostBig.String())
 		}
 
-		// Check for underflow on balance for gas
-		if account.Balance < gasCost {
-			return fmt.Errorf("balance underflow: balance %d < gas cost %d", account.Balance, gasCost)
-		}
+		// Deduct Gas
+		balanceBig.Sub(balanceBig, gasCostBig)
 
-		account.Balance -= gasCost
-		claimedRewards := account.Rewards
+		// Add Rewards to Balance
+		balanceBig.Add(balanceBig, rewardsBig)
+		account.Balance = balanceBig.String()
 
-		// Check for overflow when adding rewards to balance
-		newBalance, err := safeAdd(account.Balance, claimedRewards, "balance update with rewards")
-		if err != nil {
-			return fmt.Errorf("claim rewards state update failed: %v", err)
-		}
-		account.Balance = newBalance
-		account.Rewards = 0
+		// Reset Rewards
+		account.Rewards = "0"
 		account.Nonce++
 	}
 

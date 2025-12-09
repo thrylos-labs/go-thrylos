@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -117,15 +118,23 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 	require.NoError(t, err)
 	genesisAddress := genesisAddrObj.String()
 
-	// Inject genesis account into config
+	// Import "math/big"
+
 	if len(testConfig.Genesis.Accounts) == 0 {
+		// 1. Calculate the balance using BigInt math
+		// 1 Billion * BaseUnit (10^18)
+		amount := big.NewInt(1_000_000_000)
+		balanceBig := new(big.Int).Mul(amount, config.BaseUnit)
+
 		testConfig.Genesis.Accounts = append(testConfig.Genesis.Accounts, config.GenesisAccount{
 			Address: genesisAddress,
-			Balance: 1000000000 * config.BaseUnit,
+
+			// 2. Convert to string for the updated struct
+			Balance: balanceBig.String(),
+
 			Purpose: "Benchmark Genesis",
 		})
 	} else {
-		// Update address to match our generated key if entry exists but is placeholder
 		testConfig.Genesis.Accounts[0].Address = genesisAddress
 	}
 	// --- FIX END ---
@@ -145,18 +154,28 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 	require.NoError(t, err)
 	// ------------------------------------------------
 
-	// Create validator
+	// 1. Calculate Stake: 100,000 * BaseUnit (10^18)
+	// You must use BigInt math, not standard '*'
+	stakeAmount := new(big.Int).Mul(big.NewInt(100_000), config.BaseUnit)
+
 	validator := &core.Validator{
-		Address:        genesisAddress,
-		Pubkey:         genesisPrivKey.PublicKey().Bytes(),
-		Stake:          100000 * config.BaseUnit,
-		SelfStake:      100000 * config.BaseUnit,
-		DelegatedStake: 0,
-		Delegators:     make(map[string]int64),
-		Commission:     0.05,
-		Active:         true,
-		CreatedAt:      time.Now().Unix(),
-		UpdatedAt:      time.Now().Unix(),
+		Address: genesisAddress,
+		Pubkey:  genesisPrivKey.PublicKey().Bytes(),
+
+		// ✅ Fix: Assign as string
+		Stake:     stakeAmount.String(),
+		SelfStake: stakeAmount.String(),
+
+		// ✅ Fix: Use string "0" instead of int 0
+		DelegatedStake: "0",
+
+		// ✅ Fix: Map values must be strings now
+		Delegators: make(map[string]string),
+
+		Commission: 0.05,
+		Active:     true,
+		CreatedAt:  time.Now().Unix(),
+		UpdatedAt:  time.Now().Unix(),
 	}
 	err = worldState.AddValidator(validator)
 	require.NoError(t, err)
@@ -185,15 +204,27 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 			txID := fmt.Sprintf("tx-%d-%d", blockNum, i)
 			nonce := uint64(blockNum*cfg.TransactionsPerBlock + i)
 
+			// 1. Calculate Amount: 1000 * BaseUnit
+			amountBig := new(big.Int).Mul(big.NewInt(1000), config.BaseUnit)
+
+			// 2. Prepare Gas Price as String
+			gasPriceStr := "1000" // Or big.NewInt(1000).String()
+
 			tx := &core.Transaction{
-				Id:        txID,
-				From:      genesisAddress,
-				To:        recipient,
-				Amount:    1000 * config.BaseUnit,
+				Id:   txID,
+				From: genesisAddress,
+				To:   recipient,
+
+				// ✅ Fix: Assign string
+				Amount: amountBig.String(),
+
 				Timestamp: time.Now().Unix(),
 				Nonce:     nonce,
-				Gas:       21000,
-				GasPrice:  1000,
+				Gas:       21000, // Gas limit stays int64
+
+				// ✅ Fix: Assign string
+				GasPrice: gasPriceStr,
+
 				Signature: []byte("test_signature"),
 			}
 
@@ -615,9 +646,16 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 	var genesisAddress string
 	if len(testConfig.Genesis.Accounts) == 0 {
 		genesisAddress = "0x1234567890123456789012345678901234567890" // Dummy hex address
+
+		// 1. Calculate Balance: 1,000,000,000 * BaseUnit (10^18)
+		// Use big.NewInt() for the scalar and .Mul() for the operation
+		amount := big.NewInt(1_000_000_000)
+		balanceBig := new(big.Int).Mul(amount, config.BaseUnit)
+
 		testConfig.Genesis.Accounts = append(testConfig.Genesis.Accounts, config.GenesisAccount{
 			Address: genesisAddress,
-			Balance: 1000000000 * config.BaseUnit,
+			// 2. Convert result to string
+			Balance: balanceBig.String(),
 		})
 	} else {
 		genesisAddress = testConfig.Genesis.Accounts[0].Address
@@ -650,17 +688,28 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 
 	genesisPrivKey, _ := crypto.NewPrivateKey()
 
+	// 1. Calculate Stake: 100,000 * BaseUnit (10^18)
+	// You must use BigInt math, not standard '*'
+	stakeAmount := new(big.Int).Mul(big.NewInt(100_000), config.BaseUnit)
+
 	validator := &core.Validator{
-		Address:        genesisAddress,
-		Pubkey:         genesisPrivKey.PublicKey().Bytes(), // Mock pubkey
-		Stake:          100000 * config.BaseUnit,
-		SelfStake:      100000 * config.BaseUnit,
-		DelegatedStake: 0,
-		Delegators:     make(map[string]int64),
-		Commission:     0.05,
-		Active:         true,
-		CreatedAt:      time.Now().Unix(),
-		UpdatedAt:      time.Now().Unix(),
+		Address: genesisAddress,
+		Pubkey:  genesisPrivKey.PublicKey().Bytes(),
+
+		// ✅ Fix: Assign as string
+		Stake:     stakeAmount.String(),
+		SelfStake: stakeAmount.String(),
+
+		// ✅ Fix: Use string "0" instead of int 0
+		DelegatedStake: "0",
+
+		// ✅ Fix: Map values must be strings now
+		Delegators: make(map[string]string),
+
+		Commission: 0.05,
+		Active:     true,
+		CreatedAt:  time.Now().Unix(),
+		UpdatedAt:  time.Now().Unix(),
 	}
 	err = worldState.AddValidator(validator)
 	require.NoError(t, err)
@@ -691,15 +740,28 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 			txID := fmt.Sprintf("tx-%d-%d", blockNum, i)
 			nonce := uint64(blockNum*cfg.TransactionsPerBlock + i)
 
+			// 1. Calculate Amount: 1000 * BaseUnit (10^18)
+			// You must use BigInt math, not standard '*'
+			amountBig := new(big.Int).Mul(big.NewInt(1000), config.BaseUnit)
+
+			// 2. Prepare Gas Price as String
+			gasPriceStr := "1000" // Or big.NewInt(1000).String()
+
 			tx := &core.Transaction{
-				Id:        txID,
-				From:      genesisAddress,
-				To:        recipient,
-				Amount:    1000 * config.BaseUnit,
+				Id:   txID,
+				From: genesisAddress,
+				To:   recipient,
+
+				// ✅ Fix: Assign as string
+				Amount: amountBig.String(),
+
 				Timestamp: time.Now().Unix(),
 				Nonce:     nonce,
-				Gas:       21000,
-				GasPrice:  1000,
+				Gas:       21000, // Gas limit is still int64
+
+				// ✅ Fix: Assign as string
+				GasPrice: gasPriceStr,
+
 				Signature: []byte("test_signature"),
 			}
 

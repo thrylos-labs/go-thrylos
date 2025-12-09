@@ -3,10 +3,12 @@ package pos
 import (
 	"fmt"
 	"log"
+	"math/big"
 	"sync"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/core/math"
+	core "github.com/thrylos-labs/go-thrylos/proto/core"
 
 	"github.com/thrylos-labs/go-thrylos/storage"
 	"github.com/thrylos-labs/go-thrylos/types"
@@ -14,8 +16,15 @@ import (
 
 // WorldStateBalancer interface for balance operations needed by slashing
 type WorldStateBalancer interface {
-	GetBalance(address string) (int64, error)
-	UpdateBalance(address string, newBalance int64) error
+	// ✅ Change from (int64, error) -> (*big.Int, error)
+	GetBalance(address string) (*big.Int, error)
+
+	// ✅ Change from (string, int64) -> (string, *big.Int)
+	UpdateBalance(address string, amount *big.Int) error
+
+	// Existing methods (likely correct)
+	GetValidator(address string) (*core.Validator, error)
+	UpdateValidator(validator *core.Validator) error
 }
 
 type DowntimePolicy struct {
@@ -303,25 +312,30 @@ func (sm *SlashingManager) ReportBlockWithholding(validatorAddr string) error {
 
 	fmt.Printf("🚨 REPORT: Validator %s has withheld blocks (excessive missed proposals)\n", validatorAddr)
 
-	// Get Validator Balance
+	// Get Validator Balance (Returns *big.Int)
 	balance, err := sm.worldState.GetBalance(validatorAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get validator balance: %v", err)
 	}
 
-	// Use JailPenalty from config
-	penaltyPercent := sm.policy.JailPenalty
-	penaltyAmount, err := math.SafePercentage(balance, penaltyPercent)
+	// ✅ FIX: Use SafePercentageBig for BigInt calculation
+	// Assuming sm.policy.JailPenalty is still int64 (e.g., 10 for 10%)
+	penaltyPercent := int64(sm.policy.JailPenalty)
+
+	penaltyAmountBig, err := math.SafePercentageBig(balance, penaltyPercent)
+	if err != nil {
+		return fmt.Errorf("failed to calculate penalty: %v", err)
+	}
 
 	// Create Evidence Structure
 	evidence := types.SlashingEvidence{
 		MissedSlots: []uint64{},
 	}
 
-	// Create unique evidence hash for deduplication
+	// Create unique evidence hash
 	evidenceHash := evidence.Hash()
 	if sm.processedEvidence[evidenceHash] {
-		return nil // Already slashed for this exact evidence
+		return nil
 	}
 
 	// Create Slashing Record
@@ -330,8 +344,11 @@ func (sm *SlashingManager) ReportBlockWithholding(validatorAddr string) error {
 		Condition:        types.Downtime,
 		Timestamp:        time.Now(),
 		Evidence:         evidence,
-		SlashedAmount:    penaltyAmount,
-		Reason:           "Block Withholding: Exceeded consecutive missed proposal limit",
+
+		// ✅ FIX: Store slashed amount as string for consistency
+		SlashedAmount: penaltyAmountBig.String(),
+
+		Reason: "Block Withholding: Exceeded consecutive missed proposal limit",
 	}
 
 	// Apply Slashing

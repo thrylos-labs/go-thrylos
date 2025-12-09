@@ -4,6 +4,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -811,17 +812,41 @@ func (n *Node) produceBlock() error {
 // Reward Distribution
 
 func (n *Node) distributeEpochRewards(epoch uint64) error {
-	var inflationRewards int64
+	// 1. Initialize Rewards as BigInt
+	inflationRewardsBig := big.NewInt(0)
+
 	if n.inflationManager != nil {
 		inflationRate := float64(0.05) // 5% annual inflation
 		if n.config.Economics.InflationRate > 0 {
 			inflationRate = n.config.Economics.InflationRate
 		}
 
+		// Get Total Supply (*big.Int)
 		totalSupply := n.worldState.GetTotalSupply()
-		inflationRewards = int64(float64(totalSupply) * inflationRate / 365.0)
+
+		// 2. Perform Calculation using BigFloat to preserve precision
+		// Formula: (TotalSupply * InflationRate) / 365
+
+		fTotalSupply := new(big.Float).SetInt(totalSupply)
+		fRate := big.NewFloat(inflationRate)
+		fDivisor := big.NewFloat(365.0)
+
+		// Calculate numerator: Supply * Rate
+		fResult := new(big.Float).Mul(fTotalSupply, fRate)
+
+		// Divide by 365
+		fResult.Quo(fResult, fDivisor)
+
+		// 3. Convert result back to *big.Int
+		inflationRewardsBig, _ = fResult.Int(nil)
+
 	} else {
-		inflationRewards = 1000 // Default reward amount
+		// Default reward amount (1000 Tokens)
+		// Adjust this if 1000 implies 1000 Wei or 1000 whole tokens
+		// Assuming 1000 whole tokens for default:
+		// inflationRewardsBig = new(big.Int).Mul(big.NewInt(1000), config.BaseUnit)
+		// For now, sticking to the literal 1000 to match your logic:
+		inflationRewardsBig = big.NewInt(1000)
 	}
 
 	stakingManager := n.blockchain.GetStakingManager()
@@ -829,16 +854,19 @@ func (n *Node) distributeEpochRewards(epoch uint64) error {
 		return fmt.Errorf("staking manager not available")
 	}
 
-	if err := stakingManager.DistributeRewards(inflationRewards); err != nil {
+	// 4. Distribute Rewards
+	// ✅ NOTE: Assuming DistributeRewards now accepts 'string' or '*big.Int'
+	// If it accepts string (consistent with other updates):
+	if err := stakingManager.DistributeRewards(inflationRewardsBig.String()); err != nil {
 		return fmt.Errorf("reward distribution failed: %v", err)
 	}
 
 	n.triggerEvent("epoch_rewards_distributed", map[string]interface{}{
 		"epoch":   epoch,
-		"rewards": inflationRewards,
+		"rewards": inflationRewardsBig.String(), // Pass string for JSON safety
 	})
 
-	fmt.Printf("Epoch %d: Distributed %d tokens in rewards\n", epoch, inflationRewards)
+	fmt.Printf("Epoch %d: Distributed %s tokens in rewards\n", epoch, inflationRewardsBig.String())
 	return nil
 }
 
@@ -1086,7 +1114,7 @@ func (n *Node) GetNodeStatus() map[string]interface{} {
 	return status
 }
 
-func (n *Node) GetBalance(address string) (int64, error) {
+func (n *Node) GetBalance(address string) (*big.Int, error) {
 	return n.blockchain.GetBalance(address)
 }
 

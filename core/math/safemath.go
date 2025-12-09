@@ -7,6 +7,7 @@ package math
 import (
 	"fmt"
 	"math"
+	"math/big"
 )
 
 // SafeAdd adds two int64 values with overflow protection
@@ -132,4 +133,31 @@ func MustSafeSub(a, b int64) int64 {
 		panic(fmt.Sprintf("SafeSub failed: %v", err))
 	}
 	return result
+}
+
+// core/math/math.go
+
+// SafePercentageBig calculates a percentage of a BigInt amount.
+// amount: The total amount (*big.Int)
+// percent: The percentage to calculate (int64, e.g., 5 for 5%)
+// Returns: (amount * percent) / 100
+func SafePercentageBig(amount *big.Int, percent int64) (*big.Int, error) {
+	if amount == nil {
+		return nil, fmt.Errorf("amount cannot be nil")
+	}
+	if percent < 0 || percent > 100 {
+		return nil, fmt.Errorf("invalid percentage: %d (must be 0-100)", percent)
+	}
+
+	// 1. Create BigInt for percentage
+	percentBig := big.NewInt(percent)
+
+	// 2. Multiply: amount * percent
+	product := new(big.Int).Mul(amount, percentBig)
+
+	// 3. Divide: product / 100
+	divisor := big.NewInt(100)
+	result := new(big.Int).Div(product, divisor)
+
+	return result, nil
 }

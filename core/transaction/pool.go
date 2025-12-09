@@ -4,12 +4,14 @@ package transaction
 import (
 	"fmt"
 	"log"
+	"math/big"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config" // Import config
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
@@ -209,6 +211,7 @@ func (p *Pool) CleanupExpired() {
 }
 
 // validateTotalPendingBalance calculates the total cost of pending transactions
+// validateTotalPendingBalance calculates the total cost of pending transactions
 func (p *Pool) validateTotalPendingBalance(address string, newTx *core.Transaction) error {
 	if p.accountManager == nil {
 		return nil
@@ -219,21 +222,43 @@ func (p *Pool) validateTotalPendingBalance(address string, newTx *core.Transacti
 		return fmt.Errorf("could not retrieve account: %v", err)
 	}
 
-	totalRequired := int64(0)
+	// 1. Initialize Accumulator
+	totalRequired := big.NewInt(0)
 
+	// Helper function to calculate cost for a single tx and add to total
+	addCost := func(tx *core.Transaction) {
+		amountBig := math.ParseBigInt(tx.Amount)
+		gasPriceBig := math.ParseBigInt(tx.GasPrice)
+		gasLimitBig := big.NewInt(tx.Gas)
+
+		// Cost = Amount + (Gas * GasPrice)
+		gasCost := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+		txTotal := new(big.Int).Add(amountBig, gasCost)
+
+		totalRequired.Add(totalRequired, txTotal)
+	}
+
+	// 2. Sum up existing pending transactions
 	if senderTxs, exists := p.byAddress[address]; exists {
 		for _, tx := range senderTxs {
+			// Skip the transaction if it is being replaced (same nonce)
 			if tx.Nonce == newTx.Nonce {
 				continue
 			}
-			totalRequired += tx.Amount + (tx.Gas * tx.GasPrice)
+			addCost(tx)
 		}
 	}
 
-	totalRequired += newTx.Amount + (newTx.Gas * newTx.GasPrice)
+	// 3. Add new transaction cost
+	addCost(newTx)
 
-	if account.Balance < totalRequired {
-		return fmt.Errorf("have %d, need %d", account.Balance, totalRequired)
+	// 4. Check Balance
+	balanceBig := math.ParseBigInt(account.Balance)
+
+	// Compare: if Balance < TotalRequired
+	if balanceBig.Cmp(totalRequired) < 0 {
+		return fmt.Errorf("insufficient funds for pending pool: have %s, need %s",
+			account.Balance, totalRequired.String())
 	}
 
 	return nil
@@ -355,6 +380,7 @@ func (p *Pool) GetTransactionsForAddress(address string) []*core.Transaction {
 }
 
 // GetExecutableTransactions returns transactions ready for execution
+// GetExecutableTransactions returns transactions ready for execution
 func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.AccountManager) []*core.Transaction {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -389,7 +415,9 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 		}
 
 		expectedNonce := currentNonce
-		remainingBalance := account.Balance
+
+		// 1. Parse Initial Balance to BigInt
+		remainingBalanceBig := math.ParseBigInt(account.Balance)
 
 		for _, tx := range txs {
 			if len(executable) >= maxCount {
@@ -397,16 +425,27 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 			}
 
 			if tx.Nonce == expectedNonce {
-				totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
-				if remainingBalance >= totalCost {
+				// 2. Calculate Total Cost using BigInt Math
+				// Cost = Amount + (Gas * GasPrice)
+				amountBig := math.ParseBigInt(tx.Amount)
+				gasPriceBig := math.ParseBigInt(tx.GasPrice)
+				gasLimitBig := big.NewInt(tx.Gas)
+
+				gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+				totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
+
+				// 3. Check Balance: if remainingBalance >= totalCost
+				if remainingBalanceBig.Cmp(totalCostBig) >= 0 {
 					executable = append(executable, tx)
 					expectedNonce++
-					remainingBalance -= totalCost
+
+					// 4. Update Remaining Balance
+					remainingBalanceBig.Sub(remainingBalanceBig, totalCostBig)
 				} else {
-					break
+					break // Stop sequence if funds run out
 				}
 			} else if tx.Nonce > expectedNonce {
-				break
+				break // Gap in nonce sequence
 			}
 		}
 		processed[address] = true
@@ -416,6 +455,7 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 	if len(executable) < maxCount && len(executable) < len(p.pending)/2 {
 		var remaining []*core.Transaction
 
+		// Filter out already included transactions
 		for _, entry := range p.pending {
 			isIncluded := false
 			for _, execTx := range executable {
@@ -429,8 +469,13 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 			}
 		}
 
+		// 5. Sort by Gas Price (Must parse BigInts to compare correctly!)
 		sort.Slice(remaining, func(i, j int) bool {
-			return remaining[i].GasPrice > remaining[j].GasPrice
+			priceI := math.ParseBigInt(remaining[i].GasPrice)
+			priceJ := math.ParseBigInt(remaining[j].GasPrice)
+
+			// Return true if priceI > priceJ (Descending order)
+			return priceI.Cmp(priceJ) > 0
 		})
 
 		for _, tx := range remaining {
@@ -449,8 +494,18 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 			}
 
 			if tx.Nonce >= currentNonce && tx.Nonce <= currentNonce+5 {
-				totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
-				if account.Balance >= totalCost {
+				// 6. Recalculate cost for individual check
+				amountBig := math.ParseBigInt(tx.Amount)
+				gasPriceBig := math.ParseBigInt(tx.GasPrice)
+				gasLimitBig := big.NewInt(tx.Gas)
+
+				gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+				totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
+
+				balanceBig := math.ParseBigInt(account.Balance)
+
+				// Check Balance
+				if balanceBig.Cmp(totalCostBig) >= 0 {
 					executable = append(executable, tx)
 				}
 			}
@@ -548,19 +603,33 @@ func (p *Pool) validateTransactionForPool(tx *core.Transaction) error {
 	if tx.From == "" {
 		return fmt.Errorf("sender address cannot be empty")
 	}
-	if tx.Amount < 0 {
+
+	// 1. Validate Amount (String -> BigInt)
+	amountBig := math.ParseBigInt(tx.Amount)
+	if amountBig.Sign() < 0 {
 		return fmt.Errorf("transaction amount cannot be negative")
 	}
+
+	// 2. Validate Gas (still int64)
 	if tx.Gas <= 0 {
 		return fmt.Errorf("gas must be positive")
 	}
-	if tx.GasPrice < p.minGasPrice {
-		return fmt.Errorf("gas price %d below minimum %d", tx.GasPrice, p.minGasPrice)
+
+	// 3. Validate Gas Price (String vs int64)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+
+	// Convert pool's minGasPrice (int64) to BigInt for comparison
+	minGasPriceBig := big.NewInt(p.minGasPrice)
+
+	if gasPriceBig.Cmp(minGasPriceBig) < 0 {
+		return fmt.Errorf("gas price %s below minimum %d", tx.GasPrice, p.minGasPrice)
 	}
+
 	if len(tx.Signature) == 0 {
 		return fmt.Errorf("transaction signature cannot be empty")
 	}
 
+	// Shard validation
 	if p.shardID != account.BeaconShardID {
 		senderShard := account.CalculateShardID(tx.From, p.totalShards)
 		if senderShard != p.shardID {
@@ -572,14 +641,21 @@ func (p *Pool) validateTransactionForPool(tx *core.Transaction) error {
 	return nil
 }
 
-// evictLowestGasPrice tries to evict the transaction with lowest gas price
-func (p *Pool) evictLowestGasPrice(newGasPrice int64) bool {
-	var lowestGasPrice int64 = newGasPrice
+// evictLowestGasPrice removes the transaction with the lowest gas price
+// if it is lower than the new transaction's gas price.
+// ✅ UPDATE: newGasPrice changed from int64 -> string
+func (p *Pool) evictLowestGasPrice(newGasPrice string) bool {
+	// 1. Parse the threshold (the new tx's gas price)
+	lowestPriceBig := math.ParseBigInt(newGasPrice)
 	var evictTx *core.Transaction
 
 	for _, entry := range p.pending {
-		if entry.Transaction.GasPrice < lowestGasPrice {
-			lowestGasPrice = entry.Transaction.GasPrice
+		// 2. Parse current tx price
+		currentPriceBig := math.ParseBigInt(entry.Transaction.GasPrice)
+
+		// 3. Compare: if current < lowest
+		if currentPriceBig.Cmp(lowestPriceBig) < 0 {
+			lowestPriceBig = currentPriceBig
 			evictTx = entry.Transaction
 		}
 	}
@@ -658,15 +734,23 @@ func (p *Pool) GetPoolCapacity() (current int, max int, available int) {
 }
 
 // UpdateGasPrice updates the minimum gas price for the pool
+// UpdateGasPrice updates the minimum gas price and evicts transactions below it
 func (p *Pool) UpdateGasPrice(newMinGasPrice int64) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.minGasPrice = newMinGasPrice
 
+	// Convert the new minimum to BigInt for comparison
+	minGasPriceBig := big.NewInt(newMinGasPrice)
+
 	var toRemove []*core.Transaction
 	for _, entry := range p.pending {
-		if entry.Transaction.GasPrice < newMinGasPrice {
+		// Parse the transaction's gas price string to BigInt
+		txGasPriceBig := math.ParseBigInt(entry.Transaction.GasPrice)
+
+		// Compare: if txGasPrice < minGasPrice
+		if txGasPriceBig.Cmp(minGasPriceBig) < 0 {
 			toRemove = append(toRemove, entry.Transaction)
 		}
 	}

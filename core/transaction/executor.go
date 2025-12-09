@@ -33,8 +33,8 @@ type ExecutionReceipt struct {
 
 // Executor handles transaction execution against account state
 type Executor struct {
-	shardID     account.ShardID // <--- ADD THIS
-	totalShards int             // <--- ADD THIS
+	shardID     account.ShardID
+	totalShards int
 	worldState  StateInterface
 	validator   *Validator
 	config      *config.Config
@@ -43,16 +43,16 @@ type Executor struct {
 
 // NewExecutor creates a new transaction executor
 func NewExecutor(
-	shardID account.ShardID, // <--- ADD ARG
-	totalShards int, // <--- ADD ARG
+	shardID account.ShardID,
+	totalShards int,
 	worldState StateInterface,
 	validator *Validator,
 	cfg *config.Config,
 	evmExecutor EVMExecutorInterface,
 ) *Executor {
 	return &Executor{
-		shardID:     shardID,     // <--- INIT
-		totalShards: totalShards, // <--- INIT
+		shardID:     shardID,
+		totalShards: totalShards,
 		worldState:  worldState,
 		validator:   validator,
 		config:      cfg,
@@ -117,13 +117,16 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 	caller := common.HexToAddress(tx.From)
 	contract := common.HexToAddress(tx.To)
 
+	// Convert Amount string to BigInt
+	value := math.ParseBigInt(tx.Amount)
+
 	// Execute contract call
 	returnData, gasUsed, err := e.evmExecutor.ExecuteCall(
 		caller,
 		contract,
 		tx.Data,
 		uint64(tx.Gas),
-		big.NewInt(tx.Amount),
+		value,
 	)
 
 	if err != nil {
@@ -131,10 +134,25 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 	}
 
 	// Deduct gas cost
-	gasCost := gasUsed * uint64(tx.GasPrice)
-	balance, _ := e.worldState.GetBalance(tx.From)
-	newBalance := balance - int64(gasCost)
-	e.worldState.UpdateBalance(tx.From, newBalance)
+	// GasCost = GasUsed * GasPrice
+	gasUsedBig := new(big.Int).SetUint64(gasUsed)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	gasCostBig := new(big.Int).Mul(gasUsedBig, gasPriceBig)
+
+	// Fetch Balance
+	balanceBig, err := e.worldState.GetBalance(tx.From)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get balance for gas deduction: %v", err)
+	}
+
+	// Check if balance is sufficient
+	if balanceBig.Cmp(gasCostBig) < 0 {
+		return nil, fmt.Errorf("insufficient balance for EVM gas")
+	}
+
+	// Update Balance
+	balanceBig.Sub(balanceBig, gasCostBig)
+	e.worldState.UpdateBalance(tx.From, balanceBig)
 
 	// Increment nonce
 	nonce, _ := e.worldState.GetNonce(tx.From)
@@ -152,13 +170,14 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 
 func (e *Executor) executeEVMDeploy(tx *core.Transaction) error {
 	deployer := common.HexToAddress(tx.From)
+	value := math.ParseBigInt(tx.Amount)
 
 	// Deploy contract
 	contractAddr, gasUsed, err := e.evmExecutor.DeployContract(
 		deployer,
 		tx.Data,
 		uint64(tx.Gas),
-		big.NewInt(tx.Amount),
+		value,
 	)
 
 	if err != nil {
@@ -166,10 +185,23 @@ func (e *Executor) executeEVMDeploy(tx *core.Transaction) error {
 	}
 
 	// Deduct gas cost
-	gasCost := gasUsed * uint64(tx.GasPrice)
-	balance, _ := e.worldState.GetBalance(tx.From)
-	newBalance := balance - int64(gasCost)
-	e.worldState.UpdateBalance(tx.From, newBalance)
+	gasUsedBig := new(big.Int).SetUint64(gasUsed)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	gasCostBig := new(big.Int).Mul(gasUsedBig, gasPriceBig)
+
+	// Fetch Balance
+	balanceBig, err := e.worldState.GetBalance(tx.From)
+	if err != nil {
+		return fmt.Errorf("failed to get balance for gas deduction: %v", err)
+	}
+
+	if balanceBig.Cmp(gasCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for deployment gas")
+	}
+
+	// Update Balance
+	balanceBig.Sub(balanceBig, gasCostBig)
+	e.worldState.UpdateBalance(tx.From, balanceBig)
 
 	// Increment nonce
 	nonce, _ := e.worldState.GetNonce(tx.From)
@@ -203,21 +235,22 @@ func (e *Executor) executeTransfer(tx *core.Transaction, accountManager *account
 	senderShard := account.CalculateShardID(tx.From, e.totalShards)
 	recipientShard := account.CalculateShardID(tx.To, e.totalShards)
 
-	// For now, only handle same-shard transfers
-	// Cross-shard transfers would require additional coordination
 	if senderShard != recipientShard {
 		return fmt.Errorf("cross-shard transfers not supported in executor: sender shard %d, recipient shard %d",
 			senderShard, recipientShard)
 	}
 
-	// Only execute if sender belongs to this shard
 	if e.shardID != account.BeaconShardID && senderShard != e.shardID {
 		return fmt.Errorf("transaction sender %s belongs to shard %d, not %d",
 			tx.From, senderShard, e.shardID)
 	}
 
-	// Calculate total cost (amount + gas fee)
-	totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+	// 1. Calculate Total Cost (Amount + Gas*GasPrice)
+	amountBig := math.ParseBigInt(tx.Amount)
+	gasLimitBig := big.NewInt(tx.Gas)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+	totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
 
 	// Get sender account
 	sender, err := accountManager.GetAccount(tx.From)
@@ -225,9 +258,11 @@ func (e *Executor) executeTransfer(tx *core.Transaction, accountManager *account
 		return fmt.Errorf("failed to get sender account: %v", err)
 	}
 
-	// Check balance and nonce
-	if sender.Balance < totalCost {
-		return fmt.Errorf("insufficient balance: have %d, need %d", sender.Balance, totalCost)
+	senderBalanceBig := math.ParseBigInt(sender.Balance)
+
+	// Check balance
+	if senderBalanceBig.Cmp(totalCostBig) < 0 {
+		return fmt.Errorf("insufficient balance: have %s, need %s", sender.Balance, totalCostBig.String())
 	}
 
 	if sender.Nonce != tx.Nonce {
@@ -239,21 +274,15 @@ func (e *Executor) executeTransfer(tx *core.Transaction, accountManager *account
 	if err != nil {
 		return fmt.Errorf("failed to get receiver account: %v", err)
 	}
+	receiverBalanceBig := math.ParseBigInt(receiver.Balance)
 
 	// Update balances
-	newSenderBalance, err := math.SafeSub(sender.Balance, totalCost)
-	if err != nil {
-		return fmt.Errorf("sender balance update failed: %v", err)
-	}
+	senderBalanceBig.Sub(senderBalanceBig, totalCostBig)
+	receiverBalanceBig.Add(receiverBalanceBig, amountBig)
 
-	newReceiverBalance, err := math.SafeAdd(receiver.Balance, tx.Amount)
-	if err != nil {
-		return fmt.Errorf("receiver balance update failed: %v", err)
-	}
-
-	sender.Balance = newSenderBalance
+	sender.Balance = senderBalanceBig.String()
 	sender.Nonce++
-	receiver.Balance = newReceiverBalance
+	receiver.Balance = receiverBalanceBig.String()
 
 	// Save accounts
 	if err := accountManager.UpdateAccount(sender); err != nil {
@@ -269,45 +298,43 @@ func (e *Executor) executeTransfer(tx *core.Transaction, accountManager *account
 
 // executeStake handles staking transactions
 func (e *Executor) executeStake(tx *core.Transaction, accountManager *account.AccountManager) error {
-	// Validate sender belongs to this shard
 	senderShard := account.CalculateShardID(tx.From, e.totalShards)
 	if e.shardID != account.BeaconShardID && senderShard != e.shardID {
 		return fmt.Errorf("transaction sender %s belongs to shard %d, not %d",
 			tx.From, senderShard, e.shardID)
 	}
 
-	// Get account
 	account, err := accountManager.GetAccount(tx.From)
 	if err != nil {
 		return fmt.Errorf("failed to get account: %v", err)
 	}
 
-	// Calculate total cost
-	totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+	// 1. Calculate Total Cost
+	amountBig := math.ParseBigInt(tx.Amount)
+	gasLimitBig := big.NewInt(tx.Gas)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+	totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
 
-	// Check balance and nonce
-	if account.Balance < totalCost {
-		return fmt.Errorf("insufficient balance for staking: have %d, need %d", account.Balance, totalCost)
+	senderBalanceBig := math.ParseBigInt(account.Balance)
+
+	// Check balance
+	if senderBalanceBig.Cmp(totalCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for staking: have %s, need %s", account.Balance, totalCostBig.String())
 	}
 
 	if account.Nonce != tx.Nonce {
 		return fmt.Errorf("invalid nonce: expected %d, got %d", account.Nonce, tx.Nonce)
 	}
 
-	// Update account (liquid staking - immediate) with overflow protection
-	newBalance, err := math.SafeSub(account.Balance, totalCost)
-	if err != nil {
-		return fmt.Errorf("balance update failed: %v", err)
-	}
+	// Update account
+	senderBalanceBig.Sub(senderBalanceBig, totalCostBig)
 
-	newStakedAmount, err := math.SafeAdd(account.StakedAmount, tx.Amount)
-	if err != nil {
-		return fmt.Errorf("staked amount update failed: %v", err)
-	}
+	stakedAmountBig := math.ParseBigInt(account.StakedAmount)
+	stakedAmountBig.Add(stakedAmountBig, amountBig)
 
-	// Apply the updates
-	account.Balance = newBalance
-	account.StakedAmount = newStakedAmount
+	account.Balance = senderBalanceBig.String()
+	account.StakedAmount = stakedAmountBig.String()
 	account.Nonce++
 
 	return accountManager.UpdateAccount(account)
@@ -315,54 +342,49 @@ func (e *Executor) executeStake(tx *core.Transaction, accountManager *account.Ac
 
 // executeUnstake handles unstaking transactions
 func (e *Executor) executeUnstake(tx *core.Transaction, accountManager *account.AccountManager) error {
-	// Validate sender belongs to this shard
 	senderShard := account.CalculateShardID(tx.From, e.totalShards)
 	if e.shardID != account.BeaconShardID && senderShard != e.shardID {
 		return fmt.Errorf("transaction sender %s belongs to shard %d, not %d",
 			tx.From, senderShard, e.shardID)
 	}
 
-	// Get account
 	account, err := accountManager.GetAccount(tx.From)
 	if err != nil {
 		return fmt.Errorf("failed to get account: %v", err)
 	}
 
-	// Calculate gas cost
-	gasCost := tx.Gas * tx.GasPrice
+	// 1. Calculate Gas Cost
+	gasLimitBig := big.NewInt(tx.Gas)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
 
-	// Check balances and nonce
-	if account.Balance < gasCost {
-		return fmt.Errorf("insufficient balance for gas: have %d, need %d", account.Balance, gasCost)
+	senderBalanceBig := math.ParseBigInt(account.Balance)
+	stakedAmountBig := math.ParseBigInt(account.StakedAmount)
+	amountBig := math.ParseBigInt(tx.Amount)
+
+	// Check balances
+	if senderBalanceBig.Cmp(gasCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for gas: have %s, need %s", account.Balance, gasCostBig.String())
 	}
 
-	if account.StakedAmount < tx.Amount {
-		return fmt.Errorf("insufficient staked amount: have %d, need %d", account.StakedAmount, tx.Amount)
+	if stakedAmountBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient staked amount: have %s, need %s", account.StakedAmount, tx.Amount)
 	}
 
 	if account.Nonce != tx.Nonce {
 		return fmt.Errorf("invalid nonce: expected %d, got %d", account.Nonce, tx.Nonce)
 	}
 
-	// Update account (liquid unstaking - immediate) with overflow protection
-	newBalance, err := math.SafeSub(account.Balance, gasCost)
-	if err != nil {
-		return fmt.Errorf("gas deduction failed: %v", err)
-	}
+	// Update Logic:
+	// 1. Deduct Gas from Balance
+	senderBalanceBig.Sub(senderBalanceBig, gasCostBig)
+	// 2. Add Unstaked Amount to Balance
+	senderBalanceBig.Add(senderBalanceBig, amountBig)
+	// 3. Deduct Amount from Staked
+	stakedAmountBig.Sub(stakedAmountBig, amountBig)
 
-	newBalance, err = math.SafeAdd(newBalance, tx.Amount)
-	if err != nil {
-		return fmt.Errorf("balance update after unstake failed: %v", err)
-	}
-
-	newStakedAmount, err := math.SafeSub(account.StakedAmount, tx.Amount)
-	if err != nil {
-		return fmt.Errorf("staked amount update failed: %v", err)
-	}
-
-	// Actually apply the updates ← YOU WERE MISSING THIS!
-	account.Balance = newBalance
-	account.StakedAmount = newStakedAmount
+	account.Balance = senderBalanceBig.String()
+	account.StakedAmount = stakedAmountBig.String()
 	account.Nonce++
 
 	return accountManager.UpdateAccount(account)
@@ -370,147 +392,142 @@ func (e *Executor) executeUnstake(tx *core.Transaction, accountManager *account.
 
 // executeDelegate handles delegation transactions
 func (e *Executor) executeDelegate(tx *core.Transaction, accountManager *account.AccountManager) error {
-	// Validate sender belongs to this shard
 	senderShard := account.CalculateShardID(tx.From, e.totalShards)
 	if e.shardID != account.BeaconShardID && senderShard != e.shardID {
 		return fmt.Errorf("transaction sender %s belongs to shard %d, not %d",
 			tx.From, senderShard, e.shardID)
 	}
 
-	// Get delegator account
 	delegator, err := accountManager.GetAccount(tx.From)
 	if err != nil {
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	// Calculate total cost
-	totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
+	// 1. Calculate Total Cost
+	amountBig := math.ParseBigInt(tx.Amount)
+	gasLimitBig := big.NewInt(tx.Gas)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+	totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
 
-	// Check balance and nonce
-	if delegator.Balance < totalCost {
-		return fmt.Errorf("insufficient balance for delegation: have %d, need %d", delegator.Balance, totalCost)
+	delegatorBalanceBig := math.ParseBigInt(delegator.Balance)
+
+	// Check balance
+	if delegatorBalanceBig.Cmp(totalCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for delegation: have %s, need %s", delegator.Balance, totalCostBig.String())
 	}
 
 	if delegator.Nonce != tx.Nonce {
 		return fmt.Errorf("invalid nonce: expected %d, got %d", delegator.Nonce, tx.Nonce)
 	}
 
-	// Validator address should be in tx.To field
 	validatorAddr := tx.To
 	if validatorAddr == "" {
 		return fmt.Errorf("validator address cannot be empty for delegation")
 	}
 
-	// Update delegator account with overflow protection
-	newBalance, err := math.SafeSub(delegator.Balance, totalCost)
-	if err != nil {
-		return fmt.Errorf("balance update failed: %v", err)
-	}
+	// Update Delegator
+	delegatorBalanceBig.Sub(delegatorBalanceBig, totalCostBig)
 
-	newStakedAmount, err := math.SafeAdd(delegator.StakedAmount, tx.Amount)
-	if err != nil {
-		return fmt.Errorf("staked amount update failed: %v", err)
-	}
+	stakedAmountBig := math.ParseBigInt(delegator.StakedAmount)
+	stakedAmountBig.Add(stakedAmountBig, amountBig)
 
-	// Apply balance updates
-	delegator.Balance = newBalance
-	delegator.StakedAmount = newStakedAmount
+	delegator.Balance = delegatorBalanceBig.String()
+	delegator.StakedAmount = stakedAmountBig.String()
 	delegator.Nonce++
 
-	// Update delegation mapping with overflow protection
+	// Update Delegation Map
 	if delegator.DelegatedTo == nil {
-		delegator.DelegatedTo = make(map[string]int64)
+		delegator.DelegatedTo = make(map[string]string)
 	}
 
-	currentDelegation := delegator.DelegatedTo[validatorAddr] // ← GET current value first!
-	newDelegation, err := math.SafeAdd(currentDelegation, tx.Amount)
-	if err != nil {
-		return fmt.Errorf("delegation update failed: %v", err)
+	currentDelegationStr := "0"
+	if val, exists := delegator.DelegatedTo[validatorAddr]; exists {
+		currentDelegationStr = val
 	}
-	delegator.DelegatedTo[validatorAddr] = newDelegation // ← ASSIGN it back!
+	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+	currentDelegationBig.Add(currentDelegationBig, amountBig)
+
+	delegator.DelegatedTo[validatorAddr] = currentDelegationBig.String()
 
 	return accountManager.UpdateAccount(delegator)
 }
 
 // executeUndelegate handles undelegation transactions
 func (e *Executor) executeUndelegate(tx *core.Transaction, accountManager *account.AccountManager) error {
-	// Validate sender belongs to this shard
 	senderShard := account.CalculateShardID(tx.From, e.totalShards)
 	if e.shardID != account.BeaconShardID && senderShard != e.shardID {
 		return fmt.Errorf("transaction sender %s belongs to shard %d, not %d",
 			tx.From, senderShard, e.shardID)
 	}
 
-	// Get delegator account
 	delegator, err := accountManager.GetAccount(tx.From)
 	if err != nil {
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	// Calculate gas cost
-	gasCost := tx.Gas * tx.GasPrice
+	// 1. Calculate Gas Cost
+	gasLimitBig := big.NewInt(tx.Gas)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
 
-	// Check balance and nonce
-	if delegator.Balance < gasCost {
-		return fmt.Errorf("insufficient balance for gas: have %d, need %d", delegator.Balance, gasCost)
+	delegatorBalanceBig := math.ParseBigInt(delegator.Balance)
+	stakedAmountBig := math.ParseBigInt(delegator.StakedAmount)
+	amountBig := math.ParseBigInt(tx.Amount)
+
+	// Check balances
+	if delegatorBalanceBig.Cmp(gasCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for gas: have %s, need %s", delegator.Balance, gasCostBig.String())
 	}
 
 	if delegator.Nonce != tx.Nonce {
 		return fmt.Errorf("invalid nonce: expected %d, got %d", delegator.Nonce, tx.Nonce)
 	}
 
-	// Validator address should be in tx.To field
 	validatorAddr := tx.To
 	if validatorAddr == "" {
 		return fmt.Errorf("validator address cannot be empty for undelegation")
 	}
 
-	// Check delegation exists and has sufficient amount
+	// Check Map Existence
 	if delegator.DelegatedTo == nil {
-		delegator.DelegatedTo = make(map[string]int64)
+		delegator.DelegatedTo = make(map[string]string)
 	}
 
-	delegatedAmount := delegator.DelegatedTo[validatorAddr]
-	if delegatedAmount < tx.Amount {
-		return fmt.Errorf("insufficient delegation to validator %s: have %d, need %d",
-			validatorAddr, delegatedAmount, tx.Amount)
+	currentDelegationStr := "0"
+	if val, exists := delegator.DelegatedTo[validatorAddr]; exists {
+		currentDelegationStr = val
+	}
+	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+
+	// Check if sufficient delegation
+	if currentDelegationBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient delegation to validator %s: have %s, need %s",
+			validatorAddr, currentDelegationStr, tx.Amount)
 	}
 
-	if delegator.StakedAmount < tx.Amount {
-		return fmt.Errorf("insufficient staked amount: have %d, need %d", delegator.StakedAmount, tx.Amount)
+	if stakedAmountBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient staked amount: have %s, need %s", delegator.StakedAmount, tx.Amount)
 	}
 
-	// Update delegator account (liquid undelegation - immediate) with overflow protection
-	newBalance, err := math.SafeSub(delegator.Balance, gasCost)
-	if err != nil {
-		return fmt.Errorf("gas deduction failed: %v", err)
-	}
+	// Update Logic
+	// 1. Deduct Gas from Balance
+	delegatorBalanceBig.Sub(delegatorBalanceBig, gasCostBig)
+	// 2. Add Undelegated Amount to Balance
+	delegatorBalanceBig.Add(delegatorBalanceBig, amountBig)
+	// 3. Deduct from Staked Amount
+	stakedAmountBig.Sub(stakedAmountBig, amountBig)
+	// 4. Deduct from Specific Delegation
+	currentDelegationBig.Sub(currentDelegationBig, amountBig)
 
-	newBalance, err = math.SafeAdd(newBalance, tx.Amount)
-	if err != nil {
-		return fmt.Errorf("balance update after undelegate failed: %v", err)
-	}
-
-	newStakedAmount, err := math.SafeSub(delegator.StakedAmount, tx.Amount)
-	if err != nil {
-		return fmt.Errorf("staked amount update failed: %v", err)
-	}
-
-	// Apply balance updates
-	delegator.Balance = newBalance
-	delegator.StakedAmount = newStakedAmount
+	delegator.Balance = delegatorBalanceBig.String()
+	delegator.StakedAmount = stakedAmountBig.String()
 	delegator.Nonce++
 
-	// Update delegation mapping with overflow protection
-	currentDelegation := delegator.DelegatedTo[validatorAddr] // ← GET it first!
-	newDelegation, err := math.SafeSub(currentDelegation, tx.Amount)
-	if err != nil {
-		return fmt.Errorf("delegation update failed: %v", err)
-	}
-
-	delegator.DelegatedTo[validatorAddr] = newDelegation // ← ASSIGN it back!
-	if delegator.DelegatedTo[validatorAddr] == 0 {
+	if currentDelegationBig.Sign() == 0 {
 		delete(delegator.DelegatedTo, validatorAddr)
+	} else {
+		delegator.DelegatedTo[validatorAddr] = currentDelegationBig.String()
 	}
 
 	return accountManager.UpdateAccount(delegator)
@@ -518,40 +535,46 @@ func (e *Executor) executeUndelegate(tx *core.Transaction, accountManager *accou
 
 // executeClaimRewards handles reward claiming transactions
 func (e *Executor) executeClaimRewards(tx *core.Transaction, accountManager *account.AccountManager) error {
-	// Validate sender belongs to this shard
 	senderShard := account.CalculateShardID(tx.From, e.totalShards)
 	if e.shardID != account.BeaconShardID && senderShard != e.shardID {
 		return fmt.Errorf("transaction sender %s belongs to shard %d, not %d",
 			tx.From, senderShard, e.shardID)
 	}
 
-	// Get account
 	account, err := accountManager.GetAccount(tx.From)
 	if err != nil {
 		return fmt.Errorf("failed to get account: %v", err)
 	}
 
-	// Calculate gas cost
-	gasCost := tx.Gas * tx.GasPrice
+	// 1. Calculate Gas Cost
+	gasLimitBig := big.NewInt(tx.Gas)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
 
-	// Check balance and nonce
-	if account.Balance < gasCost {
-		return fmt.Errorf("insufficient balance for gas: have %d, need %d", account.Balance, gasCost)
+	senderBalanceBig := math.ParseBigInt(account.Balance)
+	rewardsBig := math.ParseBigInt(account.Rewards)
+
+	// Check balance
+	if senderBalanceBig.Cmp(gasCostBig) < 0 {
+		return fmt.Errorf("insufficient balance for gas: have %s, need %s", account.Balance, gasCostBig.String())
 	}
 
 	if account.Nonce != tx.Nonce {
 		return fmt.Errorf("invalid nonce: expected %d, got %d", account.Nonce, tx.Nonce)
 	}
 
-	if account.Rewards <= 0 {
+	if rewardsBig.Sign() <= 0 {
 		return fmt.Errorf("no rewards to claim")
 	}
 
-	// Update account - claim all available rewards
-	claimableRewards := account.Rewards
-	newBalance, err := math.SafeSub(account.Balance, gasCost)
-	newBalance, err = math.SafeAdd(newBalance, claimableRewards)
-	account.Rewards = 0
+	// Update Account
+	// 1. Deduct Gas
+	senderBalanceBig.Sub(senderBalanceBig, gasCostBig)
+	// 2. Add Rewards
+	senderBalanceBig.Add(senderBalanceBig, rewardsBig)
+
+	account.Balance = senderBalanceBig.String()
+	account.Rewards = "0"
 	account.Nonce++
 
 	return accountManager.UpdateAccount(account)
@@ -563,8 +586,8 @@ func (e *Executor) ValidateExecution(tx *core.Transaction, accountManager *accou
 		return fmt.Errorf("transaction cannot be nil")
 	}
 
-	// Basic validation
-	if tx.Amount < 0 {
+	amountBig := math.ParseBigInt(tx.Amount)
+	if amountBig.Sign() < 0 {
 		return fmt.Errorf("transaction amount cannot be negative")
 	}
 
@@ -572,7 +595,8 @@ func (e *Executor) ValidateExecution(tx *core.Transaction, accountManager *accou
 		return fmt.Errorf("gas must be positive")
 	}
 
-	if tx.GasPrice <= 0 {
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+	if gasPriceBig.Sign() <= 0 {
 		return fmt.Errorf("gas price must be positive")
 	}
 
@@ -587,35 +611,40 @@ func (e *Executor) ValidateExecution(tx *core.Transaction, accountManager *accou
 		return fmt.Errorf("invalid nonce: expected %d, got %d", sender.Nonce, tx.Nonce)
 	}
 
+	// Calculate common costs
+	gasLimitBig := big.NewInt(tx.Gas)
+	gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
+	totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
+
+	senderBalanceBig := math.ParseBigInt(sender.Balance)
+	stakedAmountBig := math.ParseBigInt(sender.StakedAmount)
+	rewardsBig := math.ParseBigInt(sender.Rewards)
+
 	// Validate balance based on transaction type
 	switch tx.Type {
 	case core.TransactionType_TRANSFER:
-		totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
-		if sender.Balance < totalCost {
-			return fmt.Errorf("insufficient balance for transfer: have %d, need %d", sender.Balance, totalCost)
+		if senderBalanceBig.Cmp(totalCostBig) < 0 {
+			return fmt.Errorf("insufficient balance for transfer: have %s, need %s", sender.Balance, totalCostBig.String())
 		}
 
 	case core.TransactionType_STAKE, core.TransactionType_DELEGATE:
-		totalCost := tx.Amount + (tx.Gas * tx.GasPrice)
-		if sender.Balance < totalCost {
-			return fmt.Errorf("insufficient balance for staking: have %d, need %d", sender.Balance, totalCost)
+		if senderBalanceBig.Cmp(totalCostBig) < 0 {
+			return fmt.Errorf("insufficient balance for staking: have %s, need %s", sender.Balance, totalCostBig.String())
 		}
 
 	case core.TransactionType_UNSTAKE, core.TransactionType_UNDELEGATE:
-		gasCost := tx.Gas * tx.GasPrice
-		if sender.Balance < gasCost {
-			return fmt.Errorf("insufficient balance for gas: have %d, need %d", sender.Balance, gasCost)
+		if senderBalanceBig.Cmp(gasCostBig) < 0 {
+			return fmt.Errorf("insufficient balance for gas: have %s, need %s", sender.Balance, gasCostBig.String())
 		}
-		if sender.StakedAmount < tx.Amount {
-			return fmt.Errorf("insufficient staked amount: have %d, need %d", sender.StakedAmount, tx.Amount)
+		if stakedAmountBig.Cmp(amountBig) < 0 {
+			return fmt.Errorf("insufficient staked amount: have %s, need %s", sender.StakedAmount, tx.Amount)
 		}
 
 	case core.TransactionType_CLAIM_REWARDS:
-		gasCost := tx.Gas * tx.GasPrice
-		if sender.Balance < gasCost {
-			return fmt.Errorf("insufficient balance for gas: have %d, need %d", sender.Balance, gasCost)
+		if senderBalanceBig.Cmp(gasCostBig) < 0 {
+			return fmt.Errorf("insufficient balance for gas: have %s, need %s", sender.Balance, gasCostBig.String())
 		}
-		if sender.Rewards <= 0 {
+		if rewardsBig.Sign() <= 0 {
 			return fmt.Errorf("no rewards to claim")
 		}
 	}

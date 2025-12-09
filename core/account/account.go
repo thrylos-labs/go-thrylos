@@ -612,7 +612,7 @@ func (am *AccountManager) GetAccountCount() int {
 }
 
 // CreateGenesisAccount creates the genesis account for a shard
-func (am *AccountManager) CreateGenesisAccount(genesisAddr string, initialSupply int64) error {
+func (am *AccountManager) CreateGenesisAccount(genesisAddr string, initialSupply string) error {
 	if err := address.Validate(genesisAddr); err != nil {
 		return fmt.Errorf("invalid genesis address: %v", err)
 	}
