@@ -331,16 +331,40 @@ func (v *Validator) validateSignature(tx *core.Transaction) error {
 
 // Add this new function to validate MetaMask signatures
 func (v *Validator) validateEthereumSignature(tx *core.Transaction) error {
-	// 1. We expect the original RLP to be in tx.Data for full fidelity,
-	//    OR we reconstruct the ETH tx from fields (riskier but works if exact).
-	//    Better approach for now: Use the RecoverSigner from the signature + fields.
+	// 1. Verify signature length
+	if len(tx.Signature) != 65 {
+		return fmt.Errorf("invalid ethereum signature length: %d", len(tx.Signature))
+	}
 
-	// Convert BigInt strings back to numeric types
+	// 2. Parse BigInts
 	amountBig := math.ParseBigInt(tx.Amount)
 	gasPriceBig := math.ParseBigInt(tx.GasPrice)
 
-	// Construct go-ethereum transaction object
-	// Note: This must match exactly what MetaMask signed
+	// 3. Extract R, S, V from signature
+	// Thrylos stores signature as [R(32) || S(32) || V(1)]
+	// V is normalized to 0 or 1
+	r := new(big.Int).SetBytes(tx.Signature[:32])
+	s := new(big.Int).SetBytes(tx.Signature[32:64])
+	vByte := tx.Signature[64]
+
+	// 4. Setup ChainID
+	chainIDBig, _ := new(big.Int).SetString(v.config.Network.ChainID, 10)
+	if chainIDBig == nil {
+		chainIDBig = big.NewInt(1) // Default mainnet
+	}
+
+	// 5. Calculate EIP-155 V value
+	// EIP-155 V = ChainID * 2 + 35 + RecoveryID
+	vBig := new(big.Int).Mul(chainIDBig, big.NewInt(2))
+	vBig.Add(vBig, big.NewInt(35))
+	vBig.Add(vBig, big.NewInt(int64(vByte)))
+
+	// 6. Define Signer Interface
+	// ✅ FIX: Explicitly declare as interface to allow swapping signer types
+	var signer types.Signer = types.NewEIP155Signer(chainIDBig)
+
+	// 7. Construct Signed Transaction
+	// We must populate V, R, S so signer.Sender() can recover the address
 	var ethTxData types.TxData
 
 	if tx.To == "" {
@@ -350,10 +374,13 @@ func (v *Validator) validateEthereumSignature(tx *core.Transaction) error {
 			GasPrice: gasPriceBig,
 			Gas:      uint64(tx.Gas),
 			Value:    amountBig,
-			Data:     tx.Data, // Contract bytecode
+			Data:     tx.Data,
+			V:        vBig, // ✅ Include Signature
+			R:        r,    // ✅ Include Signature
+			S:        s,    // ✅ Include Signature
 		}
 	} else {
-		// Contract Call / Transfer
+		// Call / Transfer
 		toAddr := common.HexToAddress(tx.To)
 		ethTxData = &types.LegacyTx{
 			Nonce:    tx.Nonce,
@@ -361,41 +388,41 @@ func (v *Validator) validateEthereumSignature(tx *core.Transaction) error {
 			Gas:      uint64(tx.Gas),
 			To:       &toAddr,
 			Value:    amountBig,
-			Data:     tx.Data, // Call data
+			Data:     tx.Data,
+			V:        vBig, // ✅ Include Signature
+			R:        r,    // ✅ Include Signature
+			S:        s,    // ✅ Include Signature
 		}
 	}
 
 	ethTx := types.NewTx(ethTxData)
 
-	// Signer for the chain
-	chainIDBig, _ := new(big.Int).SetString(v.config.Network.ChainID, 10)
-	if chainIDBig == nil {
-		chainIDBig = big.NewInt(1)
-	} // Default mainnet
-
-	signer := types.NewEIP155Signer(chainIDBig)
-
-	// Verify signature matches tx.From
-	// We assume tx.Signature holds the [R|S|V] bytes from MetaMask
-	if len(tx.Signature) != 65 {
-		return fmt.Errorf("invalid ethereum signature length: %d", len(tx.Signature))
-	}
-
-	// Create ethTx with signature to recover sender
-	// NOTE: You might need to adjust V value (MetaMask sends 27/28, EIP155 wants chainID included)
-	// For simplicity here, we assume standard recovery:
-
+	// 8. Attempt Recovery (EIP-155)
 	fromAddr, err := signer.Sender(ethTx)
+
+	// 9. Fallback to Homestead (Legacy) if EIP-155 fails
 	if err != nil {
-		// Fallback: try Homstead signer if EIP155 fails
+		// Recalculate V for Homestead: 27 + RecoveryID
+		vLegacy := new(big.Int).SetInt64(int64(27 + vByte))
+
+		// Re-create transaction with Legacy V
+		// We need to modify the inner data. For LegacyTx we can cast and set.
+		if legacyTx, ok := ethTxData.(*types.LegacyTx); ok {
+			legacyTx.V = vLegacy
+			ethTx = types.NewTx(legacyTx) // Wrap again
+		}
+
+		// Swap signer to Homestead
 		signer = types.HomesteadSigner{}
+
+		// Retry recovery
 		fromAddr, err = signer.Sender(ethTx)
 		if err != nil {
 			return fmt.Errorf("failed to recover ethereum sender: %v", err)
 		}
 	}
 
-	// Verify the recovered address matches tx.From
+	// 10. Verify Match
 	if !strings.EqualFold(fromAddr.Hex(), tx.From) {
 		return fmt.Errorf("signature mismatch: recovered %s, expected %s", fromAddr.Hex(), tx.From)
 	}
