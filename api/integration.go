@@ -265,7 +265,7 @@ func DefaultAPIConfig() *APIConfig {
 		EnableAuthentication: false, // Enable in production
 		CacheTTL:             30 * time.Second,
 		MaxRequestSize:       1024 * 1024, // 1MB
-		EnableTLS:            false,       // Enable for production
+		EnableTLS:            true,        // Enable for production
 		CertFile:             "./certs/server.crt",
 		KeyFile:              "./certs/server.key",
 		AutoGenerateCert:     false, // you're managing them yourself now

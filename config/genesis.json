@@ -2,23 +2,30 @@
   "total_genesis": "15000000000000000000000000",
   "accounts": [
     {
-      "address": "0xYourColdWalletAddress1...",
+      "address": "0x9d13536a4f820449208e71aa3edfd78571db84d5",
       "balance": "5000000000000000000000000",
-      "purpose": "Foundation Cold Storage (5M Tokens)",
-      "locked": true,
-      "unlock_blocks": 100000
-    },
-    {
-      "address": "0xYourBootnodeAddress1...",
-      "balance": "5000000000000000000000000",
-      "purpose": "Bootnode 1 Stake (5M Tokens)",
+      "purpose": "Bootnode 1 Stake",
       "locked": false,
       "unlock_blocks": 0
     },
     {
-      "address": "0xYourBootnodeAddress2...",
+      "address": "0x6ee66d43aba689a6c6f12ac096e38ad0e8ffaf04",
       "balance": "5000000000000000000000000",
-      "purpose": "Bootnode 2 Stake (5M Tokens)",
+      "purpose": "Bootnode 2 Stake",
+      "locked": false,
+      "unlock_blocks": 0
+    },
+    {
+      "address": "0x0e687eec08071d310f3dc9633b11b11920b63907",
+      "balance": "5000000000000000000000000",
+      "purpose": "Bootnode 3 Stake",
+      "locked": false,
+      "unlock_blocks": 0
+    },
+    {
+      "address": "0xd7f6b9e2bc0026bacd3013457818d3f969a85705",
+      "balance": "5000000000000000000000000",
+      "purpose": "Bootnode 4 Stake",
       "locked": false,
       "unlock_blocks": 0
     }
