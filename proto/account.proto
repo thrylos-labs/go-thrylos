@@ -62,7 +62,7 @@ message BlockHeader {
   int64 gas_limit = 8;
   uint64 slot = 9;
   uint64 epoch = 10;
-  int64 total_fees = 11;
+  string total_fees = 11;
   string merkle_root = 12;
 }
 

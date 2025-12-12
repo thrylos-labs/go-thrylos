@@ -457,7 +457,7 @@ type BlockHeader struct {
 	GasLimit      int64                  `protobuf:"varint,8,opt,name=gas_limit,json=gasLimit,proto3" json:"gas_limit,omitempty"`
 	Slot          uint64                 `protobuf:"varint,9,opt,name=slot,proto3" json:"slot,omitempty"`
 	Epoch         uint64                 `protobuf:"varint,10,opt,name=epoch,proto3" json:"epoch,omitempty"`
-	TotalFees     int64                  `protobuf:"varint,11,opt,name=total_fees,json=totalFees,proto3" json:"total_fees,omitempty"`
+	TotalFees     string                 `protobuf:"bytes,11,opt,name=total_fees,json=totalFees,proto3" json:"total_fees,omitempty"`
 	MerkleRoot    string                 `protobuf:"bytes,12,opt,name=merkle_root,json=merkleRoot,proto3" json:"merkle_root,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -563,11 +563,11 @@ func (x *BlockHeader) GetEpoch() uint64 {
 	return 0
 }
 
-func (x *BlockHeader) GetTotalFees() int64 {
+func (x *BlockHeader) GetTotalFees() string {
 	if x != nil {
 		return x.TotalFees
 	}
-	return 0
+	return ""
 }
 
 func (x *BlockHeader) GetMerkleRoot() string {
@@ -854,7 +854,7 @@ const file_proto_account_proto_rawDesc = "" +
 	"\x05epoch\x18\n" +
 	" \x01(\x04R\x05epoch\x12\x1d\n" +
 	"\n" +
-	"total_fees\x18\v \x01(\x03R\ttotalFees\x12\x1f\n" +
+	"total_fees\x18\v \x01(\tR\ttotalFees\x12\x1f\n" +
 	"\vmerkle_root\x18\f \x01(\tR\n" +
 	"merkleRoot\"\xd6\x04\n" +
 	"\tValidator\x12\x18\n" +

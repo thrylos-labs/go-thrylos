@@ -70,11 +70,10 @@ func (h *EthereumRPCHandler) GetBalance(w http.ResponseWriter, r *http.Request) 
 	// GetBalance returns (*big.Int, error)
 	balance, err := h.blockchain.GetBalance(address.Hex())
 	if err != nil || balance == nil {
-		// ✅ Fix: Initialize explicit BigInt zero if missing/error
 		balance = big.NewInt(0)
 	}
 
-	// ✅ Fix: Cast *big.Int directly to *hexutil.Big (no big.NewInt wrapper needed)
+	// Cast *big.Int directly to *hexutil.Big
 	response := (*hexutil.Big)(balance)
 	respondJSON(w, response)
 }
@@ -112,7 +111,7 @@ func (h *EthereumRPCHandler) GetCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	address := common.HexToAddress(req.Address)
-	code := h.evmExecutor.GetCode(address) // This method exists in RevmExecutor
+	code := h.evmExecutor.GetCode(address)
 
 	response := hexutil.Bytes(code)
 	respondJSON(w, response)
@@ -142,21 +141,20 @@ func (h *EthereumRPCHandler) SendRawTransaction(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Convert and sign correctly
 	thrylosTx, err := h.convertEthTxToThrylosTx(ethTx)
 	if err != nil {
 		respondError(w, -32602, fmt.Sprintf("Transaction conversion failed: %v", err))
 		return
 	}
 
-	// FIX: Use AddTransaction instead of SubmitTransaction
+	// Submit to blockchain
 	if err := h.blockchain.AddTransaction(thrylosTx); err != nil {
 		respondError(w, -32000, fmt.Sprintf("Transaction rejected: %v", err))
 		return
 	}
 
-	// Calculate and return the hash
-	// Note: Ideally, AddTransaction calculates the hash.
-	// Here we use the pre-calculated one.
+	// Return the Hash (MetaMask uses this to poll for receipt)
 	response := thrylosTx.Hash
 	respondJSON(w, response)
 }
@@ -174,7 +172,6 @@ func (h *EthereumRPCHandler) Call(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default gas if missing
 	gas := uint64(req.CallData.Gas)
 	if gas == 0 {
 		gas = 1000000
@@ -243,21 +240,14 @@ func (h *EthereumRPCHandler) EstimateGas(w http.ResponseWriter, r *http.Request)
 // ===== Gas Price =====
 
 func (h *EthereumRPCHandler) GasPrice(w http.ResponseWriter, r *http.Request) {
-	// Get the string value from config
 	gasPriceStr := h.blockchain.GetConfig().Economics.BaseGasPrice
-
-	// FIX: Parse string to *big.Int using your helper
 	gasPriceBig := math.ParseBigInt(gasPriceStr)
-
-	// Cast to hexutil.Big for the response
 	response := (*hexutil.Big)(gasPriceBig)
 	respondJSON(w, response)
 }
 
 func (h *EthereumRPCHandler) MaxPriorityFeePerGas(w http.ResponseWriter, r *http.Request) {
-	// If you want a hardcoded 1 Gwei tip:
-	tip := big.NewInt(1000000000)
-
+	tip := big.NewInt(1000000000) // 1 Gwei
 	response := (*hexutil.Big)(tip)
 	respondJSON(w, response)
 }
@@ -271,20 +261,13 @@ func (h *EthereumRPCHandler) BlockNumber(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *EthereumRPCHandler) GetBlockByNumber(w http.ResponseWriter, r *http.Request) {
-	// ... (No changes, logic is good)
-	// Ensure you implement the rest of this function or copy from previous
-	// Assuming GetBlockByNumber exists on blockchain, otherwise use GetBlockByIndex
-
 	var req struct {
 		BlockNumber string `json:"blockNumber"`
 		FullTx      bool   `json:"fullTx"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
-	// ... parsing logic ...
 	blockNum, _ := parseBlockNumber(req.BlockNumber)
-
-	// FIX: Use GetBlockByIndex
 	block, err := h.blockchain.GetBlockByIndex(int64(blockNum))
 	if err != nil {
 		respondJSON(w, nil)
@@ -295,8 +278,6 @@ func (h *EthereumRPCHandler) GetBlockByNumber(w http.ResponseWriter, r *http.Req
 }
 
 func (h *EthereumRPCHandler) GetBlockByHash(w http.ResponseWriter, r *http.Request) {
-	// ... similar to above ...
-	// FIX: Use GetBlock (it accepts hash)
 	var req struct {
 		BlockHash string `json:"blockHash"`
 		FullTx    bool   `json:"fullTx"`
@@ -315,18 +296,95 @@ func (h *EthereumRPCHandler) GetBlockByHash(w http.ResponseWriter, r *http.Reque
 // ===== Transaction Information =====
 
 func (h *EthereumRPCHandler) GetTransactionByHash(w http.ResponseWriter, r *http.Request) {
-	// ...
-	// FIX: Use GetTransactionFromStorage (which is exposed via Blockchain usually, or add wrapper)
-	// If Blockchain doesn't expose it, expose WorldState:
-	// tx, err := h.blockchain.GetWorldState().GetTransactionFromStorage(hash)
+	var req struct {
+		TxHash string `json:"txHash"` // Some clients send it as parameter
+	}
+	// MetaMask might send params as array, this handler assumes body or manual parsing
+	// Standard JSON-RPC 2.0 params are [hash]
+	var params []interface{}
+	if err := json.NewDecoder(r.Body).Decode(&params); err == nil && len(params) > 0 {
+		if hashStr, ok := params[0].(string); ok {
+			req.TxHash = hashStr
+		}
+	} else if req.TxHash == "" {
+		// Fallback for body parsing
+		json.NewDecoder(r.Body).Decode(&req)
+	}
 
-	// For now assuming Blockchain has GetTransaction wrapper:
-	// tx, err := h.blockchain.GetTransaction(hash)
-	respondJSON(w, nil) // Placeholder to make it compile if method missing
+	if req.TxHash == "" {
+		// Try Mux vars if routed that way, though standard RPC is POST
+		// Returning nil for now if not found
+		respondJSON(w, nil)
+		return
+	}
+
+	// 1. Try to find in storage (Mined)
+	tx, err := h.blockchain.GetWorldState().GetTransactionFromStorage(req.TxHash)
+	if err == nil && tx != nil {
+		respondJSON(w, h.convertToEthTx(tx))
+		return
+	}
+
+	// 2. Try to find in mempool (Pending)
+	pendingTxs := h.blockchain.GetPendingTransactions()
+	for _, pTx := range pendingTxs {
+		if pTx.Id == req.TxHash || pTx.Hash == req.TxHash {
+			respondJSON(w, h.convertToEthTx(pTx))
+			return
+		}
+	}
+
+	respondJSON(w, nil)
 }
 
 func (h *EthereumRPCHandler) GetTransactionReceipt(w http.ResponseWriter, r *http.Request) {
-	respondJSON(w, nil) // Placeholder
+	var params []interface{}
+	var txHash string
+
+	if err := json.NewDecoder(r.Body).Decode(&params); err == nil && len(params) > 0 {
+		if hashStr, ok := params[0].(string); ok {
+			txHash = hashStr
+		}
+	}
+
+	if txHash == "" {
+		respondJSON(w, nil)
+		return
+	}
+
+	// Check if transaction exists and is confirmed
+	tx, err := h.blockchain.GetWorldState().GetTransactionFromStorage(txHash)
+	if err != nil || tx == nil {
+		respondJSON(w, nil)
+		return
+	}
+
+	// NOTE: Since Thrylos DB currently doesn't map TxHash -> BlockHash directly in a fast index,
+	// and we don't have block info in the Tx struct, we fake the block info for the Testnet.
+	// For Mainnet, you MUST add BlockNumber/Hash to the stored Transaction struct or a separate index.
+
+	// Construct Receipt
+	receipt := map[string]interface{}{
+		"transactionHash":   tx.Hash,
+		"transactionIndex":  hexutil.Uint64(0),
+		"blockHash":         "0x0000000000000000000000000000000000000000000000000000000000000000", // Unknown without index
+		"blockNumber":       hexutil.Uint64(h.blockchain.GetHeight()),                             // Approx
+		"from":              tx.From,
+		"to":                tx.To,
+		"cumulativeGasUsed": hexutil.Uint64(tx.Gas),
+		"gasUsed":           hexutil.Uint64(tx.Gas),
+		"contractAddress":   nil, // Populate if Deploy
+		"logs":              []interface{}{},
+		"logsBloom":         "0x0000000000000000000000000000000000000000",
+		"status":            "0x1", // Success (Thrylos only commits success)
+	}
+
+	if tx.Type == core.TransactionType_EVM_CONTRACT_DEPLOY {
+		// Calculate contract address if it was a deployment
+		// (Optional enhancement: Store this in Tx metadata)
+	}
+
+	respondJSON(w, receipt)
 }
 
 // ===== Storage =====
@@ -347,9 +405,7 @@ func (h *EthereumRPCHandler) GetStorageAt(w http.ResponseWriter, r *http.Request
 	key := common.HexToHash(req.Position)
 
 	value := h.evmExecutor.GetStorageAt(address, key)
-
-	response := value
-	respondJSON(w, response)
+	respondJSON(w, value)
 }
 
 // ===== Helper Types & Functions =====
@@ -377,30 +433,81 @@ func (h *EthereumRPCHandler) convertEthTxToThrylosTx(ethTx *types.Transaction) (
 		txType = core.TransactionType_EVM_CONTRACT_CALL
 	}
 
+	// 1. Extract Raw Signature Values (V, R, S)
+	v, r, s := ethTx.RawSignatureValues()
+
+	// 2. Construct Standard [R || S || V] Signature (65 bytes)
+	sigBytes := make([]byte, 65)
+
+	// Pad R and S to 32 bytes
+	rBytes := r.Bytes()
+	sBytes := s.Bytes()
+
+	// Copy R into [0:32]
+	copy(sigBytes[32-len(rBytes):32], rBytes)
+	// Copy S into [32:64]
+	copy(sigBytes[64-len(sBytes):64], sBytes)
+
+	// Normalize V to 0 or 1 for standard recovery (EIP-155 support)
+	// EIP-155: v = 2 * chainId + 35 + yParity
+	// Legacy: v = 27 + yParity
+	var vByte byte
+	if v.Cmp(big.NewInt(35)) >= 0 {
+		// EIP-155
+		// yParity = v - (2 * chainId + 35)
+		subVal := new(big.Int).Mul(h.chainID, big.NewInt(2))
+		subVal.Add(subVal, big.NewInt(35))
+		vByte = byte(new(big.Int).Sub(v, subVal).Uint64())
+	} else if v.Cmp(big.NewInt(27)) >= 0 {
+		// Legacy (27/28)
+		vByte = byte(v.Uint64() - 27)
+	} else {
+		// Already normalized (0/1)
+		vByte = byte(v.Uint64())
+	}
+	sigBytes[64] = vByte
+
 	thrylosTx := &core.Transaction{
-		From: sender.Hex(),
-		To:   "",
-
-		// ✅ FIX: Use .String() to convert BigInt to string
-		Amount: ethTx.Value().String(),
-
-		Gas: int64(ethTx.Gas()), // Gas limit fits in int64
-
-		// ✅ FIX: Use .String() to convert BigInt to string
-		GasPrice: ethTx.GasPrice().String(),
-
+		From:      sender.Hex(),
+		To:        "", // Set below
+		Amount:    ethTx.Value().String(),
+		Gas:       int64(ethTx.Gas()),
+		GasPrice:  ethTx.GasPrice().String(),
 		Nonce:     ethTx.Nonce(),
 		Data:      ethTx.Data(),
 		Type:      txType,
 		Timestamp: time.Now().Unix(),
+		Signature: sigBytes, // ✅ Crucial: Pass the signature!
 	}
 
 	if ethTx.To() != nil {
 		thrylosTx.To = ethTx.To().Hex()
 	}
 
-	// Recommended: Calculate the hash immediately if possible, or let AddTransaction handle it
-	// thrylosTx.Hash = ...
+	// ✅ CRITICAL: Calculate the Hash using Thrylos logic so it matches Validation
+	// This requires access to the TransactionValidator logic.
+	// Since we are in the API package, we call the helper via WorldState if available,
+	// or recalculate it manually here using the exact same logic as `core/transaction/validator.go`.
+
+	// Getting the validator from world state is cleaner:
+	if h.blockchain != nil && h.blockchain.GetWorldState() != nil {
+		tv := h.blockchain.GetWorldState().GetTransactionValidator()
+		if tv != nil {
+			hash, err := tv.CalculateTransactionHash(thrylosTx)
+			if err == nil {
+				thrylosTx.Hash = hash
+				// Also set ID to hash for consistency
+				thrylosTx.Id = hash
+			} else {
+				return nil, fmt.Errorf("failed to calculate tx hash: %v", err)
+			}
+		}
+	}
+
+	// Fallback if validator isn't reachable (shouldn't happen in prod)
+	if thrylosTx.Hash == "" {
+		return nil, fmt.Errorf("transaction validator unavailable")
+	}
 
 	return thrylosTx, nil
 }
@@ -413,7 +520,7 @@ func (h *EthereumRPCHandler) convertToEthBlock(block *core.Block, fullTx bool) m
 		"timestamp":       hexutil.Uint64(block.Header.Timestamp),
 		"gasLimit":        hexutil.Uint64(block.Header.GasLimit),
 		"gasUsed":         hexutil.Uint64(block.Header.GasUsed),
-		"miner":           block.Header.Validator, // Proposer
+		"miner":           block.Header.Validator,
 		"difficulty":      "0x0",
 		"totalDifficulty": "0x0",
 		"size":            hexutil.Uint64(len(block.Transactions)),
@@ -440,23 +547,17 @@ func (h *EthereumRPCHandler) convertToEthBlock(block *core.Block, fullTx bool) m
 
 func (h *EthereumRPCHandler) convertToEthTx(tx *core.Transaction) map[string]interface{} {
 	return map[string]interface{}{
-		"hash":  tx.Hash,
-		"nonce": hexutil.Uint64(tx.Nonce),
-		"from":  tx.From,
-		"to":    tx.To,
-
-		// ✅ FIX: Parse string -> BigInt -> HexUtil
-		"value": (*hexutil.Big)(math.ParseBigInt(tx.Amount)),
-
-		"gas": hexutil.Uint64(tx.Gas),
-
-		// ✅ FIX: Parse string -> BigInt -> HexUtil
-		"gasPrice": (*hexutil.Big)(math.ParseBigInt(tx.GasPrice)),
-
+		"hash":             tx.Hash,
+		"nonce":            hexutil.Uint64(tx.Nonce),
+		"from":             tx.From,
+		"to":               tx.To,
+		"value":            (*hexutil.Big)(math.ParseBigInt(tx.Amount)),
+		"gas":              hexutil.Uint64(tx.Gas),
+		"gasPrice":         (*hexutil.Big)(math.ParseBigInt(tx.GasPrice)),
 		"input":            hexutil.Bytes(tx.Data),
-		"v":                "0x1c",
-		"r":                "0x0",
-		"s":                "0x0",
+		"v":                "0x1c", // Placeholder
+		"r":                "0x0",  // Placeholder
+		"s":                "0x0",  // Placeholder
 		"transactionIndex": hexutil.Uint64(0),
 		"blockHash":        "",
 		"blockNumber":      hexutil.Uint64(0),

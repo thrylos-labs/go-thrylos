@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
@@ -307,6 +309,12 @@ func (v *Validator) validateSignature(tx *core.Transaction) error {
 		return fmt.Errorf("transaction from_pubkey cannot be empty")
 	}
 
+	// NEW: Handle Ethereum Transactions differently
+	if tx.Type == core.TransactionType_EVM_CONTRACT_CALL ||
+		tx.Type == core.TransactionType_EVM_CONTRACT_DEPLOY {
+		return v.validateEthereumSignature(tx)
+	}
+
 	// Recreate the public key from bytes
 	pubKey, err := crypto.NewPublicKeyFromBytes(tx.FromPubkey)
 	if err != nil {
@@ -316,6 +324,80 @@ func (v *Validator) validateSignature(tx *core.Transaction) error {
 	// Delegate to existing verification logic (also checks address ↔ pubkey match)
 	if err := v.VerifyTransactionSignature(tx, pubKey); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+// Add this new function to validate MetaMask signatures
+func (v *Validator) validateEthereumSignature(tx *core.Transaction) error {
+	// 1. We expect the original RLP to be in tx.Data for full fidelity,
+	//    OR we reconstruct the ETH tx from fields (riskier but works if exact).
+	//    Better approach for now: Use the RecoverSigner from the signature + fields.
+
+	// Convert BigInt strings back to numeric types
+	amountBig := math.ParseBigInt(tx.Amount)
+	gasPriceBig := math.ParseBigInt(tx.GasPrice)
+
+	// Construct go-ethereum transaction object
+	// Note: This must match exactly what MetaMask signed
+	var ethTxData types.TxData
+
+	if tx.To == "" {
+		// Contract Creation
+		ethTxData = &types.LegacyTx{
+			Nonce:    tx.Nonce,
+			GasPrice: gasPriceBig,
+			Gas:      uint64(tx.Gas),
+			Value:    amountBig,
+			Data:     tx.Data, // Contract bytecode
+		}
+	} else {
+		// Contract Call / Transfer
+		toAddr := common.HexToAddress(tx.To)
+		ethTxData = &types.LegacyTx{
+			Nonce:    tx.Nonce,
+			GasPrice: gasPriceBig,
+			Gas:      uint64(tx.Gas),
+			To:       &toAddr,
+			Value:    amountBig,
+			Data:     tx.Data, // Call data
+		}
+	}
+
+	ethTx := types.NewTx(ethTxData)
+
+	// Signer for the chain
+	chainIDBig, _ := new(big.Int).SetString(v.config.Network.ChainID, 10)
+	if chainIDBig == nil {
+		chainIDBig = big.NewInt(1)
+	} // Default mainnet
+
+	signer := types.NewEIP155Signer(chainIDBig)
+
+	// Verify signature matches tx.From
+	// We assume tx.Signature holds the [R|S|V] bytes from MetaMask
+	if len(tx.Signature) != 65 {
+		return fmt.Errorf("invalid ethereum signature length: %d", len(tx.Signature))
+	}
+
+	// Create ethTx with signature to recover sender
+	// NOTE: You might need to adjust V value (MetaMask sends 27/28, EIP155 wants chainID included)
+	// For simplicity here, we assume standard recovery:
+
+	fromAddr, err := signer.Sender(ethTx)
+	if err != nil {
+		// Fallback: try Homstead signer if EIP155 fails
+		signer = types.HomesteadSigner{}
+		fromAddr, err = signer.Sender(ethTx)
+		if err != nil {
+			return fmt.Errorf("failed to recover ethereum sender: %v", err)
+		}
+	}
+
+	// Verify the recovered address matches tx.From
+	if !strings.EqualFold(fromAddr.Hex(), tx.From) {
+		return fmt.Errorf("signature mismatch: recovered %s, expected %s", fromAddr.Hex(), tx.From)
 	}
 
 	return nil
