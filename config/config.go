@@ -387,15 +387,46 @@ func Load() (*Config, error) {
 		},
 	}
 
-	// Load Genesis (Logic remains similar, just handle string conversion)
+	// Load Genesis
 	genesisFile := "genesis.json"
 	if _, err := os.Stat(genesisFile); os.IsNotExist(err) {
 		genesisFile = "config/genesis.json"
 	}
-	loadGenesisFromFile(genesisFile, cfg)
-	sanitizeConfigForEnvironment(cfg)
 
+	// Attempt to load
+	if err := loadGenesisFromFile(genesisFile, cfg); err != nil {
+		// Log warning but fall back to safe defaults if file is missing/corrupt
+		fmt.Printf("⚠️ Warning: Could not load genesis file: %v. Using internal defaults.\n", err)
+		cfg.Genesis = DefaultGenesisAllocation()
+	} else {
+		// [FIX] Validate Critical Consensus Parameters
+		// This ensures the loaded genesis.json matches the compiled binary's economic rules
+		validateGenesisConsistency(cfg)
+	}
+
+	sanitizeConfigForEnvironment(cfg)
 	return cfg, nil
+}
+
+// [FIX] New helper to return the canonical genesis allocation based on hardcoded constants
+func DefaultGenesisAllocation() GenesisAllocation {
+	return GenesisAllocation{
+		TotalGenesis: math.BigIntToString(GenesisSupply),
+		Accounts:     []GenesisAccount{}, // Empty by default, filled by gen-genesis tool usually
+	}
+}
+
+// [FIX] Strict validation to prevent Mainnet forks due to config mismatch
+func validateGenesisConsistency(cfg *Config) {
+	// Parse loaded genesis total
+	loadedTotal := math.ParseBigInt(cfg.Genesis.TotalGenesis)
+
+	// Compare with hardcoded GenesisSupply
+	if loadedTotal.Cmp(GenesisSupply) != 0 {
+		panic(fmt.Sprintf("❌ CRITICAL CONFIG ERROR: Genesis file supply (%s) does not match hardcoded protocol rule (%s). "+
+			"You must update config/genesis.json to match config.go constants.",
+			loadedTotal.String(), GenesisSupply.String()))
+	}
 }
 
 // [FIX L-04] sanitizeConfigForEnvironment enforces security overrides for production
