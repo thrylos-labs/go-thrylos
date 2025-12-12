@@ -400,7 +400,6 @@ func (bp *BlockProposer) constructBlock(transactions []*core.Transaction, slot u
 	merkleRoot := bp.calculateMerkleRoot(transactions)
 
 	// ✅ FIX: Convert BigInt string to int64 for the header struct
-	// NOTE: You should update your protobuf to use string for total_fees
 	totalFeesBig := coremath.ParseBigInt(totalFees)
 
 	header := &core.BlockHeader{
@@ -414,7 +413,7 @@ func (bp *BlockProposer) constructBlock(transactions []*core.Transaction, slot u
 		GasLimit:   bp.maxBlockSize,
 		Slot:       slot,
 		Epoch:      epoch,
-		TotalFees:  totalFeesBig.Int64(), // Converted here
+		TotalFees:  totalFeesBig.Int64(), // ✅ Converted here
 		MerkleRoot: merkleRoot,
 	}
 
