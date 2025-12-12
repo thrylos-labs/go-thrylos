@@ -29,7 +29,7 @@ import (
 type Set struct {
 	validators    map[string]*core.Validator
 	activeList    []*core.Validator
-	totalStake    int64
+	totalStake    string
 	maxValidators int
 	mu            sync.RWMutex
 
@@ -142,6 +142,7 @@ func (vs *Set) UpdateValidator(validator *core.Validator) error {
 }
 
 // SelectProposer selects a validator to propose a block using stake-weighted randomness
+// SelectProposer selects a validator to propose a block using stake-weighted randomness
 func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error) {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
@@ -150,8 +151,16 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 		return nil, fmt.Errorf("no active validators")
 	}
 
-	if vs.totalStake == 0 {
+	// ✅ Fix: Check zero stake using BigInt parsing or string comparison
+	// Quick string check first for efficiency
+	if vs.totalStake == "0" || vs.totalStake == "" {
 		return nil, fmt.Errorf("total stake is zero")
+	}
+
+	// Parse to BigInt to be sure (and for later conversion)
+	totalStakeBig, _ := new(big.Int).SetString(vs.totalStake, 10)
+	if totalStakeBig == nil || totalStakeBig.Sign() == 0 {
+		return nil, fmt.Errorf("total stake is zero or invalid")
 	}
 
 	// Create deterministic randomness from seed and slot
@@ -165,6 +174,7 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 	hashInt := new(big.Int).SetBytes(hash[:])
 
 	// Apply anti-concentration adjustment
+	// Note: calculateAdjustedStakes currently returns int64 weights, so we keep that logic
 	adjustedStakes := vs.calculateAdjustedStakes()
 	totalAdjustedStake := int64(0)
 	for _, stake := range adjustedStakes {
@@ -191,9 +201,11 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 			return &SelectionResult{
 				SelectedValidator: validator,
 				SelectionSeed:     hash[:],
-				TotalStake:        vs.totalStake,
-				SelectionWeight:   adjustedStake,
-				Timestamp:         time.Now().Unix(),
+				// ✅ Fix: Convert BigInt string back to int64 for the struct
+				// (Assuming SelectionResult.TotalStake is still int64)
+				TotalStake:      totalStakeBig.Int64(),
+				SelectionWeight: adjustedStake,
+				Timestamp:       time.Now().Unix(),
 			}, nil
 		}
 	}
@@ -205,9 +217,10 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 	return &SelectionResult{
 		SelectedValidator: lastValidator,
 		SelectionSeed:     hash[:],
-		TotalStake:        vs.totalStake,
-		SelectionWeight:   adjustedStakes[lastValidator.Address],
-		Timestamp:         time.Now().Unix(),
+		// ✅ Fix: Convert BigInt string back to int64
+		TotalStake:      totalStakeBig.Int64(),
+		SelectionWeight: adjustedStakes[lastValidator.Address],
+		Timestamp:       time.Now().Unix(),
 	}, nil
 }
 
@@ -290,28 +303,39 @@ func (vs *Set) calculateAdjustedStakes() map[string]int64 {
 	currentTime := time.Now().Unix()
 
 	for _, validator := range vs.activeList {
-		baseStake := validator.Stake
+		// ✅ Fix: Parse string stake to BigFloat for multiplication
+		baseStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
+		if baseStakeBig == nil {
+			baseStakeBig = big.NewInt(0)
+		}
+
+		// Convert to Float for multiplier math
+		adjustedStakeFloat := new(big.Float).SetInt(baseStakeBig)
 
 		// Apply performance multiplier
 		performanceMultiplier := vs.performanceMultipliers[validator.Address]
-		adjustedStake := int64(float64(baseStake) * performanceMultiplier)
+		adjustedStakeFloat.Mul(adjustedStakeFloat, big.NewFloat(performanceMultiplier))
 
 		// Apply anti-concentration penalty for recently selected validators
 		if stats, exists := vs.selectionHistory[validator.Address]; exists {
-			// Reduce stake weight if selected recently
 			timeSinceLastSelection := currentTime - stats.LastSelected
 
 			if timeSinceLastSelection < 300 { // 5 minutes
 				recentSelectionPenalty := 0.5 // 50% penalty
-				adjustedStake = int64(float64(adjustedStake) * recentSelectionPenalty)
+				adjustedStakeFloat.Mul(adjustedStakeFloat, big.NewFloat(recentSelectionPenalty))
 			}
 
 			// Reduce stake weight for consecutive selections
 			if stats.ConsecutiveSelections > 2 {
 				consecutivePenalty := 1.0 / float64(stats.ConsecutiveSelections)
-				adjustedStake = int64(float64(adjustedStake) * consecutivePenalty)
+				adjustedStakeFloat.Mul(adjustedStakeFloat, big.NewFloat(consecutivePenalty))
 			}
 		}
+
+		// Convert back to int64 for the weight map
+		// Note: This caps at int64 max. If stakes are huge, this logic might need
+		// to change to return map[string]string (BigInt) instead.
+		adjustedStake, _ := adjustedStakeFloat.Int64()
 
 		// Ensure minimum stake weight
 		if adjustedStake < 1 {
@@ -459,7 +483,8 @@ func (vs *Set) ActiveSize() int {
 }
 
 // GetTotalStake returns the total stake of all active validators
-func (vs *Set) GetTotalStake() int64 {
+// ✅ Fix: Return string
+func (vs *Set) GetTotalStake() string {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
 	return vs.totalStake
@@ -468,19 +493,36 @@ func (vs *Set) GetTotalStake() int64 {
 // updateActiveListUnsafe updates the active validator list (caller must hold lock)
 func (vs *Set) updateActiveListUnsafe() {
 	vs.activeList = vs.activeList[:0] // Reset slice
-	vs.totalStake = 0
+
+	// ✅ Fix: totalStake calculation using BigInt
+	totalStakeBig := big.NewInt(0)
 
 	// Collect active validators
 	for _, validator := range vs.validators {
 		if validator.Active && !vs.isJailed(validator) {
 			vs.activeList = append(vs.activeList, validator)
-			vs.totalStake += validator.Stake
+
+			// Parse and Add
+			s, _ := new(big.Int).SetString(validator.Stake, 10)
+			if s != nil {
+				totalStakeBig.Add(totalStakeBig, s)
+			}
 		}
 	}
+	vs.totalStake = totalStakeBig.String()
 
 	// Sort by stake (descending) for consistent ordering
+	// ✅ Fix: Compare BigInts
 	sort.Slice(vs.activeList, func(i, j int) bool {
-		return vs.activeList[i].Stake > vs.activeList[j].Stake
+		s1, _ := new(big.Int).SetString(vs.activeList[i].Stake, 10)
+		s2, _ := new(big.Int).SetString(vs.activeList[j].Stake, 10)
+		if s1 == nil {
+			s1 = big.NewInt(0)
+		}
+		if s2 == nil {
+			s2 = big.NewInt(0)
+		}
+		return s1.Cmp(s2) > 0
 	})
 
 	// Limit to max validators if necessary
@@ -488,11 +530,15 @@ func (vs *Set) updateActiveListUnsafe() {
 		// Keep top validators by stake
 		vs.activeList = vs.activeList[:vs.maxValidators]
 
-		// Recalculate total stake
-		vs.totalStake = 0
+		// Recalculate total stake for the limited list
+		totalStakeBig = big.NewInt(0)
 		for _, validator := range vs.activeList {
-			vs.totalStake += validator.Stake
+			s, _ := new(big.Int).SetString(validator.Stake, 10)
+			if s != nil {
+				totalStakeBig.Add(totalStakeBig, s)
+			}
 		}
+		vs.totalStake = totalStakeBig.String()
 	}
 }
 
@@ -501,6 +547,7 @@ func (vs *Set) isJailed(validator *core.Validator) bool {
 	return validator.JailUntil > time.Now().Unix()
 }
 
+// RotateValidatorSet performs validator set rotation based on performance and stake
 // RotateValidatorSet performs validator set rotation based on performance and stake
 func (vs *Set) RotateValidatorSet(config *config.Config) ([]*core.Validator, []*core.Validator, error) {
 	vs.mu.Lock()
@@ -513,7 +560,13 @@ func (vs *Set) RotateValidatorSet(config *config.Config) ([]*core.Validator, []*
 	var toRemove []*core.Validator
 	var toAdd []*core.Validator
 
-	// Find validators to remove (poor performance or below threshold)
+	// ✅ FIX: Parse config.Staking.MinValidatorStake from string
+	minValStakeBig, _ := new(big.Int).SetString(config.Staking.MinValidatorStake, 10)
+	if minValStakeBig == nil {
+		minValStakeBig = big.NewInt(0) // Default to 0 if parsing fails
+	}
+
+	// Find validators to remove
 	for _, validator := range vs.activeList {
 		stats := vs.selectionHistory[validator.Address]
 		performanceMultiplier := vs.performanceMultipliers[validator.Address]
@@ -525,13 +578,19 @@ func (vs *Set) RotateValidatorSet(config *config.Config) ([]*core.Validator, []*
 		}
 
 		// Remove if stake has fallen below minimum
-		if validator.Stake < config.Staking.MinValidatorStake {
+		valStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
+		if valStakeBig == nil {
+			valStakeBig = big.NewInt(0)
+		}
+
+		// ✅ Now both are BigInts, so Cmp works correctly
+		if valStakeBig.Cmp(minValStakeBig) < 0 {
 			toRemove = append(toRemove, validator)
 			continue
 		}
 
-		// Remove if selection rate is anomalously high (possible attack)
-		if stats != nil && stats.SelectionRate > 10.0 { // More than 10 selections per hour
+		// Remove if selection rate is anomalously high
+		if stats != nil && stats.SelectionRate > 10.0 {
 			toRemove = append(toRemove, validator)
 		}
 	}
@@ -539,8 +598,13 @@ func (vs *Set) RotateValidatorSet(config *config.Config) ([]*core.Validator, []*
 	// Find validators to add from inactive set
 	for _, validator := range vs.validators {
 		if !validator.Active && !vs.isJailed(validator) {
+			valStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
+			if valStakeBig == nil {
+				valStakeBig = big.NewInt(0)
+			}
+
 			// Check if meets requirements
-			if validator.Stake >= config.Staking.MinValidatorStake {
+			if valStakeBig.Cmp(minValStakeBig) >= 0 {
 				performanceMultiplier := vs.performanceMultipliers[validator.Address]
 				if performanceMultiplier >= 0.8 { // Good performance threshold
 					toAdd = append(toAdd, validator)
@@ -551,7 +615,15 @@ func (vs *Set) RotateValidatorSet(config *config.Config) ([]*core.Validator, []*
 
 	// Sort candidates to add by stake (descending)
 	sort.Slice(toAdd, func(i, j int) bool {
-		return toAdd[i].Stake > toAdd[j].Stake
+		s1, _ := new(big.Int).SetString(toAdd[i].Stake, 10)
+		s2, _ := new(big.Int).SetString(toAdd[j].Stake, 10)
+		if s1 == nil {
+			s1 = big.NewInt(0)
+		}
+		if s2 == nil {
+			s2 = big.NewInt(0)
+		}
+		return s1.Cmp(s2) > 0
 	})
 
 	// Limit additions to maintain max validator count
@@ -619,11 +691,23 @@ func (vs *Set) ValidateSelectionFairness() map[string]interface{} {
 	selectionRates := make([]float64, 0, len(vs.activeList))
 	stakeWeights := make([]float64, 0, len(vs.activeList))
 
+	totalStakeBig, _ := new(big.Int).SetString(vs.totalStake, 10)
+	// Convert total stake to float for ratio calculation (precision loss acceptable for metrics)
+	totalStakeFloat, _ := new(big.Float).SetInt(totalStakeBig).Float64()
+
 	for _, validator := range vs.activeList {
 		stats := vs.selectionHistory[validator.Address]
 		if stats != nil {
 			actualRate := float64(stats.TimesSelected) / float64(totalSelections)
-			expectedRate := float64(validator.Stake) / float64(vs.totalStake)
+
+			// ✅ Fix: Convert Stake to float for metric calculation
+			valStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
+			valStakeFloat, _ := new(big.Float).SetInt(valStakeBig).Float64()
+
+			expectedRate := 0.0
+			if totalStakeFloat > 0 {
+				expectedRate = valStakeFloat / totalStakeFloat
+			}
 
 			selectionRates = append(selectionRates, actualRate)
 			stakeWeights = append(stakeWeights, expectedRate)
@@ -754,12 +838,28 @@ func (vs *Set) GetSetStatistics() map[string]interface{} {
 		// Calculate stake distribution
 		minStake := vs.activeList[len(vs.activeList)-1].Stake
 		maxStake := vs.activeList[0].Stake
-		avgStake := vs.totalStake / int64(len(vs.activeList))
+
+		totalStakeBig, _ := new(big.Int).SetString(vs.totalStake, 10)
+		if totalStakeBig == nil {
+			totalStakeBig = big.NewInt(1)
+		} // avoid div by zero
+
+		avgStakeBig := new(big.Int).Div(totalStakeBig, big.NewInt(int64(len(vs.activeList))))
 
 		stats["min_stake"] = minStake
 		stats["max_stake"] = maxStake
-		stats["avg_stake"] = avgStake
-		stats["stake_concentration"] = float64(maxStake) / float64(vs.totalStake)
+		stats["avg_stake"] = avgStakeBig.String()
+
+		// Stake concentration (float for display)
+		maxStakeBig, _ := new(big.Int).SetString(maxStake, 10)
+		maxF, _ := new(big.Float).SetInt(maxStakeBig).Float64()
+		totalF, _ := new(big.Float).SetInt(totalStakeBig).Float64()
+
+		concentration := 0.0
+		if totalF > 0 {
+			concentration = maxF / totalF
+		}
+		stats["stake_concentration"] = concentration
 
 		// Calculate validator ages
 		currentTime := time.Now().Unix()
@@ -808,7 +908,8 @@ func (vs *Set) CleanupInactiveValidators(maxInactiveTime time.Duration) []string
 
 	for addr, validator := range vs.validators {
 		// Remove if inactive for too long and has no stake
-		if !validator.Active && validator.Stake == 0 && validator.UpdatedAt < cutoff {
+		// ✅ Fix: Compare string stake to "0"
+		if !validator.Active && validator.Stake == "0" && validator.UpdatedAt < cutoff {
 			delete(vs.validators, addr)
 			delete(vs.selectionHistory, addr)
 			delete(vs.performanceMultipliers, addr)

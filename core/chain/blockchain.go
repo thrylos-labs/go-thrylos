@@ -556,7 +556,10 @@ func (bc *Blockchain) InitiateCrossShardTransfer(from, to string, amount int64, 
 		return nil, fmt.Errorf("cross-shard manager not available")
 	}
 
-	return csm.InitiateTransfer(from, to, amount, nonce)
+	// ✅ FIX: Convert int64 to string before passing to manager
+	amountStr := fmt.Sprintf("%d", amount)
+
+	return csm.InitiateTransfer(from, to, amountStr, nonce)
 }
 
 func (bc *Blockchain) CompleteCrossShardTransfer(transferHash string) error {

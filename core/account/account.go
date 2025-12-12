@@ -11,9 +11,9 @@ package account
 import (
 	"encoding/binary"
 	"fmt"
+	"math/big" // ✅ Added for BigInt support
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	safemath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/storage"
 
 	"github.com/thrylos-labs/go-thrylos/crypto"
@@ -28,8 +28,11 @@ type ShardID int
 const (
 	// BeaconShardID represents the beacon chain (shard -1)
 	BeaconShardID ShardID = -1
+)
 
-	// Minimum balance thresholds
+// Constants as BigInt strings or handled during runtime for comparison
+// keeping int64 here for reference, but will convert to BigInt in logic
+const (
 	MinimumStakeAmount    = int64(1000000000)  // 1 THRYLOS minimum stake
 	MinimumBalance        = int64(1000000)     // 0.001 THRYLOS minimum balance
 	MinimumDelegation     = int64(100000000)   // 0.1 THRYLOS minimum delegation
@@ -119,11 +122,11 @@ func (am *AccountManager) GetAccount(addr string) (*core.Account, error) {
 	if acc == nil {
 		return &core.Account{
 			Address:      addr,
-			Balance:      0,
+			Balance:      "0", // ✅ Fix: String
 			Nonce:        0,
-			StakedAmount: 0,
-			DelegatedTo:  make(map[string]int64),
-			Rewards:      0,
+			StakedAmount: "0",                     // ✅ Fix: String
+			DelegatedTo:  make(map[string]string), // ✅ Fix: map[string]string
+			Rewards:      "0",                     // ✅ Fix: String
 		}, nil
 	}
 
@@ -195,32 +198,46 @@ func (am *AccountManager) ValidateAccount(account *core.Account) error {
 		return fmt.Errorf("invalid account address: %v", err)
 	}
 
-	if account.Balance < 0 {
-		return fmt.Errorf("account balance cannot be negative: %d", account.Balance)
+	// ✅ Fix: Use BigInt comparisons
+	zero := big.NewInt(0)
+
+	bal, _ := new(big.Int).SetString(account.Balance, 10)
+	if bal != nil && bal.Cmp(zero) < 0 {
+		return fmt.Errorf("account balance cannot be negative: %s", account.Balance)
 	}
 
-	if account.StakedAmount < 0 {
-		return fmt.Errorf("staked amount cannot be negative: %d", account.StakedAmount)
+	staked, _ := new(big.Int).SetString(account.StakedAmount, 10)
+	if staked != nil && staked.Cmp(zero) < 0 {
+		return fmt.Errorf("staked amount cannot be negative: %s", account.StakedAmount)
 	}
 
-	if account.Rewards < 0 {
-		return fmt.Errorf("rewards cannot be negative: %d", account.Rewards)
+	rewards, _ := new(big.Int).SetString(account.Rewards, 10)
+	if rewards != nil && rewards.Cmp(zero) < 0 {
+		return fmt.Errorf("rewards cannot be negative: %s", account.Rewards)
 	}
 
-	totalDelegated := int64(0)
-	for validator, amount := range account.DelegatedTo {
+	totalDelegated := big.NewInt(0)
+	for validator, amountStr := range account.DelegatedTo {
 		if err := address.Validate(validator); err != nil {
 			return fmt.Errorf("invalid validator address %s: %v", validator, err)
 		}
-		if amount <= 0 {
-			return fmt.Errorf("delegation amount to %s must be positive: %d", validator, amount)
+
+		amount, _ := new(big.Int).SetString(amountStr, 10)
+		if amount == nil || amount.Sign() <= 0 {
+			return fmt.Errorf("delegation amount to %s must be positive: %s", validator, amountStr)
 		}
-		totalDelegated += amount
+		totalDelegated.Add(totalDelegated, amount)
 	}
 
-	if totalDelegated > account.StakedAmount {
-		return fmt.Errorf("total delegated amount (%d) exceeds staked amount (%d)",
-			totalDelegated, account.StakedAmount)
+	// Check if totalDelegated > StakedAmount
+	stakedVal, _ := new(big.Int).SetString(account.StakedAmount, 10)
+	if stakedVal == nil {
+		stakedVal = big.NewInt(0)
+	}
+
+	if totalDelegated.Cmp(stakedVal) > 0 {
+		return fmt.Errorf("total delegated amount (%s) exceeds staked amount (%s)",
+			totalDelegated.String(), account.StakedAmount)
 	}
 
 	return nil
@@ -237,12 +254,28 @@ func (am *AccountManager) Stake(addr string, amount int64) error {
 		return fmt.Errorf("failed to get account: %v", err)
 	}
 
-	if account.Balance < amount {
-		return fmt.Errorf("insufficient balance: have %d, need %d", account.Balance, amount)
+	amountBig := big.NewInt(amount)
+	balanceBig, _ := new(big.Int).SetString(account.Balance, 10)
+	if balanceBig == nil {
+		balanceBig = big.NewInt(0)
 	}
 
-	account.Balance -= amount
-	account.StakedAmount += amount
+	if balanceBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient balance: have %s, need %d", account.Balance, amount)
+	}
+
+	// Balance -= amount
+	newBalance := new(big.Int).Sub(balanceBig, amountBig)
+	account.Balance = newBalance.String()
+
+	// StakedAmount += amount
+	stakedBig, _ := new(big.Int).SetString(account.StakedAmount, 10)
+	if stakedBig == nil {
+		stakedBig = big.NewInt(0)
+	}
+
+	newStaked := new(big.Int).Add(stakedBig, amountBig)
+	account.StakedAmount = newStaked.String()
 
 	return am.UpdateAccount(account)
 }
@@ -258,21 +291,40 @@ func (am *AccountManager) Unstake(addr string, amount int64) error {
 		return fmt.Errorf("failed to get account: %v", err)
 	}
 
-	if account.StakedAmount < amount {
-		return fmt.Errorf("insufficient staked amount: have %d, need %d", account.StakedAmount, amount)
+	amountBig := big.NewInt(amount)
+	stakedBig, _ := new(big.Int).SetString(account.StakedAmount, 10)
+	if stakedBig == nil {
+		stakedBig = big.NewInt(0)
 	}
 
-	totalDelegated := int64(0)
-	for _, delegated := range account.DelegatedTo {
-		totalDelegated += delegated
+	if stakedBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient staked amount: have %s, need %d", account.StakedAmount, amount)
 	}
 
-	if account.StakedAmount-amount < totalDelegated {
+	totalDelegated := big.NewInt(0)
+	for _, delegatedStr := range account.DelegatedTo {
+		d, _ := new(big.Int).SetString(delegatedStr, 10)
+		if d != nil {
+			totalDelegated.Add(totalDelegated, d)
+		}
+	}
+
+	// Remaining Stake check: (Staked - Amount) < TotalDelegated
+	remainingStake := new(big.Int).Sub(stakedBig, amountBig)
+	if remainingStake.Cmp(totalDelegated) < 0 {
 		return fmt.Errorf("cannot unstake: would leave insufficient stake for delegations")
 	}
 
-	account.StakedAmount -= amount
-	account.Balance += amount
+	account.StakedAmount = remainingStake.String()
+
+	// Balance += Amount
+	balanceBig, _ := new(big.Int).SetString(account.Balance, 10)
+	if balanceBig == nil {
+		balanceBig = big.NewInt(0)
+	}
+
+	newBalance := new(big.Int).Add(balanceBig, amountBig)
+	account.Balance = newBalance.String()
 
 	return am.UpdateAccount(account)
 }
@@ -296,30 +348,44 @@ func (am *AccountManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	// Use SafeSub to move from balance -> staked
-	newBalance, err := safemath.SafeSub(delegator.Balance, amount)
-	if err != nil {
-		return fmt.Errorf("insufficient balance for delegation (underflow): %w", err)
+	amountBig := big.NewInt(amount)
+
+	// Balance Check
+	balBig, _ := new(big.Int).SetString(delegator.Balance, 10)
+	if balBig == nil {
+		balBig = big.NewInt(0)
 	}
 
-	newStaked, err := safemath.SafeAdd(delegator.StakedAmount, amount)
-	if err != nil {
-		return fmt.Errorf("staked amount overflow: %w", err)
+	if balBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient balance for delegation")
 	}
+
+	// Math updates
+	newBalance := new(big.Int).Sub(balBig, amountBig)
+
+	stakedBig, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
+	if stakedBig == nil {
+		stakedBig = big.NewInt(0)
+	}
+	newStaked := new(big.Int).Add(stakedBig, amountBig)
 
 	if delegator.DelegatedTo == nil {
-		delegator.DelegatedTo = make(map[string]int64)
+		delegator.DelegatedTo = make(map[string]string)
 	}
 
-	currentDelegation := delegator.DelegatedTo[validatorAddr]
-	newDelegation, err := safemath.SafeAdd(currentDelegation, amount)
-	if err != nil {
-		return fmt.Errorf("delegation overflow for validator %s: %w", validatorAddr, err)
+	// Update delegation map
+	currentDelegationStr := delegator.DelegatedTo[validatorAddr]
+	currentDelegationBig, _ := new(big.Int).SetString(currentDelegationStr, 10)
+	if currentDelegationBig == nil {
+		currentDelegationBig = big.NewInt(0)
 	}
 
-	delegator.Balance = newBalance
-	delegator.StakedAmount = newStaked
-	delegator.DelegatedTo[validatorAddr] = newDelegation
+	newDelegation := new(big.Int).Add(currentDelegationBig, amountBig)
+
+	// Commit strings
+	delegator.Balance = newBalance.String()
+	delegator.StakedAmount = newStaked.String()
+	delegator.DelegatedTo[validatorAddr] = newDelegation.String()
 
 	return am.UpdateAccount(delegator)
 }
@@ -339,19 +405,45 @@ func (am *AccountManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	currentDelegation := delegator.DelegatedTo[validatorAddr]
-	if currentDelegation < amount {
-		return fmt.Errorf("insufficient delegation to %s: have %d, need %d",
-			validatorAddr, currentDelegation, amount)
+	amountBig := big.NewInt(amount)
+
+	// Check Map
+	currentDelegationStr, exists := delegator.DelegatedTo[validatorAddr]
+	if !exists {
+		return fmt.Errorf("no delegation found for validator %s", validatorAddr)
 	}
 
-	delegator.DelegatedTo[validatorAddr] -= amount
-	if delegator.DelegatedTo[validatorAddr] == 0 {
+	currentDelegationBig, _ := new(big.Int).SetString(currentDelegationStr, 10)
+	if currentDelegationBig == nil {
+		currentDelegationBig = big.NewInt(0)
+	}
+
+	if currentDelegationBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient delegation to %s: have %s, need %d",
+			validatorAddr, currentDelegationStr, amount)
+	}
+
+	// Update Map
+	newDelegation := new(big.Int).Sub(currentDelegationBig, amountBig)
+	if newDelegation.Sign() == 0 {
 		delete(delegator.DelegatedTo, validatorAddr)
+	} else {
+		delegator.DelegatedTo[validatorAddr] = newDelegation.String()
 	}
 
-	delegator.StakedAmount -= amount
-	delegator.Balance += amount
+	// Update Staked Amount
+	stakedBig, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
+	if stakedBig == nil {
+		stakedBig = big.NewInt(0)
+	}
+	delegator.StakedAmount = new(big.Int).Sub(stakedBig, amountBig).String()
+
+	// Update Balance (Refund)
+	balBig, _ := new(big.Int).SetString(delegator.Balance, 10)
+	if balBig == nil {
+		balBig = big.NewInt(0)
+	}
+	delegator.Balance = new(big.Int).Add(balBig, amountBig).String()
 
 	return am.UpdateAccount(delegator)
 }
@@ -367,24 +459,41 @@ func (am *AccountManager) AddRewards(addr string, rewards int64) error {
 		return fmt.Errorf("failed to get account: %v", err)
 	}
 
-	account.Rewards += rewards
+	rewardsBig := big.NewInt(rewards)
+	currentRewards, _ := new(big.Int).SetString(account.Rewards, 10)
+	if currentRewards == nil {
+		currentRewards = big.NewInt(0)
+	}
+
+	account.Rewards = new(big.Int).Add(currentRewards, rewardsBig).String()
 	return am.UpdateAccount(account)
 }
 
 // ClaimRewards moves rewards to balance
-func (am *AccountManager) ClaimRewards(addr string) (int64, error) {
+// ✅ Fix: Return string instead of int64
+func (am *AccountManager) ClaimRewards(addr string) (string, error) {
 	account, err := am.GetAccount(addr)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get account: %v", err)
+		return "0", fmt.Errorf("failed to get account: %v", err)
 	}
 
-	if account.Rewards <= 0 {
-		return 0, fmt.Errorf("no rewards to claim")
+	rewardsBig, _ := new(big.Int).SetString(account.Rewards, 10)
+	if rewardsBig == nil || rewardsBig.Sign() <= 0 {
+		return "0", fmt.Errorf("no rewards to claim")
 	}
 
-	claimedRewards := account.Rewards
-	account.Rewards = 0
-	account.Balance += claimedRewards
+	claimedRewards := rewardsBig.String()
+
+	// Reset Rewards
+	account.Rewards = "0"
+
+	// Add to Balance
+	balanceBig, _ := new(big.Int).SetString(account.Balance, 10)
+	if balanceBig == nil {
+		balanceBig = big.NewInt(0)
+	}
+
+	account.Balance = new(big.Int).Add(balanceBig, rewardsBig).String()
 
 	return claimedRewards, am.UpdateAccount(account)
 }
@@ -411,8 +520,14 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 		return fmt.Errorf("failed to get sender account: %v", err)
 	}
 
-	if fromAccount.Balance < amount {
-		return fmt.Errorf("insufficient balance: have %d, need %d", fromAccount.Balance, amount)
+	amountBig := big.NewInt(amount)
+	fromBalBig, _ := new(big.Int).SetString(fromAccount.Balance, 10)
+	if fromBalBig == nil {
+		fromBalBig = big.NewInt(0)
+	}
+
+	if fromBalBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient balance: have %s, need %d", fromAccount.Balance, amount)
 	}
 
 	// We only handle same-shard transfers here for simplicity logic
@@ -427,9 +542,15 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 		return fmt.Errorf("cross-shard transfer to %s not implemented at account level", toAddr)
 	}
 
-	fromAccount.Balance -= amount
+	// Update Balances
+	fromAccount.Balance = new(big.Int).Sub(fromBalBig, amountBig).String()
 	fromAccount.Nonce++
-	toAccount.Balance += amount
+
+	toBalBig, _ := new(big.Int).SetString(toAccount.Balance, 10)
+	if toBalBig == nil {
+		toBalBig = big.NewInt(0)
+	}
+	toAccount.Balance = new(big.Int).Add(toBalBig, amountBig).String()
 
 	if err := am.UpdateAccount(fromAccount); err != nil {
 		return fmt.Errorf("failed to update sender account: %v", err)
@@ -443,10 +564,11 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 }
 
 // GetBalance returns the balance of an account
-func (am *AccountManager) GetBalance(addr string) (int64, error) {
+// ✅ Fix: Return string
+func (am *AccountManager) GetBalance(addr string) (string, error) {
 	account, err := am.GetAccount(addr)
 	if err != nil {
-		return 0, err
+		return "0", err
 	}
 	return account.Balance, nil
 }
@@ -461,31 +583,34 @@ func (am *AccountManager) GetNonce(addr string) (uint64, error) {
 }
 
 // GetStakedAmount returns the total staked amount for an account
-func (am *AccountManager) GetStakedAmount(addr string) (int64, error) {
+// ✅ Fix: Return string
+func (am *AccountManager) GetStakedAmount(addr string) (string, error) {
 	account, err := am.GetAccount(addr)
 	if err != nil {
-		return 0, err
+		return "0", err
 	}
 	return account.StakedAmount, nil
 }
 
 // GetRewards returns the rewards for an account
-func (am *AccountManager) GetRewards(addr string) (int64, error) {
+// ✅ Fix: Return string
+func (am *AccountManager) GetRewards(addr string) (string, error) {
 	account, err := am.GetAccount(addr)
 	if err != nil {
-		return 0, err
+		return "0", err
 	}
 	return account.Rewards, nil
 }
 
 // GetDelegations returns all delegations for an account
-func (am *AccountManager) GetDelegations(addr string) (map[string]int64, error) {
+// ✅ Fix: Return map[string]string
+func (am *AccountManager) GetDelegations(addr string) (map[string]string, error) {
 	account, err := am.GetAccount(addr)
 	if err != nil {
 		return nil, err
 	}
 
-	delegations := make(map[string]int64)
+	delegations := make(map[string]string)
 	for validator, amount := range account.DelegatedTo {
 		delegations[validator] = amount
 	}
@@ -494,55 +619,69 @@ func (am *AccountManager) GetDelegations(addr string) (map[string]int64, error) 
 }
 
 // GetDelegationToValidator returns delegation amount to a specific validator
-func (am *AccountManager) GetDelegationToValidator(delegatorAddr, validatorAddr string) (int64, error) {
+// ✅ Fix: Return string
+func (am *AccountManager) GetDelegationToValidator(delegatorAddr, validatorAddr string) (string, error) {
 	account, err := am.GetAccount(delegatorAddr)
 	if err != nil {
-		return 0, err
+		return "0", err
 	}
 
-	return account.DelegatedTo[validatorAddr], nil
+	if val, ok := account.DelegatedTo[validatorAddr]; ok {
+		return val, nil
+	}
+	return "0", nil
 }
 
 // GetTotalStakedInShard returns total staked amount using DB iterator
-func (am *AccountManager) GetTotalStakedInShard() int64 {
+// ✅ Fix: Return string (BigInt)
+func (am *AccountManager) GetTotalStakedInShard() string {
 	accounts, err := am.db.GetAllAccounts()
 	if err != nil {
-		return 0
+		return "0"
 	}
 
-	total := int64(0)
+	total := big.NewInt(0)
 	for _, account := range accounts {
-		total += account.StakedAmount
+		staked, _ := new(big.Int).SetString(account.StakedAmount, 10)
+		if staked != nil {
+			total.Add(total, staked)
+		}
 	}
-	return total
+	return total.String()
 }
 
 // GetTotalBalanceInShard returns total balance using DB iterator
-func (am *AccountManager) GetTotalBalanceInShard() int64 {
+func (am *AccountManager) GetTotalBalanceInShard() string {
 	accounts, err := am.db.GetAllAccounts()
 	if err != nil {
-		return 0
+		return "0"
 	}
 
-	total := int64(0)
+	total := big.NewInt(0)
 	for _, account := range accounts {
-		total += account.Balance
+		bal, _ := new(big.Int).SetString(account.Balance, 10)
+		if bal != nil {
+			total.Add(total, bal)
+		}
 	}
-	return total
+	return total.String()
 }
 
 // GetTotalRewardsInShard returns total unclaimed rewards using DB iterator
-func (am *AccountManager) GetTotalRewardsInShard() int64 {
+func (am *AccountManager) GetTotalRewardsInShard() string {
 	accounts, err := am.db.GetAllAccounts()
 	if err != nil {
-		return 0
+		return "0"
 	}
 
-	total := int64(0)
+	total := big.NewInt(0)
 	for _, account := range accounts {
-		total += account.Rewards
+		rew, _ := new(big.Int).SetString(account.Rewards, 10)
+		if rew != nil {
+			total.Add(total, rew)
+		}
 	}
-	return total
+	return total.String()
 }
 
 // GetAccountStats returns statistics about accounts in this shard
@@ -553,19 +692,30 @@ func (am *AccountManager) GetAccountStats() map[string]interface{} {
 	}
 
 	totalAccounts := len(accounts)
-	totalBalance := int64(0)
-	totalStaked := int64(0)
-	totalRewards := int64(0)
+	totalBalance := big.NewInt(0)
+	totalStaked := big.NewInt(0)
+	totalRewards := big.NewInt(0)
 	accountsWithStake := 0
 	accountsWithDelegations := 0
 
 	for _, account := range accounts {
-		totalBalance += account.Balance
-		totalStaked += account.StakedAmount
-		totalRewards += account.Rewards
+		// Sum Balance
+		if b, _ := new(big.Int).SetString(account.Balance, 10); b != nil {
+			totalBalance.Add(totalBalance, b)
+		}
 
-		if account.StakedAmount > 0 {
-			accountsWithStake++
+		// Sum Stake
+		s, _ := new(big.Int).SetString(account.StakedAmount, 10)
+		if s != nil {
+			totalStaked.Add(totalStaked, s)
+			if s.Sign() > 0 {
+				accountsWithStake++
+			}
+		}
+
+		// Sum Rewards
+		if r, _ := new(big.Int).SetString(account.Rewards, 10); r != nil {
+			totalRewards.Add(totalRewards, r)
 		}
 
 		if len(account.DelegatedTo) > 0 {
@@ -581,15 +731,21 @@ func (am *AccountManager) GetAccountStats() map[string]interface{} {
 		delegationParticipation = float64(accountsWithDelegations) / float64(totalAccounts)
 	}
 
+	// Calculate Average Balance
+	avgBalance := big.NewInt(0)
+	if totalAccounts > 0 {
+		avgBalance.Div(totalBalance, big.NewInt(int64(totalAccounts)))
+	}
+
 	return map[string]interface{}{
 		"shard_id":                  am.shardID,
 		"total_accounts":            totalAccounts,
 		"accounts_with_stake":       accountsWithStake,
 		"accounts_with_delegations": accountsWithDelegations,
-		"total_balance":             totalBalance,
-		"total_staked":              totalStaked,
-		"total_rewards":             totalRewards,
-		"average_balance":           totalBalance / max(int64(totalAccounts), 1),
+		"total_balance":             totalBalance.String(),
+		"total_staked":              totalStaked.String(),
+		"total_rewards":             totalRewards.String(),
+		"average_balance":           avgBalance.String(),
 		"staking_participation":     stakingParticipation,
 		"delegation_participation":  delegationParticipation,
 	}
@@ -617,8 +773,10 @@ func (am *AccountManager) CreateGenesisAccount(genesisAddr string, initialSupply
 		return fmt.Errorf("invalid genesis address: %v", err)
 	}
 
-	if initialSupply <= 0 {
-		return fmt.Errorf("initial supply must be positive: %d", initialSupply)
+	// Check initial supply > 0 (parsing string)
+	supplyBig, _ := new(big.Int).SetString(initialSupply, 10)
+	if supplyBig == nil || supplyBig.Sign() <= 0 {
+		return fmt.Errorf("initial supply must be positive: %s", initialSupply)
 	}
 
 	if !am.BelongsToShard(genesisAddr) {
@@ -632,11 +790,11 @@ func (am *AccountManager) CreateGenesisAccount(genesisAddr string, initialSupply
 
 	genesisAccount := &core.Account{
 		Address:      genesisAddr,
-		Balance:      initialSupply,
+		Balance:      initialSupply, // Assumed to be string already
 		Nonce:        0,
-		StakedAmount: 0,
-		DelegatedTo:  make(map[string]int64),
-		Rewards:      0,
+		StakedAmount: "0",                     // ✅ Fix: String
+		DelegatedTo:  make(map[string]string), // ✅ Fix: map[string]string
+		Rewards:      "0",                     // ✅ Fix: String
 		CodeHash:     nil,
 		StorageRoot:  nil,
 	}

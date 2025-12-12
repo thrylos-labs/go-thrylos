@@ -34,11 +34,13 @@ type ValidatorActivity struct {
 
 // Checkpoint represents a justified or finalized checkpoint
 type Checkpoint struct {
-	Epoch          uint64 `json:"epoch"`
-	BlockHash      string `json:"block_hash"`
-	Timestamp      int64  `json:"timestamp"`
-	AttestingStake int64  `json:"attesting_stake"` // Total stake that attested to this checkpoint
-	TotalStake     int64  `json:"total_stake"`     // Total active stake at time of checkpoint
+	Epoch     uint64 `json:"epoch"`
+	BlockHash string `json:"block_hash"`
+	Timestamp int64  `json:"timestamp"`
+
+	// ✅ CHANGE: int64 -> string (BigInt)
+	AttestingStake string `json:"attesting_stake"` // Total stake that attested to this checkpoint
+	TotalStake     string `json:"total_stake"`     // Total active stake at time of checkpoint
 }
 
 // ProposalSlot represents a slot where a validator should propose
@@ -125,18 +127,20 @@ type ForkChoice struct {
 	slashingManager *SlashingManager
 
 	// Core consensus data
-	blockScores           map[string]int64 // blockHash -> total attesting stake
+	// ✅ CHANGE: int64 -> string (BigInt) for stake values
+	blockScores           map[string]string // blockHash -> total attesting stake (BigInt string)
 	attestationsByBlock   map[string][]*types.Attestation
-	validatorAttestations map[string]map[string]bool  // blockHash -> validatorAddress -> hasAttested
-	epochAttestations     map[uint64]map[string]int64 // epoch -> blockHash -> totalStake
-	blockEpochMap         map[string]uint64           // blockHash -> epoch (for cleanup)
+	validatorAttestations map[string]map[string]bool   // blockHash -> validatorAddress -> hasAttested
+	epochAttestations     map[uint64]map[string]string // epoch -> blockHash -> totalStake (BigInt string)
+	blockEpochMap         map[string]uint64            // blockHash -> epoch (for cleanup)
 
 	// Checkpoints for finality
 	justifiedCheckpoint *Checkpoint
 	finalizedCheckpoint *Checkpoint
 
 	// Performance optimizations
-	totalActiveStake     int64
+	// ✅ CHANGE: int64 -> string (BigInt)
+	totalActiveStake     string
 	totalActiveStakeTime time.Time
 
 	// Metrics

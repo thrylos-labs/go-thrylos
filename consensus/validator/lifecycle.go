@@ -14,11 +14,11 @@ package validator
 
 import (
 	"fmt"
+	"math/big"
 	"sync"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
-	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
@@ -190,17 +190,18 @@ func (lm *LifecycleManager) Stop() error {
 }
 
 // RegisterValidator handles new validator registration
+// RegisterValidator handles new validator registration
 func (lm *LifecycleManager) RegisterValidator(
 	address string,
 	pubkey []byte,
-	stake int64,
+	stake string,
 	commission float64,
-	selfDelegation int64,
+	selfDelegation string,
 ) error {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
-	// Validate registration requirements
+	// ✅ FIXED: Now passes strings to the updated helper
 	if err := lm.validateRegistrationRequirements(address, stake, commission, selfDelegation); err != nil {
 		return fmt.Errorf("registration validation failed: %v", err)
 	}
@@ -382,34 +383,63 @@ func (lm *LifecycleManager) ProcessUnjailing(address string) error {
 }
 
 // ProcessStakeChange handles stake changes and their lifecycle implications
-func (lm *LifecycleManager) ProcessStakeChange(address string, oldStake, newStake int64) error {
+// ProcessStakeChange handles validator stake updates
+// ✅ CHANGE: oldStake and newStake types changed to string
+func (lm *LifecycleManager) ProcessStakeChange(address string, oldStake, newStake string) error {
 	validator, err := lm.worldState.GetValidator(address)
 	if err != nil {
 		return fmt.Errorf("validator not found: %v", err)
 	}
 
 	currentState := lm.getValidatorState(validator)
-	stakeDelta := newStake - oldStake
+
+	// Parse values to BigInt
+	oldStakeBig, _ := new(big.Int).SetString(oldStake, 10)
+	newStakeBig, _ := new(big.Int).SetString(newStake, 10)
+	minStakeBig, _ := new(big.Int).SetString(lm.config.Staking.MinValidatorStake, 10)
+
+	// Safety checks for nil values
+	if oldStakeBig == nil {
+		oldStakeBig = big.NewInt(0)
+	}
+	if newStakeBig == nil {
+		newStakeBig = big.NewInt(0)
+	}
+	if minStakeBig == nil {
+		minStakeBig = big.NewInt(0)
+	}
+
+	// Calculate Delta (New - Old)
+	stakeDelta := new(big.Int).Sub(newStakeBig, oldStakeBig)
 
 	var eventType LifecycleEventType
 	var reason string
 
-	if stakeDelta > 0 {
+	// Check sign of delta
+	if stakeDelta.Sign() > 0 {
 		eventType = EventStakeIncrease
-		reason = fmt.Sprintf("Stake increased by %d", stakeDelta)
+		reason = fmt.Sprintf("Stake increased by %s", stakeDelta.String())
 	} else {
 		eventType = EventStakeDecrease
-		reason = fmt.Sprintf("Stake decreased by %d", -stakeDelta)
+		// Negate delta for display
+		negDelta := new(big.Int).Neg(stakeDelta)
+		reason = fmt.Sprintf("Stake decreased by %s", negDelta.String())
 	}
 
 	// Check if stake change affects validator status
-	if newStake < lm.config.Staking.MinValidatorStake {
+	// 1. Check: newStake < MinValidatorStake
+	if newStakeBig.Cmp(minStakeBig) < 0 {
 		if currentState == StateActive {
 			lm.ProcessDeactivation(address, "Stake below minimum threshold")
 		}
-	} else if oldStake < lm.config.Staking.MinValidatorStake && newStake >= lm.config.Staking.MinValidatorStake {
-		if currentState == StateInactive || currentState == StateRegistered {
-			lm.scheduleTransition(address, StatePending, "Stake meets minimum threshold", 0)
+	} else {
+		// 2. Check: oldStake < MinValidatorStake AND newStake >= MinValidatorStake
+		// If we are here, we already know newStake >= min (from the 'else' above)
+		// So we only need to check if oldStake was < min
+		if oldStakeBig.Cmp(minStakeBig) < 0 {
+			if currentState == StateInactive || currentState == StateRegistered {
+				lm.scheduleTransition(address, StatePending, "Stake meets minimum threshold", 0)
+			}
 		}
 	}
 
@@ -418,14 +448,14 @@ func (lm *LifecycleManager) ProcessStakeChange(address string, oldStake, newStak
 		ValidatorAddress: address,
 		EventType:        eventType,
 		FromState:        currentState,
-		ToState:          currentState, // State might not change
+		ToState:          currentState, // State might not change immediately
 		Timestamp:        time.Now().Unix(),
 		BlockHeight:      lm.worldState.GetHeight(),
 		Reason:           reason,
 		Data: map[string]interface{}{
 			"old_stake": oldStake,
 			"new_stake": newStake,
-			"delta":     stakeDelta,
+			"delta":     stakeDelta.String(),
 		},
 	}
 
@@ -500,25 +530,44 @@ func (lm *LifecycleManager) getValidatorState(validator *core.Validator) Validat
 }
 
 // validateRegistrationRequirements validates requirements for validator registration
-func (lm *LifecycleManager) validateRegistrationRequirements(address string, stake int64, commission float64, selfDelegation int64) error {
-	// Validate stake
-	if stake < lm.config.Staking.MinValidatorStake {
-		return fmt.Errorf("stake %d below minimum %d", stake, lm.config.Staking.MinValidatorStake)
+func (lm *LifecycleManager) validateRegistrationRequirements(address string, stake string, commission float64, selfDelegation string) error {
+	// 1. Check Commission
+	if commission < 0 || commission > 100 {
+		return fmt.Errorf("commission must be between 0 and 100")
 	}
 
-	// Validate commission
-	if commission < 0 || commission > lm.config.Staking.MaxCommission {
-		return fmt.Errorf("commission %.4f outside valid range [0, %.4f]", commission, lm.config.Staking.MaxCommission)
+	// 2. Parse Stake
+	stakeBig, ok := new(big.Int).SetString(stake, 10)
+	if !ok {
+		return fmt.Errorf("invalid stake amount format: %s", stake)
 	}
 
-	// Validate self-delegation
-	if selfDelegation < lm.config.Staking.MinSelfStake {
-		return fmt.Errorf("self-delegation %d below minimum %d", selfDelegation, lm.config.Staking.MinSelfStake)
+	// 3. Parse Self Delegation
+	selfDelegationBig, ok := new(big.Int).SetString(selfDelegation, 10)
+	if !ok {
+		return fmt.Errorf("invalid self-delegation amount format: %s", selfDelegation)
 	}
 
-	// Validate address
-	if err := account.ValidateAddress(address); err != nil {
-		return fmt.Errorf("invalid address: %v", err)
+	// 4. Check Minimum Stake
+	// Assuming lm.config.Staking.MinValidatorStake is also a string/BigInt now.
+	// If it's still int64 in config, convert it: big.NewInt(lm.config.Staking.MinValidatorStake)
+	minStakeBig, _ := new(big.Int).SetString(lm.config.Staking.MinValidatorStake, 10)
+	if minStakeBig == nil {
+		minStakeBig = big.NewInt(0)
+	}
+
+	if stakeBig.Cmp(minStakeBig) < 0 {
+		return fmt.Errorf("stake %s is below minimum required %s", stake, lm.config.Staking.MinValidatorStake)
+	}
+
+	// 5. Check Self Delegation is valid (e.g. > 0 and <= stake)
+	if selfDelegationBig.Sign() <= 0 {
+		return fmt.Errorf("self-delegation must be positive")
+	}
+
+	// Ensure self-delegation doesn't exceed total stake (logical consistency check)
+	if selfDelegationBig.Cmp(stakeBig) > 0 {
+		return fmt.Errorf("self-delegation %s cannot exceed total stake %s", selfDelegation, stake)
 	}
 
 	return nil

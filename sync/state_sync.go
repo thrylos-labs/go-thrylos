@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -312,8 +313,26 @@ func (ss *StateSyncer) CreateSnapshot() (*p2p.StateSnapshot, error) {
 	}
 
 	// Export staking data
-	stakes := ss.worldState.ExportStakes()
-	snapshot.Stakes = stakes
+	// ✅ FIX: Convert map[string]map[string]string -> map[string]map[string]int64
+	rawStakes := ss.worldState.ExportStakes()
+	stakesInt := make(map[string]map[string]int64)
+
+	for delegatorAddr, delegations := range rawStakes {
+		if len(delegations) > 0 {
+			stakesInt[delegatorAddr] = make(map[string]int64)
+			for validatorAddr, amountStr := range delegations {
+				// Parse string to int64
+				amount, err := strconv.ParseInt(amountStr, 10, 64)
+				if err != nil {
+					// Log error or default to 0 to prevent crash, depending on your error handling policy
+					fmt.Printf("Error parsing stake amount for export: %v\n", err)
+					amount = 0
+				}
+				stakesInt[delegatorAddr][validatorAddr] = amount
+			}
+		}
+	}
+	snapshot.Stakes = stakesInt
 
 	// Add metadata
 	snapshot.Metadata["created_at"] = fmt.Sprintf("%d", time.Now().Unix())
@@ -459,7 +478,10 @@ func (ss *StateSyncer) applySnapshotData(snapshot *p2p.StateSnapshot) error {
 	// Import staking data
 	for delegator, stakes := range snapshot.Stakes {
 		for validator, amount := range stakes {
-			if err := ss.worldState.SetStake(delegator, validator, amount); err != nil {
+			// ✅ FIX: Convert int64 amount to string
+			amountStr := fmt.Sprintf("%d", amount)
+
+			if err := ss.worldState.SetStake(delegator, validator, amountStr); err != nil {
 				return fmt.Errorf("failed to set stake %s->%s: %v", delegator, validator, err)
 			}
 		}

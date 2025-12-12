@@ -1,23 +1,17 @@
 // consensus/pos/proposer.go
 
 // Block proposer for Proof of Stake consensus
-// Features:
-// - Optimized block construction with transaction selection
-// - Gas optimization and fee calculation
-// - Merkle tree construction for transaction integrity
-// - Block timing and validation
-// - Reward distribution and fee collection
-// - Transaction ordering and prioritization
-
 package pos
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
 	block2 "github.com/thrylos-labs/go-thrylos/core/block"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math" // Safe BigInt math
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"golang.org/x/crypto/blake2b"
@@ -32,13 +26,13 @@ type BlockProposer struct {
 	// Block construction optimization
 	maxBlockSize    int64
 	maxTransactions int
-	minGasPrice     int64
+	minGasPrice     string // BigInt string
 
 	// Performance metrics
 	blocksProposed      uint64
 	avgBlockTime        time.Duration
 	avgTransactionCount int
-	totalFeesCollected  int64
+	totalFeesCollected  string // BigInt string
 
 	// Transaction selection strategy
 	selectionStrategy TransactionSelectionStrategy
@@ -60,7 +54,7 @@ type BlockConstructionResult struct {
 	IncludedTxs       []*core.Transaction `json:"included_txs"`
 	ExcludedTxs       []*core.Transaction `json:"excluded_txs"`
 	TotalGasUsed      int64               `json:"total_gas_used"`
-	TotalFees         int64               `json:"total_fees"`
+	TotalFees         string              `json:"total_fees"` // BigInt string
 	ConstructionTime  time.Duration       `json:"construction_time"`
 	TransactionCount  int                 `json:"transaction_count"`
 	BlockSize         int                 `json:"block_size"`
@@ -72,20 +66,21 @@ type TransactionWithPriority struct {
 	Transaction *core.Transaction `json:"transaction"`
 	Priority    float64           `json:"priority"`
 	GasRatio    float64           `json:"gas_ratio"`
-	FeePerGas   int64             `json:"fee_per_gas"`
+	FeePerGas   string            `json:"fee_per_gas"`
 	Age         time.Duration     `json:"age"`
 }
 
 // NewBlockProposer creates a new optimized block proposer
 func NewBlockProposer(config *config.Config, worldState *state.WorldState, nodeAddress string) *BlockProposer {
 	return &BlockProposer{
-		config:            config,
-		worldState:        worldState,
-		nodeAddress:       nodeAddress,
-		maxBlockSize:      config.Consensus.MaxBlockSize,
-		maxTransactions:   config.Consensus.MaxTxPerBlock,
-		minGasPrice:       config.Consensus.MinGasPrice,
-		selectionStrategy: StrategyBalanced, // Default strategy
+		config:             config,
+		worldState:         worldState,
+		nodeAddress:        nodeAddress,
+		maxBlockSize:       config.Consensus.MaxBlockSize,
+		maxTransactions:    config.Consensus.MaxTxPerBlock,
+		minGasPrice:        config.Consensus.MinGasPrice,
+		selectionStrategy:  StrategyBalanced,
+		totalFeesCollected: "0",
 	}
 }
 
@@ -156,9 +151,10 @@ func (bp *BlockProposer) selectTransactions(availableTxs []*core.Transaction) ([
 
 // selectByHighestGasPrice selects transactions with highest gas prices first
 func (bp *BlockProposer) selectByHighestGasPrice(availableTxs []*core.Transaction) ([]*core.Transaction, []*core.Transaction, error) {
-	// Sort by gas price (descending)
 	sort.Slice(availableTxs, func(i, j int) bool {
-		return availableTxs[i].GasPrice > availableTxs[j].GasPrice
+		gasI := coremath.ParseBigInt(availableTxs[i].GasPrice)
+		gasJ := coremath.ParseBigInt(availableTxs[j].GasPrice)
+		return gasI.Cmp(gasJ) > 0
 	})
 
 	return bp.packTransactions(availableTxs)
@@ -166,7 +162,6 @@ func (bp *BlockProposer) selectByHighestGasPrice(availableTxs []*core.Transactio
 
 // selectByFIFO selects transactions in first-in-first-out order
 func (bp *BlockProposer) selectByFIFO(availableTxs []*core.Transaction) ([]*core.Transaction, []*core.Transaction, error) {
-	// Sort by timestamp (ascending)
 	sort.Slice(availableTxs, func(i, j int) bool {
 		return availableTxs[i].Timestamp < availableTxs[j].Timestamp
 	})
@@ -176,28 +171,37 @@ func (bp *BlockProposer) selectByFIFO(availableTxs []*core.Transaction) ([]*core
 
 // selectBalanced uses a balanced approach considering gas price, age, and account distribution
 func (bp *BlockProposer) selectBalanced(availableTxs []*core.Transaction) ([]*core.Transaction, []*core.Transaction, error) {
-	// Calculate priorities for all transactions
 	txsWithPriority := make([]*TransactionWithPriority, 0, len(availableTxs))
 	currentTime := time.Now().Unix()
 
 	for _, tx := range availableTxs {
 		priority := bp.calculateTransactionPriority(tx, currentTime)
+
+		gasPriceBig := coremath.ParseBigInt(tx.GasPrice)
+		minGasPriceBig := coremath.ParseBigInt(bp.minGasPrice)
+
+		gasRatio := 0.0
+		if minGasPriceBig.Sign() > 0 {
+			gpF := new(big.Float).SetInt(gasPriceBig)
+			minF := new(big.Float).SetInt(minGasPriceBig)
+			res := new(big.Float).Quo(gpF, minF)
+			gasRatio, _ = res.Float64()
+		}
+
 		txWithPriority := &TransactionWithPriority{
 			Transaction: tx,
 			Priority:    priority,
-			GasRatio:    float64(tx.GasPrice) / float64(bp.minGasPrice),
+			GasRatio:    gasRatio,
 			FeePerGas:   tx.GasPrice,
 			Age:         time.Duration(currentTime-tx.Timestamp) * time.Second,
 		}
 		txsWithPriority = append(txsWithPriority, txWithPriority)
 	}
 
-	// Sort by priority (descending)
 	sort.Slice(txsWithPriority, func(i, j int) bool {
 		return txsWithPriority[i].Priority > txsWithPriority[j].Priority
 	})
 
-	// Extract transactions
 	sortedTxs := make([]*core.Transaction, len(txsWithPriority))
 	for i, txWithPriority := range txsWithPriority {
 		sortedTxs[i] = txWithPriority.Transaction
@@ -208,26 +212,28 @@ func (bp *BlockProposer) selectBalanced(availableTxs []*core.Transaction) ([]*co
 
 // selectOptimalPacking uses knapsack-like optimization for maximum value
 func (bp *BlockProposer) selectOptimalPacking(availableTxs []*core.Transaction) ([]*core.Transaction, []*core.Transaction, error) {
-	// Use dynamic programming approach for optimal transaction packing
 	return bp.knapsackTransactionSelection(availableTxs)
 }
 
 // calculateTransactionPriority calculates priority score for balanced selection
 func (bp *BlockProposer) calculateTransactionPriority(tx *core.Transaction, currentTime int64) float64 {
-	// Base priority from gas price
-	gasPriorityScore := float64(tx.GasPrice) / float64(bp.minGasPrice)
+	gasPriceBig := coremath.ParseBigInt(tx.GasPrice)
+	minGasPriceBig := coremath.ParseBigInt(bp.minGasPrice)
 
-	// Age bonus (older transactions get higher priority)
+	gasPriorityScore := 0.0
+	if minGasPriceBig.Sign() > 0 {
+		gpF := new(big.Float).SetInt(gasPriceBig)
+		minF := new(big.Float).SetInt(minGasPriceBig)
+		res := new(big.Float).Quo(gpF, minF)
+		gasPriorityScore, _ = res.Float64()
+	}
+
 	age := currentTime - tx.Timestamp
-	ageBonusScore := float64(age) / 3600.0 // Hour-based age bonus
+	ageBonusScore := float64(age) / 3600.0
 
-	// Transaction type bonus
 	typeBonusScore := bp.getTransactionTypeBonus(tx)
-
-	// Account diversity bonus (prevent single account spam)
 	diversityBonusScore := bp.getAccountDiversityBonus(tx.From)
 
-	// Combine scores with weights
 	priority := (gasPriorityScore * 0.4) +
 		(ageBonusScore * 0.2) +
 		(typeBonusScore * 0.2) +
@@ -240,7 +246,7 @@ func (bp *BlockProposer) calculateTransactionPriority(tx *core.Transaction, curr
 func (bp *BlockProposer) getTransactionTypeBonus(tx *core.Transaction) float64 {
 	switch tx.Type {
 	case core.TransactionType_STAKE:
-		return 1.2 // Staking transactions get priority
+		return 1.2
 	case core.TransactionType_UNSTAKE:
 		return 1.1
 	case core.TransactionType_DELEGATE:
@@ -254,7 +260,6 @@ func (bp *BlockProposer) getTransactionTypeBonus(tx *core.Transaction) float64 {
 
 // getAccountDiversityBonus returns bonus for account diversity
 func (bp *BlockProposer) getAccountDiversityBonus(fromAddress string) float64 {
-	// Check how many transactions from this account are already pending
 	pendingFromAccount := 0
 	pendingTxs := bp.worldState.GetPendingTransactions()
 
@@ -264,7 +269,6 @@ func (bp *BlockProposer) getAccountDiversityBonus(fromAddress string) float64 {
 		}
 	}
 
-	// Reduce bonus for accounts with many pending transactions
 	if pendingFromAccount > 10 {
 		return 0.5
 	} else if pendingFromAccount > 5 {
@@ -282,12 +286,10 @@ func (bp *BlockProposer) packTransactions(sortedTxs []*core.Transaction) ([]*cor
 	totalGasUsed := int64(0)
 	accountNonces := make(map[string]uint64)
 
-	// Initialize account nonces
 	for _, tx := range sortedTxs {
 		if _, exists := accountNonces[tx.From]; !exists {
 			nonce, err := bp.worldState.GetNonce(tx.From)
 			if err != nil {
-				// Skip transactions from unknown accounts
 				excludedTxs = append(excludedTxs, tx)
 				continue
 			}
@@ -295,39 +297,36 @@ func (bp *BlockProposer) packTransactions(sortedTxs []*core.Transaction) ([]*cor
 		}
 	}
 
+	minGasPriceBig := coremath.ParseBigInt(bp.minGasPrice)
+
 	for _, tx := range sortedTxs {
-		// Check transaction count limit
 		if len(selectedTxs) >= bp.maxTransactions {
 			excludedTxs = append(excludedTxs, tx)
 			continue
 		}
 
-		// Check gas limit
 		if totalGasUsed+tx.Gas > bp.maxBlockSize {
 			excludedTxs = append(excludedTxs, tx)
 			continue
 		}
 
-		// Check nonce ordering
 		expectedNonce := accountNonces[tx.From]
 		if tx.Nonce != expectedNonce {
 			excludedTxs = append(excludedTxs, tx)
 			continue
 		}
 
-		// Check minimum gas price
-		if tx.GasPrice < bp.minGasPrice {
+		txGasPriceBig := coremath.ParseBigInt(tx.GasPrice)
+		if txGasPriceBig.Cmp(minGasPriceBig) < 0 {
 			excludedTxs = append(excludedTxs, tx)
 			continue
 		}
 
-		// Validate transaction can be executed
 		if err := bp.worldState.ValidateTransactionExecution(tx); err != nil {
 			excludedTxs = append(excludedTxs, tx)
 			continue
 		}
 
-		// Include transaction
 		selectedTxs = append(selectedTxs, tx)
 		totalGasUsed += tx.Gas
 		accountNonces[tx.From]++
@@ -343,8 +342,6 @@ func (bp *BlockProposer) knapsackTransactionSelection(availableTxs []*core.Trans
 		return []*core.Transaction{}, []*core.Transaction{}, nil
 	}
 
-	// Simple greedy approximation for now (full DP would be too complex)
-	// Calculate value-to-weight ratio for each transaction
 	type txValue struct {
 		tx    *core.Transaction
 		ratio float64
@@ -353,9 +350,16 @@ func (bp *BlockProposer) knapsackTransactionSelection(availableTxs []*core.Trans
 
 	txValues := make([]txValue, n)
 	for i, tx := range availableTxs {
-		value := float64(tx.GasPrice * tx.Gas) // Total fee as value
-		weight := float64(tx.Gas)              // Gas as weight
-		ratio := value / weight                // Value per unit weight
+		gasPriceBig := coremath.ParseBigInt(tx.GasPrice)
+		gasBig := big.NewInt(tx.Gas)
+
+		totalFeeBig := new(big.Int).Mul(gasPriceBig, gasBig)
+		totalFeeF := new(big.Float).SetInt(totalFeeBig)
+
+		weightF := new(big.Float).SetInt64(tx.Gas)
+
+		ratioF := new(big.Float).Quo(totalFeeF, weightF)
+		ratio, _ := ratioF.Float64()
 
 		txValues[i] = txValue{
 			tx:    tx,
@@ -364,12 +368,10 @@ func (bp *BlockProposer) knapsackTransactionSelection(availableTxs []*core.Trans
 		}
 	}
 
-	// Sort by ratio (descending)
 	sort.Slice(txValues, func(i, j int) bool {
 		return txValues[i].ratio > txValues[j].ratio
 	})
 
-	// Pack greedily
 	sortedTxs := make([]*core.Transaction, n)
 	for i, tv := range txValues {
 		sortedTxs[i] = tv.tx
@@ -392,35 +394,35 @@ func (bp *BlockProposer) constructBlock(transactions []*core.Transaction, slot u
 		blockIndex = 0
 	}
 
-	// Calculate totals
 	totalGasUsed := bp.calculateTotalGas(transactions)
+	// totalFees is a string (BigInt)
 	totalFees := bp.calculateTotalFees(transactions)
 	merkleRoot := bp.calculateMerkleRoot(transactions)
 
-	// Create block header using updated protobuf fields
+	// ✅ FIX: Convert BigInt string to int64 for the header struct
+	// NOTE: You should update your protobuf to use string for total_fees
+	totalFeesBig := coremath.ParseBigInt(totalFees)
+
 	header := &core.BlockHeader{
-		Index:     blockIndex,
-		Timestamp: time.Now().Unix(),
-		PrevHash:  prevHash,
-		Validator: bp.nodeAddress,
-		TxRoot:    merkleRoot,
-		StateRoot: bp.worldState.GetStateRoot(),
-		GasUsed:   totalGasUsed,
-		GasLimit:  bp.maxBlockSize,
-		// Add the new consensus fields if they exist in your protobuf
+		Index:      blockIndex,
+		Timestamp:  time.Now().Unix(),
+		PrevHash:   prevHash,
+		Validator:  bp.nodeAddress,
+		TxRoot:     merkleRoot,
+		StateRoot:  bp.worldState.GetStateRoot(),
+		GasUsed:    totalGasUsed,
+		GasLimit:   bp.maxBlockSize,
 		Slot:       slot,
 		Epoch:      epoch,
-		TotalFees:  totalFees,
+		TotalFees:  totalFeesBig.Int64(), // Converted here
 		MerkleRoot: merkleRoot,
 	}
 
-	// Create block
 	block := &core.Block{
 		Header:       header,
 		Transactions: transactions,
 	}
 
-	// Calculate block hash
 	block.Hash = bp.calculateBlockHash(block)
 
 	return block, nil
@@ -438,11 +440,11 @@ func (bp *BlockProposer) createEmptyBlock(slot uint64, epoch uint64, startTime t
 		IncludedTxs:       []*core.Transaction{},
 		ExcludedTxs:       []*core.Transaction{},
 		TotalGasUsed:      0,
-		TotalFees:         0,
+		TotalFees:         "0",
 		ConstructionTime:  time.Since(startTime),
 		TransactionCount:  0,
 		BlockSize:         bp.estimateBlockSize([]*core.Transaction{}),
-		OptimizationScore: 1.0, // Perfect score for empty block
+		OptimizationScore: 1.0,
 	}, nil
 }
 
@@ -455,20 +457,23 @@ func (bp *BlockProposer) calculateTotalGas(transactions []*core.Transaction) int
 	return total
 }
 
-// calculateTotalFees calculates total fees from transactions
-func (bp *BlockProposer) calculateTotalFees(transactions []*core.Transaction) int64 {
-	total := int64(0)
+// calculateTotalFees calculates total fees from transactions (GasPrice * Gas)
+func (bp *BlockProposer) calculateTotalFees(transactions []*core.Transaction) string {
+	total := big.NewInt(0)
 	for _, tx := range transactions {
-		total += tx.GasPrice * tx.Gas
+		gasPriceBig := coremath.ParseBigInt(tx.GasPrice)
+		gasBig := big.NewInt(tx.Gas)
+
+		fee := new(big.Int).Mul(gasPriceBig, gasBig)
+		total.Add(total, fee)
 	}
-	return total
+	return total.String()
 }
 
 // estimateBlockSize estimates the serialized size of a block
 func (bp *BlockProposer) estimateBlockSize(transactions []*core.Transaction) int {
-	// Rough estimation: header (200 bytes) + transactions
 	baseSize := 200
-	txSize := len(transactions) * 300 // Average transaction size estimate
+	txSize := len(transactions) * 300
 	return baseSize + txSize
 }
 
@@ -478,26 +483,19 @@ func (bp *BlockProposer) calculateOptimizationScore(transactions []*core.Transac
 		return 1.0
 	}
 
-	// Gas utilization score (0-1)
 	gasUtilization := float64(bp.calculateTotalGas(transactions)) / float64(bp.maxBlockSize)
-
-	// Transaction count utilization (0-1)
 	txUtilization := float64(len(transactions)) / float64(bp.maxTransactions)
 
-	// Construction time score (faster is better)
 	timeScore := 1.0
 	if constructionTime > 100*time.Millisecond {
 		timeScore = float64(100*time.Millisecond) / float64(constructionTime)
 	}
 
-	// Combined score
 	score := (gasUtilization * 0.4) + (txUtilization * 0.4) + (timeScore * 0.2)
 
-	// Cap at 1.0
 	if score > 1.0 {
 		score = 1.0
 	}
-
 	return score
 }
 
@@ -507,7 +505,6 @@ func (bp *BlockProposer) calculateMerkleRoot(transactions []*core.Transaction) s
 		return ""
 	}
 
-	// Simple implementation - would use proper Merkle tree in production
 	var combined []byte
 	for _, tx := range transactions {
 		combined = append(combined, []byte(tx.Hash)...)
@@ -517,27 +514,27 @@ func (bp *BlockProposer) calculateMerkleRoot(transactions []*core.Transaction) s
 	return fmt.Sprintf("%x", hash)
 }
 
-// calculateBlockHash calculates the hash of a block - made public for use by validator
+// calculateBlockHash calculates the hash of a block
 func (bp *BlockProposer) calculateBlockHash(block *core.Block) string {
 	hash, err := block2.CanonicalBlockHash(block)
 	if err != nil {
-		// This should never happen in normal operation; treat as programmer error.
 		panic(fmt.Sprintf("calculateBlockHash: %v", err))
 	}
 	return hash
 }
 
 // updateMetrics updates proposer performance metrics
-func (bp *BlockProposer) updateMetrics(constructionTime time.Duration, txCount int, totalFees int64) {
+func (bp *BlockProposer) updateMetrics(constructionTime time.Duration, txCount int, totalFees string) {
 	bp.blocksProposed++
-	bp.totalFeesCollected += totalFees
 
-	// Update moving averages
+	currentFees := coremath.ParseBigInt(bp.totalFeesCollected)
+	newFees := coremath.ParseBigInt(totalFees)
+	bp.totalFeesCollected = new(big.Int).Add(currentFees, newFees).String()
+
 	if bp.blocksProposed == 1 {
 		bp.avgBlockTime = constructionTime
 		bp.avgTransactionCount = txCount
 	} else {
-		// Exponential moving average
 		alpha := 0.1
 		bp.avgBlockTime = time.Duration(float64(bp.avgBlockTime)*(1-alpha) + float64(constructionTime)*alpha)
 		bp.avgTransactionCount = int(float64(bp.avgTransactionCount)*(1-alpha) + float64(txCount)*alpha)
@@ -580,7 +577,7 @@ func (bp *BlockProposer) SetMaxTransactions(count int) {
 }
 
 // SetMinGasPrice updates the minimum gas price
-func (bp *BlockProposer) SetMinGasPrice(price int64) {
+func (bp *BlockProposer) SetMinGasPrice(price string) {
 	bp.minGasPrice = price
 }
 
@@ -589,5 +586,5 @@ func (bp *BlockProposer) ResetMetrics() {
 	bp.blocksProposed = 0
 	bp.avgBlockTime = 0
 	bp.avgTransactionCount = 0
-	bp.totalFeesCollected = 0
+	bp.totalFeesCollected = "0"
 }

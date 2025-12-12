@@ -48,24 +48,27 @@ func TestNetworkPartitionAndReorg(t *testing.T) {
 
 	// Engine A (Majority: 70% stake)
 	// We pass 'nil' for the slashing manager and blockchain as they aren't needed for this specific logic test
-	// Note: NewForkChoice signature is correct for the production code but this test uses internal fields
 	engineA := NewForkChoice(cfg, mockState, nil)
-	engineA.totalActiveStake = 10000
-	engineA.totalActiveStakeTime = time.Now() // <--- CRITICAL FIX 1
+	// ✅ FIX: Assign string value
+	engineA.totalActiveStake = "10000"
+	engineA.totalActiveStakeTime = time.Now()
 
 	// Engine B (Minority: 30% stake)
 	engineB := NewForkChoice(cfg, mockState, nil)
-	engineB.totalActiveStake = 10000
-	engineB.totalActiveStakeTime = time.Now() // <--- CRITICAL FIX 2
+	// ✅ FIX: Assign string value
+	engineB.totalActiveStake = "10000"
+	engineB.totalActiveStakeTime = time.Now()
 
 	// 3. SIMULATE PARTITION
 	// Group A votes for Block 1A (7000 stake)
 	block1A_Hash := "0xBlock1A"
-	engineA.blockScores[block1A_Hash] = 7000
+	// ✅ FIX: Assign string value
+	engineA.blockScores[block1A_Hash] = "7000"
 
 	// Group B votes for Block 1B (3000 stake)
 	block1B_Hash := "0xBlock1B"
-	engineB.blockScores[block1B_Hash] = 3000
+	// ✅ FIX: Assign string value
+	engineB.blockScores[block1B_Hash] = "3000"
 
 	// 4. ASSERT INDEPENDENT HEADS
 	// A should choose 1A (Has >66% quorum)
@@ -81,7 +84,8 @@ func TestNetworkPartitionAndReorg(t *testing.T) {
 	// 5. RECONNECT (The Partition Heals)
 	// Engine B receives the attestations from Group A for Block 1A
 	// We simulate B receiving the heavy votes
-	engineB.blockScores[block1A_Hash] = 7000
+	// ✅ FIX: Assign string value
+	engineB.blockScores[block1A_Hash] = "7000"
 
 	// 6. ASSERT CONVERGENCE
 	// Engine B should now switch its head to 1A because it has 7000 weight vs 1B's 3000

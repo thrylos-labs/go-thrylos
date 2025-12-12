@@ -15,6 +15,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/chain"
 	"github.com/thrylos-labs/go-thrylos/core/math"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -898,7 +899,8 @@ func (ce *ConsensusEngine) GetStats() map[string]interface{} {
 	if justified != nil {
 		stats["justified_epoch"] = justified.Epoch
 		stats["justified_block"] = justified.BlockHash[:8]
-		stats["justified_stake_percentage"] = float64(justified.AttestingStake) / float64(justified.TotalStake) * 100
+		// ✅ FIX: Use helper to calculate percentage from strings
+		stats["justified_stake_percentage"] = calculateStakePercentage(justified.AttestingStake, justified.TotalStake)
 	}
 
 	// Add finalized checkpoint info
@@ -906,7 +908,8 @@ func (ce *ConsensusEngine) GetStats() map[string]interface{} {
 	if finalized != nil {
 		stats["finalized_epoch"] = finalized.Epoch
 		stats["finalized_block"] = finalized.BlockHash[:8]
-		stats["finalized_stake_percentage"] = float64(finalized.AttestingStake) / float64(finalized.TotalStake) * 100
+		// ✅ FIX: Use helper to calculate percentage from strings
+		stats["finalized_stake_percentage"] = calculateStakePercentage(finalized.AttestingStake, finalized.TotalStake)
 	}
 
 	// Add time synchronization status
@@ -914,6 +917,28 @@ func (ce *ConsensusEngine) GetStats() map[string]interface{} {
 	stats["time_sync_healthy"] = ce.timeValidator.IsTimeSyncHealthy()
 
 	return stats
+}
+
+// calculateStakePercentage safely calculates (attesting / total) * 100
+func calculateStakePercentage(attestingStr, totalStr string) float64 {
+	attestingBig := coremath.ParseBigInt(attestingStr)
+	totalBig := coremath.ParseBigInt(totalStr)
+
+	// Avoid division by zero
+	if totalBig.Sign() == 0 {
+		return 0.0
+	}
+
+	// Convert to BigFloat for precision division
+	attF := new(big.Float).SetInt(attestingBig)
+	totF := new(big.Float).SetInt(totalBig)
+
+	// Result = (att / tot) * 100
+	res := new(big.Float).Quo(attF, totF)
+	res.Mul(res, big.NewFloat(100))
+
+	percent, _ := res.Float64()
+	return percent
 }
 
 // GetCurrentEpoch returns the current epoch

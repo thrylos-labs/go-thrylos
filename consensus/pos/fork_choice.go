@@ -5,9 +5,11 @@ package pos
 
 import (
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math" // Safe BigInt math
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/types"
 )
@@ -47,7 +49,7 @@ type ForkChoiceMetrics struct {
 	LastCleanupDurationMs int64
 }
 
-// This allows us to swap the real WorldState for a MockWorldState during testing.
+// WorldStateReader interface for dependency injection
 type WorldStateReader interface {
 	GetValidator(address string) (*core.Validator, error)
 	GetActiveValidators() []*core.Validator
@@ -62,16 +64,17 @@ func NewForkChoice(config *config.Config, worldState WorldStateReader, slashingM
 // NewForkChoiceWithConfig creates a fork choice with custom configuration
 func NewForkChoiceWithConfig(config *config.Config, worldState WorldStateReader, slashingManager *SlashingManager, fcConfig *ForkChoiceConfig) *ForkChoice {
 	fc := &ForkChoice{
-		config:                config,
-		fcConfig:              fcConfig,
-		worldState:            worldState,
-		slashingManager:       slashingManager,
-		blockScores:           make(map[string]int64),
+		config:          config,
+		fcConfig:        fcConfig,
+		worldState:      worldState,
+		slashingManager: slashingManager,
+		// Initialize maps with string values for BigInts
+		blockScores:           make(map[string]string),
 		attestationsByBlock:   make(map[string][]*types.Attestation),
 		validatorAttestations: make(map[string]map[string]bool),
-		epochAttestations:     make(map[uint64]map[string]int64),
+		epochAttestations:     make(map[uint64]map[string]string),
 		blockEpochMap:         make(map[string]uint64),
-		totalActiveStake:      0,
+		totalActiveStake:      "0",
 		totalActiveStakeTime:  time.Time{},
 		metrics:               &ForkChoiceMetrics{},
 	}
@@ -108,14 +111,13 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 		blockHashShort = blockHashShort[:8]
 	}
 
-	// 1. Check for slashing violations (double voting, etc.)
+	// 1. Check for slashing violations
 	if fc.slashingManager != nil {
 		if err := fc.slashingManager.ProcessAttestation(attestation); err != nil {
 			fmt.Printf("⚠️ Slashing violation detected for validator %s: %v\n", validatorAddr, err)
-			return // Don't process attestation from slashed validator
+			return
 		}
 
-		// 2. Check if validator is active (not jailed/slashed)
 		if !fc.slashingManager.IsValidatorActive(validatorAddr) {
 			fmt.Printf("⚠️ Inactive/jailed validator %s attempted to attest\n", validatorAddr)
 			return
@@ -128,8 +130,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 	}
 
 	if fc.validatorAttestations[blockHash][validatorAddr] {
-		// Validator already attested to this block, ignore duplicate
-		return
+		return // Duplicate
 	}
 
 	// Get validator info
@@ -144,17 +145,16 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 		return
 	}
 
-	validatorStake := validator.Stake
+	validatorStake := validator.Stake // String (BigInt)
 
-	// Mark validator as having attested to this block
+	// Mark validator as having attested
 	fc.validatorAttestations[blockHash][validatorAddr] = true
 
-	// Check if we've hit the attestation limit for this block
+	// Check limit
 	if fc.attestationsByBlock[blockHash] == nil {
 		fc.attestationsByBlock[blockHash] = make([]*types.Attestation, 0, fc.fcConfig.MaxAttestationsPerBlock)
 	}
 
-	// Only store attestation if under limit (still count stake even if we don't store)
 	if len(fc.attestationsByBlock[blockHash]) < fc.fcConfig.MaxAttestationsPerBlock {
 		fc.attestationsByBlock[blockHash] = append(fc.attestationsByBlock[blockHash], attestation)
 		fc.metrics.TotalAttestations++
@@ -163,87 +163,91 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 			blockHashShort, fc.fcConfig.MaxAttestationsPerBlock)
 	}
 
-	// Update block score with stake weight (always count, even if not storing attestation)
-	fc.blockScores[blockHash] += validatorStake
+	// Update block score using BigInt math
+	currentScore := fc.blockScores[blockHash]
+	newScore := addBigIntStrings(currentScore, validatorStake)
+	fc.blockScores[blockHash] = newScore
 
-	// Track epoch and block mapping for cleanup
+	// Track epoch mapping
 	fc.blockEpochMap[blockHash] = epoch
 
-	// Track epoch attestations for finality
+	// Update epoch attestations
 	if fc.epochAttestations[epoch] == nil {
-		fc.epochAttestations[epoch] = make(map[string]int64)
+		fc.epochAttestations[epoch] = make(map[string]string)
 		fc.metrics.TotalEpochs++
 	}
-	fc.epochAttestations[epoch][blockHash] += validatorStake
+	currentEpochScore := fc.epochAttestations[epoch][blockHash]
+	newEpochScore := addBigIntStrings(currentEpochScore, validatorStake)
+	fc.epochAttestations[epoch][blockHash] = newEpochScore
 
-	// Check if this block has reached quorum (2/3 of total stake)
-	totalStake := fc.getTotalActiveStake()
-	attestingStake := fc.blockScores[blockHash]
-	quorumThreshold := (totalStake*2)/3 + 1
+	// Check Quorum (2/3 of total stake)
+	totalStakeStr := fc.getTotalActiveStake()
+	totalStakeBig := coremath.ParseBigInt(totalStakeStr)
 
-	if attestingStake >= quorumThreshold {
-		fmt.Printf("✅ Block %s reached 2/3 quorum: %d/%d stake (%.1f%%)\n",
-			blockHashShort, attestingStake, totalStake,
-			float64(attestingStake)/float64(totalStake)*100)
+	attestingStakeBig := coremath.ParseBigInt(newScore)
 
-		// Check if this should become justified
-		fc.checkJustification(epoch, blockHash, attestingStake, totalStake)
+	// Threshold = (Total * 2) / 3 + 1
+	two := big.NewInt(2)
+	three := big.NewInt(3)
+	thresholdBig := new(big.Int).Mul(totalStakeBig, two)
+	thresholdBig.Div(thresholdBig, three)
+	thresholdBig.Add(thresholdBig, big.NewInt(1))
+
+	if attestingStakeBig.Cmp(thresholdBig) >= 0 {
+		// Log percentage
+		percentage := calculatePercentage(attestingStakeBig, totalStakeBig)
+
+		fmt.Printf("✅ Block %s reached 2/3 quorum: %s/%s stake (%.1f%%)\n",
+			blockHashShort, attestingStakeBig.String(), totalStakeBig.String(), percentage)
+
+		// Check justification (passing strings)
+		fc.checkJustification(epoch, blockHash, attestingStakeBig.String(), totalStakeBig.String())
 	}
 }
 
 // getTotalActiveStake calculates the total stake of all active validators
-// Results are cached based on StakeCacheTTL to avoid expensive recalculation
-func (fc *ForkChoice) getTotalActiveStake() int64 {
+func (fc *ForkChoice) getTotalActiveStake() string {
 	// Check cache
-	if time.Since(fc.totalActiveStakeTime) < fc.fcConfig.StakeCacheTTL && fc.totalActiveStake > 0 {
+	if time.Since(fc.totalActiveStakeTime) < fc.fcConfig.StakeCacheTTL && fc.totalActiveStake != "0" {
 		return fc.totalActiveStake
 	}
 
-	// Recalculate total active stake
 	activeValidators := fc.worldState.GetActiveValidators()
-	totalStake := int64(0)
+	totalStake := big.NewInt(0)
 
 	for _, validator := range activeValidators {
 		if validator.Active {
-			totalStake += validator.Stake
+			valStakeBig := coremath.ParseBigInt(validator.Stake)
+			totalStake = coremath.Add(totalStake, valStakeBig)
 		}
 	}
 
 	// Update cache
-	fc.totalActiveStake = totalStake
+	fc.totalActiveStake = totalStake.String()
 	fc.totalActiveStakeTime = time.Now()
 
-	return totalStake
+	return fc.totalActiveStake
 }
 
 // updateMemoryEstimate calculates rough memory usage
 func (fc *ForkChoice) updateMemoryEstimate() {
 	estimate := int64(0)
-
-	// Block scores: ~100 bytes per entry (hash + int64)
-	estimate += int64(len(fc.blockScores)) * 100
-
-	// Attestations: ~200 bytes per attestation
+	// Block scores: ~128 bytes per entry
+	estimate += int64(len(fc.blockScores)) * 128
 	for _, attestations := range fc.attestationsByBlock {
 		estimate += int64(len(attestations)) * 200
 	}
-
-	// Validator attestations: ~100 bytes per validator per block
 	for _, validators := range fc.validatorAttestations {
 		estimate += int64(len(validators)) * 100
 	}
-
-	// Epoch attestations: ~100 bytes per block per epoch
 	for _, blocks := range fc.epochAttestations {
-		estimate += int64(len(blocks)) * 100
+		estimate += int64(len(blocks)) * 128
 	}
-
 	fc.metrics.MemoryEstimateBytes = estimate
 }
 
 // getCurrentEpoch returns the current epoch
 func (fc *ForkChoice) getCurrentEpoch() uint64 {
-	// Find the highest epoch in our data
 	maxEpoch := uint64(0)
 	for epoch := range fc.epochAttestations {
 		if epoch > maxEpoch {
@@ -254,7 +258,6 @@ func (fc *ForkChoice) getCurrentEpoch() uint64 {
 }
 
 // GetHead returns the current head block according to fork choice
-// Prioritizes blocks with 2/3 quorum, then uses stake-weighted scores
 func (fc *ForkChoice) GetHead() string {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
@@ -263,32 +266,42 @@ func (fc *ForkChoice) GetHead() string {
 		return ""
 	}
 
-	totalStake := fc.getTotalActiveStake()
-	quorumThreshold := (totalStake*2)/3 + 1
+	totalStakeStr := fc.getTotalActiveStake()
+	totalStakeBig := coremath.ParseBigInt(totalStakeStr)
+
+	// Threshold = (Total * 2) / 3 + 1
+	two := big.NewInt(2)
+	three := big.NewInt(3)
+	quorumThreshold := new(big.Int).Mul(totalStakeBig, two)
+	quorumThreshold.Div(quorumThreshold, three)
+	quorumThreshold.Add(quorumThreshold, big.NewInt(1))
+
+	var bestBlockWithQuorum string
+	var bestScoreWithQuorum *big.Int
 
 	// First pass: find blocks with quorum
-	var bestBlockWithQuorum string
-	var bestScoreWithQuorum int64
-
-	for blockHash, score := range fc.blockScores {
-		if score >= quorumThreshold && score > bestScoreWithQuorum {
-			bestScoreWithQuorum = score
-			bestBlockWithQuorum = blockHash
+	for blockHash, scoreStr := range fc.blockScores {
+		scoreBig := coremath.ParseBigInt(scoreStr)
+		if scoreBig.Cmp(quorumThreshold) >= 0 {
+			if bestScoreWithQuorum == nil || scoreBig.Cmp(bestScoreWithQuorum) > 0 {
+				bestScoreWithQuorum = scoreBig
+				bestBlockWithQuorum = blockHash
+			}
 		}
 	}
 
-	// If we have a block with quorum, return it
 	if bestBlockWithQuorum != "" {
 		return bestBlockWithQuorum
 	}
 
-	// Fallback: no blocks have quorum yet, return highest stake
+	// Fallback: highest stake
 	var bestBlock string
-	var bestScore int64
+	var bestScore *big.Int
 
-	for blockHash, score := range fc.blockScores {
-		if score > bestScore {
-			bestScore = score
+	for blockHash, scoreStr := range fc.blockScores {
+		scoreBig := coremath.ParseBigInt(scoreStr)
+		if bestScore == nil || scoreBig.Cmp(bestScore) > 0 {
+			bestScore = scoreBig
 			bestBlock = blockHash
 		}
 	}
@@ -301,19 +314,30 @@ func (fc *ForkChoice) HasQuorum(blockHash string) bool {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 
-	totalStake := fc.getTotalActiveStake()
-	attestingStake := fc.blockScores[blockHash]
-	quorumThreshold := (totalStake*2)/3 + 1
+	totalStakeStr := fc.getTotalActiveStake()
+	totalStakeBig := coremath.ParseBigInt(totalStakeStr)
 
-	return attestingStake >= quorumThreshold
+	attestingStakeStr := fc.blockScores[blockHash]
+	attestingStakeBig := coremath.ParseBigInt(attestingStakeStr)
+
+	two := big.NewInt(2)
+	three := big.NewInt(3)
+	threshold := new(big.Int).Mul(totalStakeBig, two)
+	threshold.Div(threshold, three)
+	threshold.Add(threshold, big.NewInt(1))
+
+	return attestingStakeBig.Cmp(threshold) >= 0
 }
 
-// GetAttestingStake returns the total stake attesting to a block
-func (fc *ForkChoice) GetAttestingStake(blockHash string) int64 {
+// GetAttestingStake returns the total stake attesting to a block (as string)
+func (fc *ForkChoice) GetAttestingStake(blockHash string) string {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
-
-	return fc.blockScores[blockHash]
+	s, exists := fc.blockScores[blockHash]
+	if !exists {
+		return "0"
+	}
+	return s
 }
 
 // GetQuorumPercentage returns the percentage of stake attesting to a block
@@ -321,26 +345,29 @@ func (fc *ForkChoice) GetQuorumPercentage(blockHash string) float64 {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 
-	totalStake := fc.getTotalActiveStake()
-	if totalStake == 0 {
-		return 0
-	}
+	totalStakeStr := fc.getTotalActiveStake()
+	totalStakeBig := coremath.ParseBigInt(totalStakeStr)
 
-	attestingStake := fc.blockScores[blockHash]
-	return float64(attestingStake) / float64(totalStake) * 100
+	attestingStakeStr := fc.blockScores[blockHash]
+	attestingStakeBig := coremath.ParseBigInt(attestingStakeStr)
+
+	return calculatePercentage(attestingStakeBig, totalStakeBig)
 }
 
-// IsBlockSafeToAccept checks if a block has sufficient attestations to be safely accepted
+// IsBlockSafeToAccept checks if a block has sufficient attestations
 func (fc *ForkChoice) IsBlockSafeToAccept(blockHash string) bool {
 	return fc.HasQuorum(blockHash)
 }
 
-// GetBlockScore returns the score for a block
-func (fc *ForkChoice) GetBlockScore(blockHash string) int64 {
+// GetBlockScore returns the score for a block (as string)
+func (fc *ForkChoice) GetBlockScore(blockHash string) string {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
-
-	return fc.blockScores[blockHash]
+	s, exists := fc.blockScores[blockHash]
+	if !exists {
+		return "0"
+	}
+	return s
 }
 
 // GetAttestationsForBlock returns attestations for a specific block
@@ -350,12 +377,8 @@ func (fc *ForkChoice) GetAttestationsForBlock(blockHash string) []*types.Attesta
 
 	attestations := fc.attestationsByBlock[blockHash]
 	if attestations == nil {
-		// FIX: Return nil or an empty slice of pointers
 		return nil
-		// OR: return []*types.Attestation{}
 	}
-
-	// Return copy
 	result := make([]*types.Attestation, len(attestations))
 	copy(result, attestations)
 	return result
@@ -366,88 +389,60 @@ func (fc *ForkChoice) GetMetrics() *ForkChoiceMetrics {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 
-	// Return a copy to avoid race conditions
 	metrics := *fc.metrics
-
-	// Update real-time counts
 	metrics.TotalBlocks = int64(len(fc.blockScores))
 	metrics.TotalEpochs = int64(len(fc.epochAttestations))
-
 	attestationCount := int64(0)
 	for _, attestations := range fc.attestationsByBlock {
 		attestationCount += int64(len(attestations))
 	}
 	metrics.TotalAttestations = attestationCount
-
 	return &metrics
 }
 
-// consensus/pos/fork_choice.go
-
-// ADD THESE METHODS TO THE ForkChoice STRUCT
-
 // IsViableChain checks if a block is a valid candidate for the head of the chain.
-// It enforces the Finality Rule: A block MUST descend from the finalized checkpoint.
 func (fc *ForkChoice) IsViableChain(blockHash string) bool {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 
-	// 1. If no checkpoint is finalized yet, all chains are technically viable
 	if fc.finalizedCheckpoint == nil {
 		return true
 	}
-
-	// 2. The new block's epoch cannot be older than the finalized epoch
-	// We use the block epoch map cache for quick lookup
 	blockEpoch, exists := fc.blockEpochMap[blockHash]
 	if !exists {
-		// If we don't know the block, we can't switch to it safely
 		return false
 	}
-
 	if blockEpoch < fc.finalizedCheckpoint.Epoch {
 		return false
 	}
-
-	// 3. CRITICAL: The block must trace back to the finalized block hash.
 	return fc.isDescendant(blockHash, fc.finalizedCheckpoint.BlockHash)
 }
 
-// isDescendant checks if childHash is a descendant of ancestorHash
-// It traverses backwards through the WorldStateReader
 func (fc *ForkChoice) isDescendant(childHash, ancestorHash string) bool {
 	if childHash == ancestorHash {
 		return true
 	}
-
 	currentHash := childHash
-	maxDepth := 1000 // Safety cap to prevent infinite loops
-
+	maxDepth := 1000
 	for i := 0; i < maxDepth; i++ {
-		// Use the interface we updated in Step 1
 		block, err := fc.worldState.GetBlockByHash(currentHash)
 		if err != nil || block == nil {
-			// Block not found in chain or DB error - assume not a descendant
 			return false
 		}
-
-		// Check parent
 		if block.Header.PrevHash == ancestorHash {
 			return true
 		}
-
-		// Stop if we reach genesis
 		if block.Header.PrevHash == "" {
 			return false
 		}
-
-		// Move backwards
 		currentHash = block.Header.PrevHash
 	}
-
 	return false
 }
 
-// IsBlockFinalized checks if a specific block is finalized
-// Note: GetJustifiedCheckpoint, GetFinalizedCheckpoint, and IsBlockFinalized
-// are implemented in finality.go
+// Helper: Add two numeric strings
+func addBigIntStrings(a, b string) string {
+	biA := coremath.ParseBigInt(a)
+	biB := coremath.ParseBigInt(b)
+	return new(big.Int).Add(biA, biB).String()
+}

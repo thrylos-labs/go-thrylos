@@ -5,16 +5,28 @@ package pos
 
 import (
 	"fmt"
+	"math/big"
 	"time"
+
+	coremath "github.com/thrylos-labs/go-thrylos/core/math" // Safe BigInt math
 )
 
 // checkJustification checks if a block should become justified based on attestations
 // A block becomes justified when it receives 2/3+ of total stake in attestations
-func (fc *ForkChoice) checkJustification(epoch uint64, blockHash string, attestingStake, totalStake int64) {
-	quorumThreshold := (totalStake*2)/3 + 1
+func (fc *ForkChoice) checkJustification(epoch uint64, blockHash string, attestingStake, totalStake string) {
+	// Parse BigInts
+	attestingBig := coremath.ParseBigInt(attestingStake)
+	totalBig := coremath.ParseBigInt(totalStake)
+
+	// Calculate Quorum Threshold: (Total * 2) / 3 + 1
+	two := big.NewInt(2)
+	three := big.NewInt(3)
+	quorumThreshold := new(big.Int).Mul(totalBig, two)
+	quorumThreshold.Div(quorumThreshold, three)
+	quorumThreshold.Add(quorumThreshold, big.NewInt(1))
 
 	// Must have at least 2/3 stake attesting
-	if attestingStake < quorumThreshold {
+	if attestingBig.Cmp(quorumThreshold) < 0 {
 		return
 	}
 
@@ -38,9 +50,11 @@ func (fc *ForkChoice) checkJustification(epoch uint64, blockHash string, attesti
 		blockHashShort = blockHashShort[:8]
 	}
 
-	fmt.Printf("🎯 Block %s JUSTIFIED at epoch %d with %d/%d stake (%.1f%%)\n",
-		blockHashShort, epoch, attestingStake, totalStake,
-		float64(attestingStake)/float64(totalStake)*100)
+	// Calculate percentage for logging
+	percentage := calculatePercentage(attestingBig, totalBig)
+
+	fmt.Printf("🎯 Block %s JUSTIFIED at epoch %d with %s/%s stake (%.1f%%)\n",
+		blockHashShort, epoch, attestingStake, totalStake, percentage)
 
 	// Check for finalization
 	fc.checkFinalization()
@@ -77,24 +91,26 @@ func (fc *ForkChoice) checkFinalization() {
 	if attestations, exists := fc.epochAttestations[epochToFinalize]; exists && len(attestations) > 0 {
 		// Find the block with the most stake in that epoch
 		var bestBlock string
-		var bestStake int64
+		var bestStakeBig *big.Int
 
-		for blockHash, stake := range attestations {
-			if stake > bestStake {
-				bestStake = stake
+		for blockHash, stakeStr := range attestations {
+			stakeBig := coremath.ParseBigInt(stakeStr)
+			if bestStakeBig == nil || stakeBig.Cmp(bestStakeBig) > 0 {
+				bestStakeBig = stakeBig
 				bestBlock = blockHash
 			}
 		}
 
 		if bestBlock != "" {
-			totalStake := fc.getTotalActiveStake()
+			totalStakeStr := fc.getTotalActiveStake()
+			totalStakeBig := coremath.ParseBigInt(totalStakeStr)
 
 			fc.finalizedCheckpoint = &Checkpoint{
 				Epoch:          epochToFinalize,
 				BlockHash:      bestBlock,
 				Timestamp:      time.Now().Unix(),
-				AttestingStake: bestStake,
-				TotalStake:     totalStake,
+				AttestingStake: bestStakeBig.String(),
+				TotalStake:     totalStakeStr,
 			}
 
 			// Safe truncation for logging
@@ -103,12 +119,14 @@ func (fc *ForkChoice) checkFinalization() {
 				finalizedHashShort = finalizedHashShort[:8]
 			}
 
-			fmt.Printf("🔒 Block %s FINALIZED at epoch %d with %d/%d stake (%.1f%%)\n",
+			percentage := calculatePercentage(bestStakeBig, totalStakeBig)
+
+			fmt.Printf("🔒 Block %s FINALIZED at epoch %d with %s/%s stake (%.1f%%)\n",
 				finalizedHashShort,
 				epochToFinalize,
-				bestStake,
-				totalStake,
-				float64(bestStake)/float64(totalStake)*100)
+				bestStakeBig.String(),
+				totalStakeStr,
+				percentage)
 		}
 	}
 }
@@ -135,9 +153,12 @@ func (fc *ForkChoice) UpdateJustifiedCheckpoint(epoch uint64, blockHash string) 
 		blockHashShort = blockHashShort[:8]
 	}
 
-	fmt.Printf("🎯 Justified checkpoint updated: epoch %d, block %s, stake %d/%d (%.1f%%)\n",
-		epoch, blockHashShort, attestingStake, totalStake,
-		float64(attestingStake)/float64(totalStake)*100)
+	attestingBig := coremath.ParseBigInt(attestingStake)
+	totalBig := coremath.ParseBigInt(totalStake)
+	percentage := calculatePercentage(attestingBig, totalBig)
+
+	fmt.Printf("🎯 Justified checkpoint updated: epoch %d, block %s, stake %s/%s (%.1f%%)\n",
+		epoch, blockHashShort, attestingStake, totalStake, percentage)
 }
 
 // UpdateFinalizedCheckpoint updates the finalized checkpoint
@@ -162,9 +183,12 @@ func (fc *ForkChoice) UpdateFinalizedCheckpoint(epoch uint64, blockHash string) 
 		blockHashShort = blockHashShort[:8]
 	}
 
-	fmt.Printf("🔒 Finalized checkpoint updated: epoch %d, block %s, stake %d/%d (%.1f%%)\n",
-		epoch, blockHashShort, attestingStake, totalStake,
-		float64(attestingStake)/float64(totalStake)*100)
+	attestingBig := coremath.ParseBigInt(attestingStake)
+	totalBig := coremath.ParseBigInt(totalStake)
+	percentage := calculatePercentage(attestingBig, totalBig)
+
+	fmt.Printf("🔒 Finalized checkpoint updated: epoch %d, block %s, stake %s/%s (%.1f%%)\n",
+		epoch, blockHashShort, attestingStake, totalStake, percentage)
 }
 
 // GetJustifiedCheckpoint returns the current justified checkpoint
@@ -231,9 +255,6 @@ func (fc *ForkChoice) GetFinalityStatus() map[string]interface{} {
 	return status
 }
 
-// CleanupOldEpochs removes old epoch data to prevent unbounded memory growth
-// This is critical for long-running nodes with many validators
-// Note: This enhances the existing CleanupOldEpochs from finality.go with more comprehensive cleanup
 // CleanupOldEpochs removes old epoch data to prevent unbounded memory growth
 // This is critical for long-running nodes with many validators
 func (fc *ForkChoice) CleanupOldEpochs() {
@@ -341,4 +362,20 @@ func (fc *ForkChoice) CleanupOldEpochs() {
 			fc.metrics.TotalEpochs,
 			fc.metrics.MemoryEstimateBytes/(1024*1024))
 	}
+}
+
+// --------------------------------------------------------------------------
+// Helper: calculatePercentage (Internal)
+// --------------------------------------------------------------------------
+
+func calculatePercentage(numerator, denominator *big.Int) float64 {
+	if denominator == nil || denominator.Sign() == 0 {
+		return 0.0
+	}
+	numF := new(big.Float).SetInt(numerator)
+	denF := new(big.Float).SetInt(denominator)
+	res := new(big.Float).Quo(numF, denF)
+	res.Mul(res, big.NewFloat(100))
+	f, _ := res.Float64()
+	return f
 }

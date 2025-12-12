@@ -33,7 +33,8 @@ func TestConsensusSignatureSecurity(t *testing.T) {
 			ChainID: "thrylos-mainnet-v1", // Original Chain
 		},
 		Staking: config.StakingConfig{
-			MinValidatorStake: 0,
+			// ✅ FIX: Use string for BigInt field
+			MinValidatorStake: "0",
 		},
 	}
 
@@ -54,7 +55,8 @@ func TestConsensusSignatureSecurity(t *testing.T) {
 		Address: addrStr,
 		Pubkey:  pubKey.Bytes(),
 		Active:  true,
-		Stake:   1000,
+		// ✅ FIX: Use string for BigInt field
+		Stake: "1000",
 	}
 	err = ws.AddValidator(val)
 	require.NoError(t, err)

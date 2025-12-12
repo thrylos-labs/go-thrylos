@@ -39,7 +39,8 @@ type Pool struct {
 	shardID     account.ShardID
 	totalShards int
 	maxTxs      int
-	minGasPrice int64
+	minGasPrice *big.Int
+	maxCount    int
 
 	// Statistics
 	totalAdded   int64
@@ -51,27 +52,35 @@ type Pool struct {
 
 // PoolStats represents statistics about the transaction pool
 type PoolStats struct {
-	PendingCount int   `json:"pending_count"`
-	AddressCount int   `json:"address_count"`
-	TotalAdded   int64 `json:"total_added"`
-	TotalRemoved int64 `json:"total_removed"`
-	ShardID      int   `json:"shard_id"`
-	MaxCapacity  int   `json:"max_capacity"`
-	MinGasPrice  int64 `json:"min_gas_price"`
+	PendingCount int    `json:"pending_count"`
+	AddressCount int    `json:"address_count"`
+	TotalAdded   int64  `json:"total_added"`
+	TotalRemoved int64  `json:"total_removed"`
+	ShardID      int    `json:"shard_id"`
+	MaxCapacity  int    `json:"max_capacity"`
+	MinGasPrice  string `json:"min_gas_price"`
 }
 
 // NewPool creates a new transaction pool for a shard
-func NewPool(shardID account.ShardID, totalShards int, maxTxs int, minGasPrice int64, am *account.AccountManager) *Pool {
+func NewPool(
+	shardID account.ShardID,
+	totalShards int,
+	maxCount int,
+	minGasPrice string,
+	accountManager *account.AccountManager,
+) *Pool {
+
+	minGasPriceBig := math.ParseBigInt(minGasPrice)
 	return &Pool{
 		pending:           make(map[string]*TransactionEntry),
 		byAddress:         make(map[string]map[uint64]*core.Transaction),
 		byHash:            make(map[string]*core.Transaction),
 		nonceReservations: make(map[string]map[uint64]bool),
-		accountManager:    am,
+		accountManager:    accountManager,
 		shardID:           shardID,
 		totalShards:       totalShards,
-		maxTxs:            maxTxs,
-		minGasPrice:       minGasPrice,
+		maxTxs:            maxCount,
+		minGasPrice:       minGasPriceBig,
 	}
 }
 
@@ -541,14 +550,23 @@ func (p *Pool) GetStats() *PoolStats {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
+	minGasStr := "0"
+	if p.minGasPrice != nil {
+		minGasStr = p.minGasPrice.String()
+	}
+
 	return &PoolStats{
 		PendingCount: len(p.pending),
 		AddressCount: len(p.byAddress),
 		TotalAdded:   p.totalAdded,
 		TotalRemoved: p.totalRemoved,
 		ShardID:      int(p.shardID),
-		MaxCapacity:  p.maxTxs,
-		MinGasPrice:  p.minGasPrice,
+
+		// ✅ Match the field name in the struct
+		MaxCapacity: p.maxCount,
+
+		// ✅ Convert BigInt to string
+		MinGasPrice: minGasStr,
 	}
 }
 
@@ -615,14 +633,14 @@ func (p *Pool) validateTransactionForPool(tx *core.Transaction) error {
 		return fmt.Errorf("gas must be positive")
 	}
 
-	// 3. Validate Gas Price (String vs int64)
+	// 3. Validate Gas Price (String vs String)
 	gasPriceBig := math.ParseBigInt(tx.GasPrice)
 
-	// Convert pool's minGasPrice (int64) to BigInt for comparison
-	minGasPriceBig := big.NewInt(p.minGasPrice)
-
-	if gasPriceBig.Cmp(minGasPriceBig) < 0 {
-		return fmt.Errorf("gas price %s below minimum %d", tx.GasPrice, p.minGasPrice)
+	// ✅ FIX: Compare directly against p.minGasPrice (which is already *big.Int)
+	// No need for big.NewInt()
+	if gasPriceBig.Cmp(p.minGasPrice) < 0 {
+		// ✅ FIX: Use %s and .String() for the error message
+		return fmt.Errorf("gas price %s below minimum %s", tx.GasPrice, p.minGasPrice.String())
 	}
 
 	if len(tx.Signature) == 0 {
@@ -733,24 +751,20 @@ func (p *Pool) GetPoolCapacity() (current int, max int, available int) {
 	return current, max, available
 }
 
-// UpdateGasPrice updates the minimum gas price for the pool
 // UpdateGasPrice updates the minimum gas price and evicts transactions below it
-func (p *Pool) UpdateGasPrice(newMinGasPrice int64) int {
+func (p *Pool) UpdateGasPrice(newMinGasPrice string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.minGasPrice = newMinGasPrice
-
-	// Convert the new minimum to BigInt for comparison
-	minGasPriceBig := big.NewInt(newMinGasPrice)
+	// Parse and update
+	p.minGasPrice = math.ParseBigInt(newMinGasPrice)
 
 	var toRemove []*core.Transaction
 	for _, entry := range p.pending {
-		// Parse the transaction's gas price string to BigInt
-		txGasPriceBig := math.ParseBigInt(entry.Transaction.GasPrice)
+		txPrice := math.ParseBigInt(entry.Transaction.GasPrice)
 
-		// Compare: if txGasPrice < minGasPrice
-		if txGasPriceBig.Cmp(minGasPriceBig) < 0 {
+		// Compare: if txPrice < newMinGasPrice
+		if txPrice.Cmp(p.minGasPrice) < 0 {
 			toRemove = append(toRemove, entry.Transaction)
 		}
 	}

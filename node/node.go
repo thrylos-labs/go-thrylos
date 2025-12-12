@@ -1146,11 +1146,13 @@ func (n *Node) GetBlockByIndex(index int64) (*core.Block, error) {
 	return n.blockchain.GetBlockByIndex(index)
 }
 
-func (n *Node) GetDelegations(address string) (map[string]int64, error) {
+// GetDelegations returns delegations for a specific address
+func (n *Node) GetDelegations(address string) (map[string]string, error) {
 	stakingManager := n.blockchain.GetStakingManager()
 	if stakingManager == nil {
 		return nil, fmt.Errorf("staking manager not available")
 	}
+	// Now types match directly
 	return stakingManager.GetDelegations(address)
 }
 
