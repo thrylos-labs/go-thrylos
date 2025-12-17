@@ -52,30 +52,6 @@ var (
 	TransactionPoolTTL = 24 * time.Hour // Max time a tx stays in the pool before expiry
 )
 
-func init() {
-	// 1. Initialize nil BigInts to prevent panics
-	BlockReward = new(big.Int)
-	ValidatorReward = new(big.Int)
-	DelegatorReward = new(big.Int)
-
-	// 2. Calculate Block Reward based on Inflation (Targeting ~4%)
-	// Formula: (TotalSupply * 0.04) / BlocksPerYear
-	// BlocksPerYear = 365 * 24 * 60 * 60 / 3 (assuming 3s block time) = 10,512,000
-
-	blocksPerYear := big.NewInt(10_512_000)
-
-	// Annual Provision = TotalSupply * 4 / 100
-	annualProvision := new(big.Int).Mul(TotalSupply, big.NewInt(4))
-	annualProvision.Div(annualProvision, big.NewInt(100))
-
-	// Block Reward = Annual / BlocksPerYear
-	BlockReward.Div(annualProvision, blocksPerYear)
-
-	// 3. Calculate Split (e.g., Validator gets 100% of block reward for now)
-	ValidatorReward.Set(BlockReward)
-	DelegatorReward.Set(big.NewInt(0))
-}
-
 func GetChainIDForEnvironment(env string) string {
 	switch env {
 	case "mainnet", "production":
@@ -385,7 +361,7 @@ func Load() (*Config, error) {
 		API: APIConfig{
 			EnableAPI:      true,
 			RESTAddr:       ":8080",
-			EnableTLS:      true,
+			EnableTLS:      false,
 			CertFile:       "",
 			KeyFile:        "",
 			EnableCORS:     true,
@@ -807,7 +783,7 @@ OPTIMIZED DISTRIBUTION (No Advisors):
 - Development: %.0f THRYLOS (10%%) - Core team (4-year vesting)
 
 STAKING REQUIREMENTS (More Accessible):
-- Validator Stake: %.0f THRYLOS (2500 THRYLOS)
+- Validator Stake: %.0f THRYLOS (25 THRYLOS) - REDUCED from 34
 - Minimum Delegation: %.3f THRYLOS
 - Minimum Stake: %.0f THRYLOS
 - Max Validators: %d (total capacity: %.0f THRYLOS)
