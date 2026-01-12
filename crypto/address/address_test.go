@@ -1,23 +1,28 @@
 package address
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"strings"
 	"testing"
 
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
 )
 
-func TestNew(t *testing.T) {
-	// Generate Ed25519 key pair (for legacy address helper tests)
-	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("Failed to generate keys: %v", err)
-	}
+// Helper function to generate a secp256k1 key pair and address
+func generateTestAddress(t *testing.T) (*Address, *ecdsa.PrivateKey) {
+	privateKey, err := ethcrypto.GenerateKey()
+	require.NoError(t, err, "Failed to generate secp256k1 key")
 
-	address, err := New(pubKey)
-	require.NoError(t, err)
+	publicKey := privateKey.Public().(*ecdsa.PublicKey)
+	ethAddr := ethcrypto.PubkeyToAddress(*publicKey)
+
+	address := FromEthereumAddress(ethAddr)
+	return address, privateKey
+}
+
+func TestFromEthereumAddress(t *testing.T) {
+	address, _ := generateTestAddress(t)
 	require.NotNil(t, address)
 
 	// Test that the address has the correct 0x format
@@ -26,43 +31,25 @@ func TestNew(t *testing.T) {
 	require.Equal(t, 42, len(addrStr), "Address should be 42 characters long (0x + 40 hex)")
 
 	// Test that it's valid hex
-	require.NoError(t, Validate(addrStr), "First address should be valid")
+	require.NoError(t, Validate(addrStr), "Address should be valid")
 
 	// Test deterministic generation - same key should produce same address
-	address2, err := New(pubKey)
+	privateKey, err := ethcrypto.GenerateKey()
 	require.NoError(t, err)
 
-	addrStr2 := address2.String()
+	publicKey := privateKey.Public().(*ecdsa.PublicKey)
+	ethAddr1 := ethcrypto.PubkeyToAddress(*publicKey)
+	ethAddr2 := ethcrypto.PubkeyToAddress(*publicKey)
 
-	// Validate the second address separately
-	require.NoError(t, Validate(addrStr2), "Second address should be valid")
+	address1 := FromEthereumAddress(ethAddr1)
+	address2 := FromEthereumAddress(ethAddr2)
 
-	// Then compare them
-	require.Equal(t, addrStr, addrStr2, "Same key should produce same address")
-}
-
-func TestNewWithNilKey(t *testing.T) {
-	// Test nil public key
-	_, err := New(nil)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "cannot be nil")
-
-	// Test empty public key
-	_, err = New(ed25519.PublicKey{})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "cannot be nil or empty")
-
-	// Test wrong size public key
-	wrongSize := make(ed25519.PublicKey, 16) // Should be 32 bytes
-	_, err = New(wrongSize)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid Ed25519 public key size")
+	require.Equal(t, address1.String(), address2.String(), "Same key should produce same address")
 }
 
 func TestValidate(t *testing.T) {
 	// Generate a valid address for testing
-	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
-	validAddr, _ := New(pubKey)
+	validAddr, _ := generateTestAddress(t)
 	validAddrStr := validAddr.String()
 
 	tests := []struct {
@@ -138,8 +125,7 @@ func TestValidate(t *testing.T) {
 
 func TestFromString(t *testing.T) {
 	// Generate a valid address for testing
-	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
-	validAddr, _ := New(pubKey)
+	validAddr, _ := generateTestAddress(t)
 	validAddress := validAddr.String()
 
 	address, err := FromString(validAddress)
@@ -184,7 +170,7 @@ func TestFromBytes(t *testing.T) {
 	_, err = FromBytes([]byte{0x01, 0x02})
 	require.Error(t, err)
 
-	_, err = FromBytes(make([]byte, 8)) // Old tl1 length
+	_, err = FromBytes(make([]byte, 8)) // Wrong length
 	require.Error(t, err)
 
 	_, err = FromBytes(make([]byte, 12)) // Wrong length
@@ -193,8 +179,7 @@ func TestFromBytes(t *testing.T) {
 
 func TestAddressMethods(t *testing.T) {
 	// Generate a test address
-	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
-	address, _ := New(pubKey)
+	address, _ := generateTestAddress(t)
 	addr := address.String()
 
 	// Test String()
@@ -221,8 +206,7 @@ func TestAddressMethods(t *testing.T) {
 	require.True(t, address.Equal(address2))
 
 	// Create different address
-	pubKey2, _, _ := ed25519.GenerateKey(rand.Reader)
-	differentAddr, _ := New(pubKey2)
+	differentAddr, _ := generateTestAddress(t)
 	require.False(t, address.Equal(differentAddr))
 
 	// Test ToLower() and ToUpper()
@@ -233,8 +217,7 @@ func TestAddressMethods(t *testing.T) {
 }
 
 func TestAddressCopy(t *testing.T) {
-	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
-	original, _ := New(pubKey)
+	original, _ := generateTestAddress(t)
 	copied := original.Copy()
 
 	require.True(t, original.Equal(copied))
@@ -246,8 +229,7 @@ func TestAddressCopy(t *testing.T) {
 }
 
 func TestAddressJSON(t *testing.T) {
-	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
-	address, _ := New(pubKey)
+	address, _ := generateTestAddress(t)
 	addr := address.String()
 
 	// Test MarshalJSON
@@ -263,8 +245,7 @@ func TestAddressJSON(t *testing.T) {
 }
 
 func TestAddressCBOR(t *testing.T) {
-	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
-	address, _ := New(pubKey)
+	address, _ := generateTestAddress(t)
 
 	// Test Marshal
 	data, err := address.Marshal()
@@ -279,14 +260,8 @@ func TestAddressCBOR(t *testing.T) {
 }
 
 func TestUtilityFunctions(t *testing.T) {
-	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	// Test GenerateAddress
-	addrStr, err := GenerateAddress(pubKey)
-	require.NoError(t, err)
-	require.True(t, strings.HasPrefix(addrStr, "0x"))
-	require.Equal(t, 42, len(addrStr))
+	address, _ := generateTestAddress(t)
+	addrStr := address.String()
 
 	// Test ParseAddress
 	parsed, err := ParseAddress(addrStr)
@@ -310,18 +285,6 @@ func TestNullAddress(t *testing.T) {
 	require.Equal(t, "0x0000000000000000000000000000000000000000", nullStr)
 }
 
-func TestConvertToAddress(t *testing.T) {
-	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	// Test ConvertToAddress
-	addrStr, err := ConvertToAddress(pubKey)
-	require.NoError(t, err)
-	require.True(t, strings.HasPrefix(addrStr, "0x"))
-	require.NoError(t, Validate(addrStr))
-	require.Equal(t, 42, len(addrStr))
-}
-
 func TestAddressMetrics(t *testing.T) {
 	metrics := AddressMetrics()
 
@@ -331,20 +294,16 @@ func TestAddressMetrics(t *testing.T) {
 	require.Equal(t, 42, metrics["estimated_str_length"])
 	require.Equal(t, "2^160", metrics["collision_resistance"])
 	require.Equal(t, false, metrics["case_sensitive"])
-	require.Equal(t, "Ed25519 (Ethereum-compatible)", metrics["crypto_scheme"])
-	require.Equal(t, "Full Ethereum/Metamask compatibility", metrics["compatibility"])
+	require.Equal(t, "secp256k1 (Ethereum standard)", metrics["crypto_scheme"])
+	require.Equal(t, "Full Ethereum/MetaMask compatibility", metrics["compatibility"])
 }
 
 func TestAddressLengthConsistency(t *testing.T) {
 	// Generate multiple addresses and verify consistent length
 	for i := 0; i < 10; i++ {
-		pubKey, _, err := ed25519.GenerateKey(rand.Reader)
-		require.NoError(t, err)
-
-		address, err := New(pubKey)
-		require.NoError(t, err)
-
+		address, _ := generateTestAddress(t)
 		addrStr := address.String()
+
 		require.Equal(t, 42, len(addrStr), "Address length should be consistent")
 		require.True(t, strings.HasPrefix(addrStr, "0x"))
 		require.NoError(t, Validate(addrStr))
@@ -352,8 +311,7 @@ func TestAddressLengthConsistency(t *testing.T) {
 }
 
 func TestHexCaseInsensitivity(t *testing.T) {
-	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
-	address, _ := New(pubKey)
+	address, _ := generateTestAddress(t)
 	original := address.String()
 
 	// Test that different cases are treated as equivalent
@@ -371,25 +329,20 @@ func TestHexCaseInsensitivity(t *testing.T) {
 }
 
 func TestAddressDeterminism(t *testing.T) {
-	// Test that the same public key always produces the same address
-	// Create a fixed public key for deterministic testing
-	fixedSeed := make([]byte, ed25519.SeedSize)
-	for i := range fixedSeed {
-		fixedSeed[i] = byte(i)
-	}
-
-	privKey := ed25519.NewKeyFromSeed(fixedSeed)
-	pubKey := privKey.Public().(ed25519.PublicKey)
-
-	// Generate address multiple times
-	addr1, err := New(pubKey)
+	// Test that the same private key always produces the same address
+	privateKey, err := ethcrypto.GenerateKey()
 	require.NoError(t, err)
 
-	addr2, err := New(pubKey)
-	require.NoError(t, err)
+	publicKey := privateKey.Public().(*ecdsa.PublicKey)
 
-	addr3, err := New(pubKey)
-	require.NoError(t, err)
+	// Generate address multiple times from same public key
+	ethAddr1 := ethcrypto.PubkeyToAddress(*publicKey)
+	ethAddr2 := ethcrypto.PubkeyToAddress(*publicKey)
+	ethAddr3 := ethcrypto.PubkeyToAddress(*publicKey)
+
+	addr1 := FromEthereumAddress(ethAddr1)
+	addr2 := FromEthereumAddress(ethAddr2)
+	addr3 := FromEthereumAddress(ethAddr3)
 
 	// All should be identical
 	require.Equal(t, addr1.String(), addr2.String())
@@ -400,17 +353,8 @@ func TestAddressDeterminism(t *testing.T) {
 
 func TestAddressWithDifferentKeys(t *testing.T) {
 	// Test that different keys produce different addresses
-	pubKey1, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	pubKey2, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	addr1, err := New(pubKey1)
-	require.NoError(t, err)
-
-	addr2, err := New(pubKey2)
-	require.NoError(t, err)
+	addr1, _ := generateTestAddress(t)
+	addr2, _ := generateTestAddress(t)
 
 	// Should be different (extremely unlikely to be the same)
 	require.NotEqual(t, addr1.String(), addr2.String())
@@ -419,12 +363,7 @@ func TestAddressWithDifferentKeys(t *testing.T) {
 
 func TestAddressRoundTrip(t *testing.T) {
 	// Test full round trip: key -> address -> string -> address -> bytes
-	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	// Key to address
-	originalAddr, err := New(pubKey)
-	require.NoError(t, err)
+	originalAddr, _ := generateTestAddress(t)
 
 	// Address to string
 	addrStr := originalAddr.String()
@@ -451,8 +390,7 @@ func TestAddressRoundTrip(t *testing.T) {
 }
 
 func TestEthereumAddressConversion(t *testing.T) {
-	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
-	address, _ := New(pubKey)
+	address, _ := generateTestAddress(t)
 
 	// Test conversion to go-ethereum Address
 	ethAddr := address.ToEthereumAddress()
@@ -464,8 +402,7 @@ func TestEthereumAddressConversion(t *testing.T) {
 }
 
 func TestChecksumAddress(t *testing.T) {
-	pubKey, _, _ := ed25519.GenerateKey(rand.Reader)
-	address, _ := New(pubKey)
+	address, _ := generateTestAddress(t)
 
 	// Test checksum address (EIP-55)
 	checksumAddr := address.ToChecksumAddress()
@@ -479,4 +416,197 @@ func TestChecksumAddress(t *testing.T) {
 	checksumAddr2, err := ChecksumAddress(address.String())
 	require.NoError(t, err)
 	require.Equal(t, checksumAddr, checksumAddr2)
+}
+
+func TestAddressSet(t *testing.T) {
+	address, _ := generateTestAddress(t)
+
+	// Test Set method
+	newBytes := []byte{
+		0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+		0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
+		0x11, 0x22, 0x33, 0x44,
+	}
+
+	err := address.Set(newBytes)
+	require.NoError(t, err)
+	require.Equal(t, newBytes, address.Bytes())
+
+	// Test Set with invalid length
+	err = address.Set([]byte{0x01, 0x02})
+	require.Error(t, err)
+}
+
+func TestAddressSetFromString(t *testing.T) {
+	address, _ := generateTestAddress(t)
+	newAddress, _ := generateTestAddress(t)
+
+	newAddrStr := newAddress.String()
+	err := address.SetFromString(newAddrStr)
+	require.NoError(t, err)
+	require.Equal(t, newAddrStr, address.String())
+
+	// Test with invalid string
+	err = address.SetFromString("invalid")
+	require.Error(t, err)
+}
+
+func TestAddressHash(t *testing.T) {
+	address, _ := generateTestAddress(t)
+
+	hash := address.Hash()
+	require.NotNil(t, hash)
+	require.Equal(t, 32, len(hash)) // Keccak256 produces 32-byte hash
+
+	// Test nil address
+	var nilAddr *Address
+	require.Nil(t, nilAddr.Hash())
+}
+
+func TestAddressNormalize(t *testing.T) {
+	address, _ := generateTestAddress(t)
+
+	normalized := address.Normalize()
+	require.True(t, strings.HasPrefix(normalized, "0x"))
+	require.Equal(t, normalized, strings.ToLower(normalized))
+}
+
+func TestNormalizeAddress(t *testing.T) {
+	address, _ := generateTestAddress(t)
+	addrStr := address.String()
+
+	// Test with uppercase
+	upperAddr := strings.ToUpper(addrStr)
+	normalized, err := NormalizeAddress(upperAddr)
+	require.NoError(t, err)
+	require.Equal(t, strings.ToLower(addrStr), normalized)
+
+	// Test with invalid address
+	_, err = NormalizeAddress("invalid")
+	require.Error(t, err)
+}
+
+func TestAddressToBytes(t *testing.T) {
+	address, _ := generateTestAddress(t)
+	addrStr := address.String()
+
+	bytes, err := AddressToBytes(addrStr)
+	require.NoError(t, err)
+	require.Equal(t, address.Bytes(), bytes)
+	require.Equal(t, 20, len(bytes))
+
+	// Test with invalid address
+	_, err = AddressToBytes("invalid")
+	require.Error(t, err)
+}
+
+func TestIsNullAddress(t *testing.T) {
+	nullAddr := NullAddress()
+	require.True(t, IsNullAddress(nullAddr.String()))
+
+	regularAddr, _ := generateTestAddress(t)
+	require.False(t, IsNullAddress(regularAddr.String()))
+
+	// Test with invalid address
+	require.False(t, IsNullAddress("invalid"))
+}
+
+func TestCreateNullAddressString(t *testing.T) {
+	nullStr := CreateNullAddressString()
+	require.Equal(t, "0x0000000000000000000000000000000000000000", nullStr)
+	require.NoError(t, Validate(nullStr))
+}
+
+func TestGetAddressPrefix(t *testing.T) {
+	require.Equal(t, "0x", GetAddressPrefix())
+}
+
+func TestGetAddressByteLength(t *testing.T) {
+	require.Equal(t, 20, GetAddressByteLength())
+}
+
+func TestEstimateAddressLength(t *testing.T) {
+	require.Equal(t, 42, EstimateAddressLength())
+}
+
+func TestAddressCompare(t *testing.T) {
+	addr1, _ := generateTestAddress(t)
+	addr2, _ := generateTestAddress(t)
+
+	// Test Compare with same address
+	require.True(t, addr1.Compare(*addr1))
+
+	// Test Compare with different address
+	require.False(t, addr1.Compare(*addr2))
+
+	// Test with copy
+	addr1Copy := *addr1
+	require.True(t, addr1.Compare(addr1Copy))
+}
+
+func TestSecp256k1Compatibility(t *testing.T) {
+	// Test that addresses generated from secp256k1 keys are valid Ethereum addresses
+	privateKey, err := ethcrypto.GenerateKey()
+	require.NoError(t, err)
+
+	publicKey := privateKey.Public().(*ecdsa.PublicKey)
+	ethAddr := ethcrypto.PubkeyToAddress(*publicKey)
+
+	// Create our Address from the Ethereum address
+	address := FromEthereumAddress(ethAddr)
+
+	// Verify it's a valid Ethereum address format
+	addrStr := address.String()
+	require.True(t, strings.HasPrefix(addrStr, "0x"))
+	require.Equal(t, 42, len(addrStr))
+	require.NoError(t, Validate(addrStr))
+
+	// Verify conversion back to Ethereum address matches
+	convertedEthAddr := address.ToEthereumAddress()
+	require.Equal(t, ethAddr.Hex(), convertedEthAddr.Hex())
+}
+
+func BenchmarkGenerateAddress(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_, _ = generateTestAddress(nil)
+	}
+}
+
+func BenchmarkFromString(b *testing.B) {
+	address, _ := generateTestAddress(nil)
+	addrStr := address.String()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = FromString(addrStr)
+	}
+}
+
+func BenchmarkValidate(b *testing.B) {
+	address, _ := generateTestAddress(nil)
+	addrStr := address.String()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Validate(addrStr)
+	}
+}
+
+func BenchmarkAddressString(b *testing.B) {
+	address, _ := generateTestAddress(nil)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = address.String()
+	}
+}
+
+func BenchmarkAddressEqual(b *testing.B) {
+	addr1, _ := generateTestAddress(nil)
+	addr2, _ := generateTestAddress(nil)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = addr1.Equal(addr2)
+	}
 }

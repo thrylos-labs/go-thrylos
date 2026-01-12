@@ -1,12 +1,16 @@
 // Package address provides Ethereum-compatible addresses for Thrylos
 //
-// Uses standard Ethereum 0x addresses (20 bytes) for full Metamask compatibility.
+// Uses standard Ethereum 0x addresses (20 bytes) for full MetaMask compatibility.
 // This replaces the previous tl1 bech32 format to avoid user confusion.
+//
+// MIGRATION NOTE (January 2026):
+// Previous versions supported Ed25519 address generation via New() function.
+// All new code uses secp256k1 via crypto.PublicKey.Address() for Ethereum compatibility.
+// Legacy Ed25519 functions have been removed.
 package address
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -26,27 +30,6 @@ const (
 
 // Address represents a 20-byte Ethereum-compatible address
 type Address [AddressLength]byte
-
-// New creates an Address from an Ed25519 public key (legacy helper for older address scheme).
-// New code should prefer secp256k1-based crypto.PublicKey.Address().
-func New(pubKey ed25519.PublicKey) (*Address, error) {
-	if pubKey == nil || len(pubKey) == 0 {
-		return nil, fmt.Errorf("public key cannot be nil or empty")
-	}
-
-	if len(pubKey) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("invalid Ed25519 public key size: got %d, want %d", len(pubKey), ed25519.PublicKeySize)
-	}
-
-	// Convert Ed25519 public key to Ethereum address format
-	// Take keccak256 hash and use last 20 bytes (Ethereum standard)
-	hashBytes := crypto.Keccak256(pubKey)
-
-	var address Address
-	copy(address[:], hashBytes[len(hashBytes)-AddressLength:])
-
-	return &address, nil
-}
 
 // NullAddress creates a zeroed Address (0x0000...0000)
 func NullAddress() *Address {
@@ -126,15 +109,6 @@ func Validate(addr string) error {
 // IsValid is a convenience function for address validation
 func IsValid(addr string) bool {
 	return Validate(addr) == nil
-}
-
-// ConvertToAddress creates a 0x address string from Ed25519 public key
-func ConvertToAddress(pubKey ed25519.PublicKey) (string, error) {
-	addr, err := New(pubKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to create address: %v", err)
-	}
-	return addr.String(), nil
 }
 
 // Bytes returns the raw 20-byte address
@@ -308,16 +282,9 @@ func (a *Address) ToChecksumAddress() string {
 	return a.ToEthereumAddress().Hex()
 }
 
-// Utility functions for compatibility
-
-// GenerateAddress generates an address from Ed25519 public key (wrapper function)
-func GenerateAddress(pubKey ed25519.PublicKey) (string, error) {
-	addr, err := New(pubKey)
-	if err != nil {
-		return "", err
-	}
-	return addr.String(), nil
-}
+// ============================================================================
+// Utility Functions
+// ============================================================================
 
 // ParseAddress parses a string address and returns the Address object
 func ParseAddress(addrStr string) (*Address, error) {
@@ -359,8 +326,8 @@ func AddressMetrics() map[string]interface{} {
 		"case_sensitive":       false,
 		"collision_resistance": "2^160", // 20 bytes = 160 bits
 		"example":              "0x742d35cc6634c0532925a3b844bc9e7595f0beef",
-		"crypto_scheme":        "Ed25519 (Ethereum-compatible)",
-		"compatibility":        "Full Ethereum/Metamask compatibility",
+		"crypto_scheme":        "secp256k1 (Ethereum standard)",
+		"compatibility":        "Full Ethereum/MetaMask compatibility",
 	}
 }
 
