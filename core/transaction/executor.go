@@ -115,71 +115,94 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 
 // core/transaction/executor.go
 
-func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, error) {
-	caller := common.HexToAddress(tx.From)
-	contract := common.HexToAddress(tx.To)
+// core/transaction/executor.go
 
-	// 1. 🛡️ SECURITY FIX (H-05): Cross-Chain Replay Protection
-	// We must verify the transaction is intended for THIS chain.
-	// Assuming tx.ChainId exists and matches your config format (string or uint64).
-	// If tx.ChainId is missing from your protobuf, you MUST add it.
+func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, error) {
+	// 1. 🛡️ SECURITY FIX (H-05): Check Chain ID
 	if tx.ChainId != e.config.Network.ChainID {
 		return nil, fmt.Errorf("CRITICAL: Replay protection failed. Tx ChainID '%s' != Node ChainID '%s'", tx.ChainId, e.config.Network.ChainID)
 	}
 
-	// 2. 🛡️ SECURITY FIX (H-02): Fetch Nonce EARLY
-	// We need this now to validate the transaction against the Rust state
+	// 2. 🛡️ SECURITY FIX (H-01): Gas Math & Overflow Protection
+	if tx.Gas < 0 {
+		return nil, fmt.Errorf("invalid gas limit: cannot be negative")
+	}
+	if tx.Gas < 21000 {
+		return nil, fmt.Errorf("intrinsic gas too low: %d < 21000", tx.Gas)
+	}
+	const MaxBlockGas = 30_000_000
+	if tx.Gas > MaxBlockGas {
+		return nil, fmt.Errorf("gas limit exceeds block maximum: %d > %d", tx.Gas, MaxBlockGas)
+	}
+
+	caller := common.HexToAddress(tx.From)
+	contract := common.HexToAddress(tx.To)
+
+	// 3. 🛡️ INPUT VALIDATION (Medium): Strict Amount Parsing
+	value := new(big.Int)
+	if _, ok := value.SetString(tx.Amount, 10); !ok {
+		return nil, fmt.Errorf("invalid transaction amount: %s", tx.Amount)
+	}
+	if value.Sign() < 0 {
+		return nil, fmt.Errorf("transaction amount cannot be negative")
+	}
+
+	gasPrice := new(big.Int)
+	if _, ok := gasPrice.SetString(tx.GasPrice, 10); !ok {
+		return nil, fmt.Errorf("invalid gas price: %s", tx.GasPrice)
+	}
+	if gasPrice.Sign() < 0 {
+		return nil, fmt.Errorf("gas price cannot be negative")
+	}
+
+	// 4. 🛡️ SECURITY FIX (H-02): Fetch Nonce EARLY
 	nonce, err := e.worldState.GetNonce(tx.From)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce for execution: %v", err)
 	}
+	// (Optional) Enforce strict nonce ordering for Mainnet
+	if tx.Nonce != nonce {
+		return nil, fmt.Errorf("nonce mismatch: expected %d, got %d", nonce, tx.Nonce)
+	}
 
-	// (Optional) Strict Nonce Check on Go side too
-	// if tx.Nonce != nonce { return nil, fmt.Errorf("nonce mismatch") }
+	// 5. Pre-Check Balance
+	maxGasCost := new(big.Int).Mul(new(big.Int).SetUint64(uint64(tx.Gas)), gasPrice)
+	totalReq := new(big.Int).Add(maxGasCost, value)
 
-	// Convert Amount string to BigInt
-	value := math.ParseBigInt(tx.Amount)
+	balance, err := e.worldState.GetBalance(tx.From)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get balance: %v", err)
+	}
+	if balance.Cmp(totalReq) < 0 {
+		return nil, fmt.Errorf("insufficient funds for gas + value")
+	}
 
-	// 3. Execute contract call (Pass Nonce for H-02 fix)
+	// 6. Execute
 	returnData, gasUsed, err := e.evmExecutor.ExecuteCall(
 		caller,
 		contract,
 		tx.Data,
 		uint64(tx.Gas),
 		value,
-		nonce, // <--- Pass the nonce here
+		nonce,
 	)
 
 	if err != nil {
-		return nil, fmt.Errorf("EVM call failed: %v", err)
+		return nil, fmt.Errorf("EVM execution failed: %v", err)
 	}
 
-	// Deduct gas cost
-	// GasCost = GasUsed * GasPrice
+	// 7. Deduct Actual Gas Cost
 	gasUsedBig := new(big.Int).SetUint64(gasUsed)
-	gasPriceBig := math.ParseBigInt(tx.GasPrice)
-	gasCostBig := new(big.Int).Mul(gasUsedBig, gasPriceBig)
+	actualGasCost := new(big.Int).Mul(gasUsedBig, gasPrice)
 
-	// Fetch Balance
-	balanceBig, err := e.worldState.GetBalance(tx.From)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get balance for gas deduction: %v", err)
-	}
-
-	// Check if balance is sufficient
-	if balanceBig.Cmp(gasCostBig) < 0 {
-		return nil, fmt.Errorf("insufficient balance for EVM gas")
-	}
-
-	// Update Balance
-	balanceBig.Sub(balanceBig, gasCostBig)
-	e.worldState.UpdateBalance(tx.From, balanceBig)
+	newBalance := new(big.Int).Sub(balance, actualGasCost)
+	e.worldState.UpdateBalance(tx.From, newBalance)
 
 	// Increment nonce
 	e.worldState.SetNonce(tx.From, nonce+1)
 
-	log.Printf("✅ EVM call executed: gas used %d, return data: %d bytes",
-		gasUsed, len(returnData))
+	// ✅ FIX: Use 'returnData' in the log so the compiler is happy
+	log.Printf("✅ EVM call executed: gas used %d, return data len: %d", gasUsed, len(returnData))
 
 	return &ExecutionReceipt{
 		TxHash:  tx.Hash,

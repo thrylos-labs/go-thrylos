@@ -48,8 +48,28 @@ func (h *EthereumRPCHandler) ChainId(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *EthereumRPCHandler) NetworkId(w http.ResponseWriter, r *http.Request) {
-	response := hexutil.Uint64(h.chainID.Uint64())
+	response := fmt.Sprintf("%d", h.chainID.Uint64())
 	respondJSON(w, response)
+}
+
+// ➕ NEW: Web3_clientVersion (Required for handshake)
+func (h *EthereumRPCHandler) ClientVersion(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, "Thrylos/v1.0.0/go-1.21/linux-amd64")
+}
+
+// ➕ NEW: Eth_coinbase (Required to prevent polling errors)
+func (h *EthereumRPCHandler) Coinbase(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, "0x0000000000000000000000000000000000000000") // Return zero address or miner address
+}
+
+// ➕ NEW: Eth_mining (Required to prevent polling errors)
+func (h *EthereumRPCHandler) Mining(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, false)
+}
+
+// ➕ NEW: Eth_syncing (Required to prevent polling errors)
+func (h *EthereumRPCHandler) Syncing(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, false)
 }
 
 // ===== Account Information =====
@@ -148,6 +168,18 @@ func (h *EthereumRPCHandler) SendRawTransaction(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// 🛡️ INPUT VALIDATION (Medium) - FIXED
+	// Validate fields before submitting to mempool/blockchain
+	if thrylosTx.Gas < 21000 {
+		respondError(w, -32602, "Intrinsic gas too low")
+		return
+	}
+	// Check Address Length (0x + 40 chars = 42)
+	if len(thrylosTx.From) != 42 {
+		respondError(w, -32602, "Invalid sender address")
+		return
+	}
+
 	// Submit to blockchain
 	if err := h.blockchain.AddTransaction(thrylosTx); err != nil {
 		respondError(w, -32000, fmt.Sprintf("Transaction rejected: %v", err))
@@ -172,30 +204,37 @@ func (h *EthereumRPCHandler) Call(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 🛡️ INPUT VALIDATION (Medium) - FIXED
+	// 1. Gas Validator: Cap at 30M (Block Limit)
 	gas := uint64(req.CallData.Gas)
-	if gas == 0 {
-		gas = 1000000
+	if gas == 0 || gas > 30_000_000 {
+		gas = 30_000_000
 	}
 
+	// 2. Value Validator: Prevent negative values
 	val := big.NewInt(0)
 	if req.CallData.Value != nil {
 		val = req.CallData.Value.ToInt()
+		if val.Sign() < 0 {
+			respondError(w, -32602, "Value cannot be negative")
+			return
+		}
 	}
 
-	// 1. Convert address
+	// 3. Convert address
 	fromAddr := common.HexToAddress(req.CallData.From)
 
-	// 2. Fetch current nonce (Required to pass Rust security check)
+	// 4. Fetch current nonce (Required to pass Rust security check)
 	currentNonce := h.evmExecutor.GetNonce(fromAddr)
 
-	// 3. Execute with Type Cast and Nonce
+	// 5. Execute with Type Cast and Nonce
 	result, _, err := h.evmExecutor.ExecuteCall(
 		fromAddr,
 		common.HexToAddress(req.CallData.To),
-		[]byte(req.CallData.Data), // Fix 1: Cast hexutil.Bytes to []byte
+		[]byte(req.CallData.Data),
 		gas,
 		val,
-		currentNonce, // Fix 2: Pass the nonce
+		currentNonce,
 	)
 
 	if err != nil {
@@ -486,6 +525,7 @@ func (h *EthereumRPCHandler) convertEthTxToThrylosTx(ethTx *types.Transaction) (
 		Type:      txType,
 		Timestamp: time.Now().Unix(),
 		Signature: sigBytes, // ✅ Crucial: Pass the signature!
+		ChainId:   h.chainID.String(),
 	}
 
 	if ethTx.To() != nil {
