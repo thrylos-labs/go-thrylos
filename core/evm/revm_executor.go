@@ -6,34 +6,34 @@ package evm
 #include <stdlib.h>
 #include <stdint.h>
 
-// 1. Types
+// Types
 typedef struct { uint8_t bytes[20]; } CAddress;
 typedef struct { uint8_t bytes[32]; } CU256;
 typedef struct { const uint8_t* data; size_t len; } CByteSlice;
 typedef struct { uint8_t success; uint64_t gas_used; CByteSlice return_data; const char* error_message; } CExecutionResult;
 
-// 2. Callback Typedefs
+// Callback Typedefs
 typedef CU256 (*BalanceCallback)(CAddress);
 typedef uint64_t (*NonceCallback)(CAddress);
 typedef CByteSlice (*CodeCallback)(CAddress);
 typedef CU256 (*StorageCallback)(CAddress, CU256);
 
-// 3. Go Exports
+// External Exports
 extern CU256 getBalanceCallback(CAddress);
 extern uint64_t getNonceCallback(CAddress);
 extern CByteSlice getCodeCallback(CAddress);
 extern CU256 getStorageCallback(CAddress, CU256);
 
-// 4. Static Helpers
+// Static Helpers
 static BalanceCallback get_balance_cb() { return &getBalanceCallback; }
 static NonceCallback get_nonce_cb() { return &getNonceCallback; }
 static CodeCallback get_code_cb() { return &getCodeCallback; }
 static StorageCallback get_storage_cb() { return &getStorageCallback; }
 
-// 5. Rust Functions
+// Rust Functions
 void* revm_executor_new(uint64_t chain_id, BalanceCallback b, NonceCallback n, CodeCallback c, StorageCallback s);
 void revm_executor_free(void* executor);
-void revm_free_result(CExecutionResult result); // <--- NEW SECURITY FIX
+void revm_free_result(CExecutionResult result);
 CExecutionResult revm_execute_call(void* executor, CAddress caller, CAddress to, CByteSlice data, uint64_t gas, CU256 value);
 CExecutionResult revm_deploy_contract(void* executor, CAddress deployer, CByteSlice code, uint64_t gas, CU256 value);
 CAddress revm_calculate_create_address(CAddress deployer, uint64_t nonce);
@@ -197,14 +197,12 @@ func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, er
 	// Copy return data to Go-managed memory
 	if res.return_data.len > 0 {
 		data = C.GoBytes(unsafe.Pointer(res.return_data.data), C.int(res.return_data.len))
-		// NOTE: We do NOT call free here anymore. The defer C.revm_free_result() handles it.
 	}
 
 	if res.success == 0 {
 		var msg string
 		if res.error_message != nil {
 			msg = C.GoString(res.error_message)
-			// NOTE: We do NOT call free here anymore.
 		} else {
 			msg = "execution failed"
 		}
