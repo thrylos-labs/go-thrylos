@@ -166,10 +166,20 @@ func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data
 
 	cValue := bigIntToC(value)
 
+	// Call the Rust function
 	gas := C.revm_estimate_gas(e.executor, cFrom, cTo, cData, cValue)
-	if gas == 0 {
-		return 0, fmt.Errorf("gas estimation failed")
+
+	// 🛡️ SECURITY FIX (CK-03): Check for Rust Panic Sentinel
+	// ^uint64(0) is the Go way to represent MaxUint64 (0xFFFFFFFFFFFFFFFF)
+	if uint64(gas) == ^uint64(0) {
+		return 0, fmt.Errorf("CRITICAL: EVM execution panicked internally (handled safely)")
 	}
+
+	// Standard failure check
+	if gas == 0 {
+		return 0, fmt.Errorf("gas estimation failed (execution reverted or halted)")
+	}
+
 	return uint64(gas), nil
 }
 

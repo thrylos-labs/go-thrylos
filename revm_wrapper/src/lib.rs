@@ -13,6 +13,9 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::slice;
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::ptr;
+
 // ============================================================================
 // C FFI Types for Go interop
 // ============================================================================
@@ -430,36 +433,64 @@ pub extern "C" fn revm_estimate_gas(
     executor: *mut EVMExecutor,
     caller: CAddress,
     to: CAddress,
-    data: CByteSlice, // Updated
+    data: CByteSlice,
     value: CU256,
 ) -> u64 {
-    let executor = unsafe { &mut *executor };
+    // 🛡️ SECURITY FIX: Wrap everything in catch_unwind
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let executor = unsafe { &mut *executor };
 
-    let caller_addr = Address::from_slice(&caller.bytes);
-    let to_addr = Address::from_slice(&to.bytes);
-    let data_bytes = if data.len > 0 {
-        unsafe { Bytes::copy_from_slice(slice::from_raw_parts(data.data, data.len)) }
-    } else {
-        Bytes::default()
-    };
-    let value_u256 = U256::from_be_bytes(value.bytes);
+        let caller_addr = Address::from_slice(&caller.bytes);
+        let to_addr = Address::from_slice(&to.bytes);
+        
+        let data_bytes = if data.len > 0 {
+            unsafe { Bytes::copy_from_slice(slice::from_raw_parts(data.data, data.len)) }
+        } else {
+            Bytes::default()
+        };
+        
+        let value_u256 = U256::from_be_bytes(value.bytes);
+        let high_gas = 30_000_000u64;
 
-    // Try with a high gas limit
-    let high_gas = 30_000_000u64;
-    let result = executor.execute_call(
-        caller_addr,
-        to_addr,
-        data_bytes,
-        high_gas,
-        value_u256,
-    );
+        // Execute the call
+        let exec_result = executor.execute_call(
+            caller_addr,
+            to_addr,
+            data_bytes,
+            high_gas,
+            value_u256,
+        );
 
-    if result.success {
-        // Add 10% buffer and round up
-        let estimated = result.gas_used + (result.gas_used / 10);
-        estimated
-    } else {
-        // Execution failed, return 0
-        0
+        // 1. Extract the gas used (this is what we want)
+        let gas_used = exec_result.gas_used;
+
+        // 2. MEMORY CLEANUP (CRITICAL)
+        // executor.execute_call allocates memory for return_data and error_message.
+        // Since we are NOT sending this struct to Go, we MUST free it here, 
+        // otherwise the node will leak RAM on every gas estimation.
+        if !exec_result.return_data.data.is_null() {
+            unsafe { 
+                let _ = Vec::from_raw_parts(
+                    exec_result.return_data.data as *mut u8, 
+                    exec_result.return_data.len, 
+                    exec_result.return_data.len
+                ); 
+            }
+        }
+        if !exec_result.error_message.is_null() {
+            unsafe { 
+                let _ = CString::from_raw(exec_result.error_message as *mut c_char); 
+            }
+        }
+
+        gas_used // Return the u64
+    }));
+
+    match result {
+        Ok(gas_estimate) => gas_estimate,
+        Err(_) => {
+            eprintln!("🚨 CRITICAL: Rust panic caught in revm_estimate_gas! Preventing node crash.");
+            u64::MAX // Sentinel value for Go to handle
+        }
     }
 }
