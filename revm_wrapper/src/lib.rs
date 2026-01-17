@@ -355,8 +355,8 @@ pub extern "C" fn revm_execute_call(
     data: CByteSlice,
     gas_limit: u64,
     value: CU256,
+    nonce: u64, // <--- 1. NEW PARAMETER
 ) -> CExecutionResult {
-    // 🛡️ Guard: Check for Null Pointer (C-02)
     if executor.is_null() {
         return CExecutionResult {
             success: false,
@@ -366,11 +366,17 @@ pub extern "C" fn revm_execute_call(
         };
     }
 
-    // 🛡️ Guard: Catch Panics
     let result = catch_unwind(AssertUnwindSafe(|| {
         let executor = unsafe { &mut *executor };
-
         let caller_addr = Address::from_slice(&caller.bytes);
+
+        // 🛡️ SECURITY FIX (H-02): Validate Nonce
+        // We must ensure the tx nonce matches the state nonce exactly.
+        let state_nonce = (executor.db.get_nonce_fn)(caller);
+        if nonce != state_nonce {
+             panic!("Nonce mismatch: tx={} state={}", nonce, state_nonce);
+        }
+
         let to_addr = Address::from_slice(&to.bytes);
         
         let data_bytes = if data.len > 0 {
@@ -380,16 +386,28 @@ pub extern "C" fn revm_execute_call(
         };
         let value_u256 = U256::from_be_bytes(value.bytes);
 
+        // Pass nonce to the internal executor if needed, or just proceed knowing it's valid
         executor.execute_call(caller_addr, to_addr, data_bytes, gas_limit, value_u256)
     }));
 
     match result {
         Ok(exec_result) => exec_result,
-        Err(_) => CExecutionResult {
-            success: false,
-            gas_used: 0,
-            return_data: CByteSlice { data: ptr::null(), len: 0 },
-            error_message: CString::new("Critical: Rust panic in execute_call").unwrap().into_raw(),
+        Err(e) => {
+            // Check if it was our nonce panic
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                format!("Execution error: {}", s)
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                format!("Execution error: {}", s)
+            } else {
+                "Critical: Rust panic in execute_call".to_string()
+            };
+
+            CExecutionResult {
+                success: false,
+                gas_used: 0,
+                return_data: CByteSlice { data: ptr::null(), len: 0 },
+                error_message: CString::new(msg).unwrap().into_raw(),
+            }
         }
     }
 }

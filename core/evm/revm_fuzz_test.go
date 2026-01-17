@@ -75,6 +75,9 @@ func TestRevmExecutor_Fuzz_FFI(t *testing.T) {
 			caller := common.BytesToAddress(randBytes(20))
 			contract := common.BytesToAddress(randBytes(20))
 
+			// Generate a random nonce for the test
+			randomNonce := uint64(randInt(100000))
+
 			// Execute
 			ret, gas, err := executor.ExecuteCall(
 				caller,
@@ -82,6 +85,7 @@ func TestRevmExecutor_Fuzz_FFI(t *testing.T) {
 				inputData,
 				uint64(randInt(10000000)),
 				big.NewInt(randInt(1000)),
+				randomNonce, // <--- ADDED: Pass the nonce here
 			)
 
 			// Validation: Must not crash

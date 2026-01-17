@@ -34,14 +34,17 @@ static StorageCallback get_storage_cb() { return &getStorageCallback; }
 void* revm_executor_new(uint64_t chain_id, BalanceCallback b, NonceCallback n, CodeCallback c, StorageCallback s);
 void revm_executor_free(void* executor);
 void revm_free_result(CExecutionResult result);
-CExecutionResult revm_execute_call(void* executor, CAddress caller, CAddress to, CByteSlice data, uint64_t gas, CU256 value);
+
+// 👇 UPDATED SIGNATURE: Added uint64_t nonce at the end
+CExecutionResult revm_execute_call(void* executor, CAddress caller, CAddress to, CByteSlice data, uint64_t gas, CU256 value, uint64_t nonce);
+
 CExecutionResult revm_deploy_contract(void* executor, CAddress deployer, CByteSlice code, uint64_t gas, CU256 value);
 CAddress revm_calculate_create_address(CAddress deployer, uint64_t nonce);
 uint64_t revm_estimate_gas(void* executor, CAddress caller, CAddress to, CByteSlice data, CU256 value);
 void revm_free_string(char* s);
 void revm_free_bytes(uint8_t* data, size_t len);
 */
-import "C"
+import "C" // <--- SUCCESS: Touching the comment block
 import (
 	"fmt"
 	"math/big"
@@ -113,7 +116,9 @@ func (e *RevmExecutor) Close() {
 }
 
 // ExecuteCall executes a message call and safely cleans up memory
-func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte, gas uint64, value *big.Int) ([]byte, uint64, error) {
+// ExecuteCall executes a message call and safely cleans up memory
+func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte, gas uint64, value *big.Int, nonce uint64) ([]byte, uint64, error) {
+	// 1. Convert Go types to C types
 	cCaller := addressToC(caller)
 	cContract := addressToC(contract)
 
@@ -125,12 +130,19 @@ func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte
 
 	cValue := bigIntToC(value)
 
-	res := C.revm_execute_call(e.executor, cCaller, cContract, cData, C.uint64_t(gas), cValue)
+	// 2. Call Rust (Now with Nonce for H-02 Security Fix)
+	res := C.revm_execute_call(e.executor, cCaller, cContract, cData, C.uint64_t(gas), cValue, C.uint64_t(nonce))
 
-	// 🛡️ SECURITY FIX: Clean up Rust memory after Go copies it
+	// 3. 🛡️ SECURITY FIX: Clean up Rust memory immediately after execution
 	defer C.revm_free_result(res)
 
+	// 4. Process result
 	return e.processResult(res)
+}
+
+func (e *RevmExecutor) GetNonce(address common.Address) uint64 {
+	n, _ := e.worldState.GetNonce(address.Hex())
+	return n
 }
 
 // DeployContract creates a new contract and safely cleans up memory

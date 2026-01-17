@@ -24,7 +24,11 @@ type StateInterface interface {
 
 // EVMExecutorInterface defines interaction with the EVM engine
 type EVMExecutorInterface interface {
-	ExecuteCall(caller common.Address, contract common.Address, input []byte, gas uint64, value *big.Int) ([]byte, uint64, error)
+	// 👇 Added nonce uint64 at the end
+	ExecuteCall(caller, contract common.Address, input []byte, gas uint64, value *big.Int, nonce uint64) ([]byte, uint64, error)
+
+	// ... keep other methods (like DeployContract, EstimateGas) as they were
 	DeployContract(deployer common.Address, bytecode []byte, gas uint64, value *big.Int) (common.Address, uint64, error)
-	Close()
+	EstimateGas(from common.Address, to *common.Address, data []byte, value *big.Int) (uint64, error)
+	GetNonce(address common.Address) uint64
 }

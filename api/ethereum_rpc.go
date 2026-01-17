@@ -182,12 +182,20 @@ func (h *EthereumRPCHandler) Call(w http.ResponseWriter, r *http.Request) {
 		val = req.CallData.Value.ToInt()
 	}
 
+	// 1. Convert address
+	fromAddr := common.HexToAddress(req.CallData.From)
+
+	// 2. Fetch current nonce (Required to pass Rust security check)
+	currentNonce := h.evmExecutor.GetNonce(fromAddr)
+
+	// 3. Execute with Type Cast and Nonce
 	result, _, err := h.evmExecutor.ExecuteCall(
-		common.HexToAddress(req.CallData.From),
+		fromAddr,
 		common.HexToAddress(req.CallData.To),
-		req.CallData.Data,
+		[]byte(req.CallData.Data), // Fix 1: Cast hexutil.Bytes to []byte
 		gas,
 		val,
+		currentNonce, // Fix 2: Pass the nonce
 	)
 
 	if err != nil {

@@ -120,6 +120,13 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 	// Convert Amount string to BigInt
 	value := math.ParseBigInt(tx.Amount)
 
+	// 1. Fetch Nonce EARLY (Required for H-02 Security Fix)
+	// We need this now to validate the transaction against the Rust state
+	nonce, err := e.worldState.GetNonce(tx.From)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get nonce for execution: %v", err)
+	}
+
 	// Execute contract call
 	returnData, gasUsed, err := e.evmExecutor.ExecuteCall(
 		caller,
@@ -127,6 +134,7 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 		tx.Data,
 		uint64(tx.Gas),
 		value,
+		nonce, // <--- 2. Pass the nonce here
 	)
 
 	if err != nil {
@@ -155,7 +163,7 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 	e.worldState.UpdateBalance(tx.From, balanceBig)
 
 	// Increment nonce
-	nonce, _ := e.worldState.GetNonce(tx.From)
+	// (We already fetched 'nonce' at the top, so just use it here)
 	e.worldState.SetNonce(tx.From, nonce+1)
 
 	log.Printf("✅ EVM call executed: gas used %d, return data: %d bytes",
