@@ -347,7 +347,7 @@ pub extern "C" fn revm_free_result(result: CExecutionResult) {
     }
 }
 
-#[no_mangle]
+#[no_mangle]  // ⚠️ ADD THIS LINE!
 pub extern "C" fn revm_execute_call(
     executor: *mut EVMExecutor,
     caller: CAddress,
@@ -355,28 +355,43 @@ pub extern "C" fn revm_execute_call(
     data: CByteSlice,
     gas_limit: u64,
     value: CU256,
-    nonce: u64, // <--- 1. NEW PARAMETER
+    nonce: u64,
 ) -> CExecutionResult {
+    // Step 1: Validate executor pointer
     if executor.is_null() {
         return CExecutionResult {
             success: false,
             gas_used: 0,
             return_data: CByteSlice { data: ptr::null(), len: 0 },
-            error_message: CString::new("Critical: Null executor pointer").unwrap().into_raw(),
+            error_message: CString::new("Critical: Null executor pointer")
+                .unwrap_or_else(|_| CString::new("Error creating error message").unwrap())
+                .into_raw(),
         };
     }
 
+    // ✅ FIX: Validate nonce BEFORE catch_unwind and return error gracefully
+   // ✅ Add this BEFORE catch_unwind:
+let state_nonce = unsafe {
+    let executor_ref = &*executor;
+    (executor_ref.db.get_nonce_fn)(caller)
+};
+
+if nonce != state_nonce {
+    return CExecutionResult {
+        success: false,
+        gas_used: 0,
+        return_data: CByteSlice { data: ptr::null(), len: 0 },
+        error_message: CString::new(format!(
+            "Nonce mismatch: expected {}, got {}",
+            state_nonce, nonce
+        )).unwrap().into_raw(),
+    };
+}
+
+    // Step 2: Execute the call (nonce already validated)
     let result = catch_unwind(AssertUnwindSafe(|| {
         let executor = unsafe { &mut *executor };
         let caller_addr = Address::from_slice(&caller.bytes);
-
-        // 🛡️ SECURITY FIX (H-02): Validate Nonce
-        // We must ensure the tx nonce matches the state nonce exactly.
-        let state_nonce = (executor.db.get_nonce_fn)(caller);
-        if nonce != state_nonce {
-             panic!("Nonce mismatch: tx={} state={}", nonce, state_nonce);
-        }
-
         let to_addr = Address::from_slice(&to.bytes);
         
         let data_bytes = if data.len > 0 {
@@ -384,16 +399,17 @@ pub extern "C" fn revm_execute_call(
         } else {
             Bytes::default()
         };
+        
         let value_u256 = U256::from_be_bytes(value.bytes);
 
-        // Pass nonce to the internal executor if needed, or just proceed knowing it's valid
+        // Nonce is already validated, safe to proceed
         executor.execute_call(caller_addr, to_addr, data_bytes, gas_limit, value_u256)
     }));
 
+    // Step 3: Handle any panics from execution (not from nonce validation)
     match result {
         Ok(exec_result) => exec_result,
         Err(e) => {
-            // Check if it was our nonce panic
             let msg = if let Some(s) = e.downcast_ref::<&str>() {
                 format!("Execution error: {}", s)
             } else if let Some(s) = e.downcast_ref::<String>() {

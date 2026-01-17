@@ -11,52 +11,148 @@ import (
 )
 
 // MockStateReader for fuzzing context
-type MockStateReader struct{}
+type MockStateReader struct {
+	nonces map[string]uint64
+}
+
+func NewMockStateReader() *MockStateReader {
+	return &MockStateReader{
+		nonces: make(map[string]uint64),
+	}
+}
 
 func (m *MockStateReader) GetBalance(address string) (*big.Int, error) {
 	return big.NewInt(1000000000000000000), nil // 1 ETH
 }
+
 func (m *MockStateReader) GetNonce(address string) (uint64, error) {
+	if nonce, exists := m.nonces[address]; exists {
+		return nonce, nil
+	}
 	return 0, nil
 }
+
+func (m *MockStateReader) SetNonce(address string, nonce uint64) {
+	m.nonces[address] = nonce
+}
+
 func (m *MockStateReader) GetContractCode(address string) ([]byte, error) {
 	return []byte{}, nil
 }
+
 func (m *MockStateReader) GetContractStorage(address, key string) ([]byte, error) {
 	return make([]byte, 32), nil
 }
 
-func TestRevmExecutor_Fuzz_FFI(t *testing.T) {
-	// Initialize Executor with Mock State
+// ✅ NEW TEST: Verify nonce validation doesn't panic
+func TestRevmExecutor_NonceValidation(t *testing.T) {
 	cfg := &config.Config{Network: config.NetworkConfig{ChainID: "1"}}
-	executor, err := NewRevmExecutor(cfg, &MockStateReader{})
+	mockState := NewMockStateReader()
+	executor, err := NewRevmExecutor(cfg, mockState)
 	assert.NoError(t, err)
 	defer executor.Close()
 
-	// 1. Fuzz DeployContract
+	caller := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	contract := common.HexToAddress("0x0987654321098765432109876543210987654321")
+
+	t.Run("Correct_Nonce_Executes", func(t *testing.T) {
+		// Set state nonce to 5
+		mockState.SetNonce(caller.Hex(), 5)
+
+		// Execute with correct nonce (5)
+		_, _, err := executor.ExecuteCall(
+			caller,
+			contract,
+			[]byte{}, // empty calldata
+			1000000,
+			big.NewInt(0),
+			5, // Correct nonce
+		)
+
+		// May fail for other reasons, but NOT nonce
+		if err != nil {
+			assert.NotContains(t, err.Error(), "Nonce mismatch")
+		}
+	})
+
+	t.Run("Wrong_Nonce_Returns_Error", func(t *testing.T) {
+		// Set state nonce to 5
+		mockState.SetNonce(caller.Hex(), 5)
+
+		// Execute with wrong nonce (999)
+		_, _, err := executor.ExecuteCall(
+			caller,
+			contract,
+			[]byte{},
+			1000000,
+			big.NewInt(0),
+			999, // Wrong nonce
+		)
+
+		// Should return error, not panic
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "Nonce mismatch")
+		assert.Contains(t, err.Error(), "expected 5")
+		assert.Contains(t, err.Error(), "got 999")
+	})
+
+	t.Run("Fuzz_Invalid_Nonces_Dont_Crash", func(t *testing.T) {
+		mockState.SetNonce(caller.Hex(), 10)
+
+		// Try 1000 random invalid nonces
+		for i := 0; i < 1000; i++ {
+			wrongNonce := uint64(randInt(100000))
+
+			// Skip if we randomly hit the correct nonce
+			if wrongNonce == 10 {
+				continue
+			}
+
+			_, _, err := executor.ExecuteCall(
+				caller,
+				contract,
+				[]byte{},
+				1000000,
+				big.NewInt(0),
+				wrongNonce,
+			)
+
+			// Must return error, not crash
+			if err != nil {
+				// Verify it's a proper error message, not a panic
+				assert.NotContains(t, err.Error(), "panic")
+				assert.NotContains(t, err.Error(), "segmentation")
+			}
+		}
+	})
+}
+
+// Existing fuzz tests (updated)
+func TestRevmExecutor_Fuzz_FFI(t *testing.T) {
+	cfg := &config.Config{Network: config.NetworkConfig{ChainID: "1"}}
+	mockState := NewMockStateReader()
+	executor, err := NewRevmExecutor(cfg, mockState)
+	assert.NoError(t, err)
+	defer executor.Close()
+
 	t.Run("Fuzz_DeployContract", func(t *testing.T) {
 		for i := 0; i < 100; i++ {
-			// Generate random bytecode of random length (0 to 10KB)
 			lenBytecode := randInt(10000)
 			bytecode := make([]byte, lenBytecode)
 			rand.Read(bytecode)
 
-			// Generate random addresses
 			deployer := common.BytesToAddress(randBytes(20))
 
-			// Execute
 			addr, gas, err := executor.DeployContract(
 				deployer,
 				bytecode,
-				uint64(randInt(10000000)), // Random gas limit
+				uint64(randInt(10000000)),
 				big.NewInt(0),
 			)
 
-			// We expect errors for garbage bytecode, but NOT crashes (panics)
-			// If err is nil, it means revm actually executed the random bytes validly (rare but possible)
 			if err != nil {
-				assert.NotContains(t, err.Error(), "panic", "FFI panic detected")
-				assert.NotContains(t, err.Error(), "segmentation violation", "Segfault detected")
+				assert.NotContains(t, err.Error(), "panic")
+				assert.NotContains(t, err.Error(), "segmentation")
 			} else {
 				assert.NotNil(t, addr)
 				assert.GreaterOrEqual(t, gas, uint64(0))
@@ -64,10 +160,8 @@ func TestRevmExecutor_Fuzz_FFI(t *testing.T) {
 		}
 	})
 
-	// 2. Fuzz ExecuteCall
 	t.Run("Fuzz_ExecuteCall", func(t *testing.T) {
 		for i := 0; i < 100; i++ {
-			// Generate random calldata (0 to 1MB to test buffer limits)
 			lenData := randInt(1024 * 1024)
 			inputData := make([]byte, lenData)
 			rand.Read(inputData)
@@ -75,25 +169,24 @@ func TestRevmExecutor_Fuzz_FFI(t *testing.T) {
 			caller := common.BytesToAddress(randBytes(20))
 			contract := common.BytesToAddress(randBytes(20))
 
-			// Generate a random nonce for the test
-			randomNonce := uint64(randInt(100000))
+			// Set a valid nonce for the caller
+			randomNonce := uint64(randInt(100))
+			mockState.SetNonce(caller.Hex(), randomNonce)
 
-			// Execute
 			ret, gas, err := executor.ExecuteCall(
 				caller,
 				contract,
 				inputData,
 				uint64(randInt(10000000)),
 				big.NewInt(randInt(1000)),
-				randomNonce, // <--- ADDED: Pass the nonce here
+				randomNonce, // Use the same nonce we set
 			)
 
-			// Validation: Must not crash
 			if err != nil {
-				// Ensure error messages are safe strings
 				assert.NotEmpty(t, err.Error())
+				// Nonce should be valid in this test
+				assert.NotContains(t, err.Error(), "Nonce mismatch")
 			} else {
-				// If success, return data should be valid
 				assert.GreaterOrEqual(t, gas, uint64(0))
 				assert.NotNil(t, ret)
 			}
