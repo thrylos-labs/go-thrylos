@@ -113,28 +113,41 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 	return receipt, nil
 }
 
+// core/transaction/executor.go
+
 func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, error) {
 	caller := common.HexToAddress(tx.From)
 	contract := common.HexToAddress(tx.To)
 
-	// Convert Amount string to BigInt
-	value := math.ParseBigInt(tx.Amount)
+	// 1. 🛡️ SECURITY FIX (H-05): Cross-Chain Replay Protection
+	// We must verify the transaction is intended for THIS chain.
+	// Assuming tx.ChainId exists and matches your config format (string or uint64).
+	// If tx.ChainId is missing from your protobuf, you MUST add it.
+	if tx.ChainId != e.config.Network.ChainID {
+		return nil, fmt.Errorf("CRITICAL: Replay protection failed. Tx ChainID '%s' != Node ChainID '%s'", tx.ChainId, e.config.Network.ChainID)
+	}
 
-	// 1. Fetch Nonce EARLY (Required for H-02 Security Fix)
+	// 2. 🛡️ SECURITY FIX (H-02): Fetch Nonce EARLY
 	// We need this now to validate the transaction against the Rust state
 	nonce, err := e.worldState.GetNonce(tx.From)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce for execution: %v", err)
 	}
 
-	// Execute contract call
+	// (Optional) Strict Nonce Check on Go side too
+	// if tx.Nonce != nonce { return nil, fmt.Errorf("nonce mismatch") }
+
+	// Convert Amount string to BigInt
+	value := math.ParseBigInt(tx.Amount)
+
+	// 3. Execute contract call (Pass Nonce for H-02 fix)
 	returnData, gasUsed, err := e.evmExecutor.ExecuteCall(
 		caller,
 		contract,
 		tx.Data,
 		uint64(tx.Gas),
 		value,
-		nonce, // <--- 2. Pass the nonce here
+		nonce, // <--- Pass the nonce here
 	)
 
 	if err != nil {
@@ -163,7 +176,6 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 	e.worldState.UpdateBalance(tx.From, balanceBig)
 
 	// Increment nonce
-	// (We already fetched 'nonce' at the top, so just use it here)
 	e.worldState.SetNonce(tx.From, nonce+1)
 
 	log.Printf("✅ EVM call executed: gas used %d, return data: %d bytes",

@@ -31,6 +31,7 @@ message Transaction {
   string hash         = 11;
   int64  timestamp    = 12;
   bytes  from_pubkey  = 13;
+  string chain_id     = 14;
 }
 
 enum TransactionType {
