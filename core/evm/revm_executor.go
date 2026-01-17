@@ -33,6 +33,7 @@ static StorageCallback get_storage_cb() { return &getStorageCallback; }
 // 5. Rust Functions
 void* revm_executor_new(uint64_t chain_id, BalanceCallback b, NonceCallback n, CodeCallback c, StorageCallback s);
 void revm_executor_free(void* executor);
+void revm_free_result(CExecutionResult result); // <--- NEW SECURITY FIX
 CExecutionResult revm_execute_call(void* executor, CAddress caller, CAddress to, CByteSlice data, uint64_t gas, CU256 value);
 CExecutionResult revm_deploy_contract(void* executor, CAddress deployer, CByteSlice code, uint64_t gas, CU256 value);
 CAddress revm_calculate_create_address(CAddress deployer, uint64_t nonce);
@@ -53,7 +54,7 @@ import (
 
 // StateReader interface prevents import cycles
 type StateReader interface {
-	GetBalance(address string) (*big.Int, error) // Changed int64 -> *big.Int
+	GetBalance(address string) (*big.Int, error)
 	GetNonce(address string) (uint64, error)
 	GetContractCode(address string) ([]byte, error)
 	GetContractStorage(address, key string) ([]byte, error)
@@ -66,12 +67,10 @@ type RevmExecutor struct {
 }
 
 func (e *RevmExecutor) GetStorageAt(address common.Address, key common.Hash) common.Hash {
-	// Uses the StateReader interface to fetch storage from WorldState
 	val, _ := e.worldState.GetContractStorage(address.Hex(), key.Hex())
 	return common.BytesToHash(val)
 }
 
-// GetCode returns the bytecode at a given address
 func (e *RevmExecutor) GetCode(address common.Address) []byte {
 	code, _ := e.worldState.GetContractCode(address.Hex())
 	return code
@@ -113,6 +112,7 @@ func (e *RevmExecutor) Close() {
 	}
 }
 
+// ExecuteCall executes a message call and safely cleans up memory
 func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte, gas uint64, value *big.Int) ([]byte, uint64, error) {
 	cCaller := addressToC(caller)
 	cContract := addressToC(contract)
@@ -126,9 +126,14 @@ func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte
 	cValue := bigIntToC(value)
 
 	res := C.revm_execute_call(e.executor, cCaller, cContract, cData, C.uint64_t(gas), cValue)
+
+	// 🛡️ SECURITY FIX: Clean up Rust memory after Go copies it
+	defer C.revm_free_result(res)
+
 	return e.processResult(res)
 }
 
+// DeployContract creates a new contract and safely cleans up memory
 func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, gas uint64, value *big.Int) (common.Address, uint64, error) {
 	nonce, _ := e.worldState.GetNonce(deployer.Hex())
 	cDeployer := addressToC(deployer)
@@ -146,6 +151,9 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 	cValue := bigIntToC(value)
 
 	res := C.revm_deploy_contract(e.executor, cDeployer, cCode, C.uint64_t(gas), cValue)
+
+	// 🛡️ SECURITY FIX: Clean up Rust memory after Go copies it
+	defer C.revm_free_result(res)
 
 	_, gasUsed, err := e.processResult(res)
 	return contractAddr, gasUsed, err
@@ -170,12 +178,10 @@ func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data
 	gas := C.revm_estimate_gas(e.executor, cFrom, cTo, cData, cValue)
 
 	// 🛡️ SECURITY FIX (CK-03): Check for Rust Panic Sentinel
-	// ^uint64(0) is the Go way to represent MaxUint64 (0xFFFFFFFFFFFFFFFF)
 	if uint64(gas) == ^uint64(0) {
 		return 0, fmt.Errorf("CRITICAL: EVM execution panicked internally (handled safely)")
 	}
 
-	// Standard failure check
 	if gas == 0 {
 		return 0, fmt.Errorf("gas estimation failed (execution reverted or halted)")
 	}
@@ -187,16 +193,18 @@ func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data
 func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, error) {
 	gasUsed := uint64(res.gas_used)
 	var data []byte
+
+	// Copy return data to Go-managed memory
 	if res.return_data.len > 0 {
 		data = C.GoBytes(unsafe.Pointer(res.return_data.data), C.int(res.return_data.len))
-		C.revm_free_bytes((*C.uint8_t)(res.return_data.data), res.return_data.len)
+		// NOTE: We do NOT call free here anymore. The defer C.revm_free_result() handles it.
 	}
 
 	if res.success == 0 {
 		var msg string
 		if res.error_message != nil {
 			msg = C.GoString(res.error_message)
-			C.revm_free_string((*C.char)(res.error_message))
+			// NOTE: We do NOT call free here anymore.
 		} else {
 			msg = "execution failed"
 		}
@@ -205,7 +213,7 @@ func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, er
 	return data, gasUsed, nil
 }
 
-// === FIX: Manual casting loops to satisfy CGO types ===
+// === CGO Type Conversion Helpers ===
 
 func addressToC(a common.Address) C.CAddress {
 	var c C.CAddress
@@ -249,20 +257,15 @@ func cToBigInt(c C.CU256) *big.Int {
 // Global instance for C callbacks
 var globalExecutor *RevmExecutor
 
-// Callbacks exported to C
-//
 //export getBalanceCallback
 func getBalanceCallback(addr C.CAddress) C.CU256 {
 	if globalExecutor == nil {
 		return C.CU256{}
 	}
-
-	// FIX: Handle *big.Int return type
 	val, err := globalExecutor.worldState.GetBalance(cToAddress(addr).Hex())
 	if err != nil || val == nil {
 		return bigIntToC(big.NewInt(0))
 	}
-	// val is already *big.Int, pass directly
 	return bigIntToC(val)
 }
 
@@ -295,7 +298,6 @@ func getStorageCallback(addr C.CAddress, key C.CU256) C.CU256 {
 		return C.CU256{}
 	}
 
-	// Manual conversion for key hash
 	var kBytes [32]byte
 	for i, b := range key.bytes {
 		kBytes[i] = byte(b)
@@ -305,9 +307,7 @@ func getStorageCallback(addr C.CAddress, key C.CU256) C.CU256 {
 	val, _ := globalExecutor.worldState.GetContractStorage(cToAddress(addr).Hex(), kHash.Hex())
 	var c C.CU256
 
-	// Manual conversion for value bytes
 	if len(val) > 0 {
-		// Pad to 32 bytes if necessary
 		start := 32 - len(val)
 		if start >= 0 {
 			for i, b := range val {

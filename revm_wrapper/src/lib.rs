@@ -328,47 +328,112 @@ pub extern "C" fn revm_executor_free(executor: *mut EVMExecutor) {
 }
 
 #[no_mangle]
+pub extern "C" fn revm_free_result(result: CExecutionResult) {
+    // Free return_data if it exists
+    if !result.return_data.data.is_null() && result.return_data.len > 0 {
+        unsafe {
+            let _ = Vec::from_raw_parts(
+                result.return_data.data as *mut u8,
+                result.return_data.len,
+                result.return_data.len,
+            );
+        }
+    }
+    // Free error_message if it exists
+    if !result.error_message.is_null() {
+        unsafe {
+            let _ = CString::from_raw(result.error_message as *mut c_char);
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn revm_execute_call(
     executor: *mut EVMExecutor,
     caller: CAddress,
     to: CAddress,
-    data: CByteSlice, // Updated
+    data: CByteSlice,
     gas_limit: u64,
     value: CU256,
 ) -> CExecutionResult {
-    let executor = unsafe { &mut *executor };
+    // 🛡️ Guard: Check for Null Pointer (C-02)
+    if executor.is_null() {
+        return CExecutionResult {
+            success: false,
+            gas_used: 0,
+            return_data: CByteSlice { data: ptr::null(), len: 0 },
+            error_message: CString::new("Critical: Null executor pointer").unwrap().into_raw(),
+        };
+    }
 
-    let caller_addr = Address::from_slice(&caller.bytes);
-    let to_addr = Address::from_slice(&to.bytes);
-    let data_bytes = if data.len > 0 {
-        unsafe { Bytes::copy_from_slice(slice::from_raw_parts(data.data, data.len)) }
-    } else {
-        Bytes::default()
-    };
-    let value_u256 = U256::from_be_bytes(value.bytes);
+    // 🛡️ Guard: Catch Panics
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let executor = unsafe { &mut *executor };
 
-    executor.execute_call(caller_addr, to_addr, data_bytes, gas_limit, value_u256)
+        let caller_addr = Address::from_slice(&caller.bytes);
+        let to_addr = Address::from_slice(&to.bytes);
+        
+        let data_bytes = if data.len > 0 {
+            unsafe { Bytes::copy_from_slice(slice::from_raw_parts(data.data, data.len)) }
+        } else {
+            Bytes::default()
+        };
+        let value_u256 = U256::from_be_bytes(value.bytes);
+
+        executor.execute_call(caller_addr, to_addr, data_bytes, gas_limit, value_u256)
+    }));
+
+    match result {
+        Ok(exec_result) => exec_result,
+        Err(_) => CExecutionResult {
+            success: false,
+            gas_used: 0,
+            return_data: CByteSlice { data: ptr::null(), len: 0 },
+            error_message: CString::new("Critical: Rust panic in execute_call").unwrap().into_raw(),
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn revm_deploy_contract(
     executor: *mut EVMExecutor,
     deployer: CAddress,
-    bytecode: CByteSlice, // Updated
+    bytecode: CByteSlice,
     gas_limit: u64,
     value: CU256,
 ) -> CExecutionResult {
-    let executor = unsafe { &mut *executor };
+    if executor.is_null() {
+        return CExecutionResult {
+            success: false,
+            gas_used: 0,
+            return_data: CByteSlice { data: ptr::null(), len: 0 },
+            error_message: CString::new("Critical: Null executor pointer").unwrap().into_raw(),
+        };
+    }
 
-    let deployer_addr = Address::from_slice(&deployer.bytes);
-    let bytecode_bytes = if bytecode.len > 0 {
-        unsafe { Bytes::copy_from_slice(slice::from_raw_parts(bytecode.data, bytecode.len)) }
-    } else {
-        Bytes::default()
-    };
-    let value_u256 = U256::from_be_bytes(value.bytes);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let executor = unsafe { &mut *executor };
+        let deployer_addr = Address::from_slice(&deployer.bytes);
+        
+        let bytecode_bytes = if bytecode.len > 0 {
+            unsafe { Bytes::copy_from_slice(slice::from_raw_parts(bytecode.data, bytecode.len)) }
+        } else {
+            Bytes::default()
+        };
+        let value_u256 = U256::from_be_bytes(value.bytes);
 
-    executor.deploy_contract(deployer_addr, bytecode_bytes, gas_limit, value_u256)
+        executor.deploy_contract(deployer_addr, bytecode_bytes, gas_limit, value_u256)
+    }));
+
+    match result {
+        Ok(exec_result) => exec_result,
+        Err(_) => CExecutionResult {
+            success: false,
+            gas_used: 0,
+            return_data: CByteSlice { data: ptr::null(), len: 0 },
+            error_message: CString::new("Critical: Rust panic in deploy_contract").unwrap().into_raw(),
+        }
+    }
 }
 
 #[no_mangle]
@@ -494,3 +559,4 @@ pub extern "C" fn revm_estimate_gas(
         }
     }
 }
+
