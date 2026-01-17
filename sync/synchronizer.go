@@ -147,6 +147,9 @@ func (s *Synchronizer) Stop() error {
 	return nil
 }
 
+// Add this constant at the top of your sync/synchronizer.go file
+const MaxActiveRequests = 500 // Hard limit to prevent OOM attacks
+
 // RequestBlocks requests a range of blocks from a specific peer
 func (s *Synchronizer) RequestBlocks(peerID string, startBlock, endBlock int64) ([]*core.Block, error) {
 	if !s.isRunning {
@@ -175,6 +178,14 @@ func (s *Synchronizer) RequestBlocks(peerID string, startBlock, endBlock int64) 
 
 	// Add to active requests
 	s.mu.Lock()
+
+	// 🛡️ SECURITY FIX (CK-02): Check limit BEFORE adding to map
+	if len(s.activeRequests) >= MaxActiveRequests {
+		s.mu.Unlock()
+		// Fail fast without waiting for timeout
+		return nil, fmt.Errorf("DDoS protection: active request limit reached (%d)", len(s.activeRequests))
+	}
+
 	s.activeRequests[req.ID] = req
 	s.totalRequests++
 	s.mu.Unlock()
@@ -182,7 +193,9 @@ func (s *Synchronizer) RequestBlocks(peerID string, startBlock, endBlock int64) 
 	// Queue request
 	select {
 	case s.requestQueue <- req:
+		// Successfully queued
 	case <-time.After(5 * time.Second):
+		// Channel is full/blocked - Clean up map immediately
 		s.removeActiveRequest(req.ID)
 		return nil, fmt.Errorf("request queue full")
 	case <-s.ctx.Done():
