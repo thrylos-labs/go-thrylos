@@ -1,0 +1,8 @@
+.git
+vendor/
+node_modules/
+*.key
+*.pem
+*.crt
+certs/
+debug-multi-nodes.sh

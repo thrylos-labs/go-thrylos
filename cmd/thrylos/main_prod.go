@@ -18,6 +18,7 @@ import (
 )
 
 func main() {
+	EnforceSecurityChecks()
 	// CLI flags for production
 	dataDir := flag.String("data", "", "Data directory (default from config)")
 	p2pPort := flag.Int("p2p-port", 9000, "P2P listen port")

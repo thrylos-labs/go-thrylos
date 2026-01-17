@@ -24,3 +24,9 @@ keys/
 
 #REVM Integration
 revm_wrapper/target/
+
+# Security
+*.key
+*.pem
+*.crt
+certs/
