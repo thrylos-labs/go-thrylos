@@ -39,6 +39,11 @@ type DowntimePolicy struct {
 	JailDuration time.Duration
 }
 
+// ValidatorRegistry interface for getting validator public keys
+type ValidatorRegistry interface {
+	GetValidator(address string) (*core.Validator, error)
+}
+
 // DoubleSigningError carries the existing attestation that caused the conflict.
 type DoubleSigningError struct {
 	ConflictingRecord *storage.AttestationRecord
@@ -70,6 +75,8 @@ type SlashingManager struct {
 	// Track processed evidence to prevent double slashing
 	processedEvidence map[string]bool
 
+	validatorRegistry ValidatorRegistry
+
 	mu sync.RWMutex
 
 	// Reference to world state for stake updates
@@ -86,6 +93,7 @@ func NewSlashingManager(
 	config *storage.SlashingConfig,
 	worldState WorldStateBalancer,
 	slashingStorage *storage.SlashingStorage,
+	validatorRegistry ValidatorRegistry,
 ) *SlashingManager {
 	if config == nil {
 		config = storage.DefaultSlashingConfig()
@@ -118,6 +126,7 @@ func NewSlashingManager(
 		attestationHistory:      make(map[string]*storage.AttestationHistory),
 		validatorStatus:         make(map[string]storage.ValidatorStatus),
 		processedEvidence:       make(map[string]bool),
+		validatorRegistry:       validatorRegistry,
 		worldState:              worldState,
 		storage:                 slashingStorage,
 	}
@@ -129,6 +138,86 @@ func NewSlashingManager(
 	}
 
 	return sm
+}
+
+// ValidateEvidence validates slashing evidence with cryptographic verification
+func (sm *SlashingManager) ValidateEvidence(evidence *SlashingEvidence) error {
+	// Use the evidence's built-in validation with our registry
+	return evidence.Validate(sm.validatorRegistry)
+}
+
+// ProcessEvidence processes validated slashing evidence
+func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// ✅ CRITICAL: Validate evidence FIRST (includes signature verification)
+	if err := evidence.Validate(sm.validatorRegistry); err != nil {
+		return fmt.Errorf("invalid evidence: %v", err)
+	}
+
+	// Check if already processed (replay protection)
+	evidenceHash := evidence.Hash()
+	if sm.processedEvidence[evidenceHash] {
+		return fmt.Errorf("evidence already processed")
+	}
+
+	// Mark as processed
+	sm.processedEvidence[evidenceHash] = true
+	if sm.storage != nil {
+		if err := sm.storage.SaveProcessedEvidence(evidenceHash); err != nil {
+			log.Printf("⚠️ Failed to persist processed evidence: %v", err)
+		}
+	}
+
+	// Process based on evidence type
+	switch evidence.Type {
+	case EvidenceDoubleVoting:
+		return sm.processDoubleVoteEvidence(evidence)
+	case EvidenceSurroundVoting:
+		return sm.processSurroundVoteEvidence(evidence)
+	case EvidenceInvalidProposal:
+		dvEvidence, ok := evidence.Evidence.(*InvalidProposalEvidence)
+		if !ok {
+			return fmt.Errorf("invalid evidence format for invalid proposal")
+		}
+		return sm.ReportInvalidProposal(&types.BlockProposal{
+			Proposer: evidence.ValidatorAddress,
+			Epoch:    dvEvidence.Proposal.Epoch,
+		}, "evidence submitted")
+	default:
+		return fmt.Errorf("unsupported evidence type: %v", evidence.Type)
+	}
+}
+
+func (sm *SlashingManager) processDoubleVoteEvidence(evidence *SlashingEvidence) error {
+	dvEvidence, ok := evidence.Evidence.(*DoubleVoteEvidence)
+	if !ok {
+		return fmt.Errorf("invalid evidence format for double voting")
+	}
+
+	// Evidence is already validated (signatures verified)
+	return sm.ApplyDoubleVoteSlashing(dvEvidence.Attestation1, dvEvidence.Attestation2)
+}
+
+func (sm *SlashingManager) processSurroundVoteEvidence(evidence *SlashingEvidence) error {
+	svEvidence, ok := evidence.Evidence.(*SurroundVoteEvidence)
+	if !ok {
+		return fmt.Errorf("invalid evidence format for surround voting")
+	}
+
+	// Evidence is already validated (signatures verified)
+	// Apply slashing for surround voting
+	return sm.ApplyDoubleVoteSlashing(svEvidence.InnerAttestation, svEvidence.OuterAttestation)
+}
+
+func (sm *SlashingManager) processInvalidProposalEvidence(evidence *SlashingEvidence) error {
+	ipEvidence, ok := evidence.Evidence.(*InvalidProposalEvidence)
+	if !ok {
+		return fmt.Errorf("invalid evidence format")
+	}
+	proposal := &types.BlockProposal{Proposer: evidence.ValidatorAddress}
+	return sm.ReportInvalidProposal(proposal, fmt.Sprintf("%v", ipEvidence.ValidationErrors))
 }
 
 // loadFromStorage loads all slashing data from persistent storage into memory

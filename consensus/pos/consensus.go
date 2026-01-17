@@ -100,7 +100,7 @@ func NewConsensusEngine(
 	}
 
 	// ✅ This is valid because we updated the WorldStateBalancer interface
-	engine.slashingManager = NewSlashingManager(slashingConfig, worldState, slashingStorage)
+	engine.slashingManager = NewSlashingManager(slashingConfig, worldState, slashingStorage, worldState)
 
 	// Update fork choice with real slashing manager
 	engine.forkChoice.slashingManager = engine.slashingManager
@@ -399,7 +399,7 @@ func (ce *ConsensusEngine) proposeBlock() error {
 
 	ce.broadcastChan <- proposal
 
-	fmt.Printf("Proposed block %s by validator %s with %d txs, gas: %d, fees: %d, construction time: %v, score: %.2f\n",
+	fmt.Printf("Proposed block %s by validator %s with %d txs, gas: %d, fees: %s, construction time: %v, score: %.2f\n",
 		result.Block.Hash,
 		result.Block.Header.Validator,
 		result.TransactionCount,

@@ -4,6 +4,7 @@
 package pos
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -152,6 +153,32 @@ func NewSlashingEvidence(
 	return se
 }
 
+// hashAttestation creates a deterministic hash of an attestation for signing
+func (se *SlashingEvidence) hashAttestation(att *types.Attestation) []byte {
+	// Create message to sign: validator|slot|blockhash
+	message := fmt.Sprintf("%s:%d:%s",
+		att.ValidatorAddress,
+		att.Slot,
+		att.BlockHash,
+	)
+
+	hash := sha256.Sum256([]byte(message))
+	return hash[:]
+}
+
+// verifySignature verifies an Ed25519 signature
+func (se *SlashingEvidence) verifySignature(publicKeyBytes []byte, message []byte, signature []byte) bool {
+	// Verify public key length (32 bytes for Ed25519)
+	if len(publicKeyBytes) != ed25519.PublicKeySize {
+		return false
+	}
+
+	publicKey := ed25519.PublicKey(publicKeyBytes)
+
+	// Verify signature
+	return ed25519.Verify(publicKey, message, signature)
+}
+
 // generateID creates a unique ID for the evidence
 // [FIX M-02] Deterministic ID generation based on (Validator, Height, Type)
 func (se *SlashingEvidence) generateID() string {
@@ -191,13 +218,11 @@ func (se *SlashingEvidence) generateID() string {
 }
 
 // Validate validates the evidence structure and content
-func (se *SlashingEvidence) Validate() error {
+func (se *SlashingEvidence) Validate(registry ValidatorRegistry) error {
 	if se.ID == "" {
-		// Auto-generate if missing
 		se.ID = se.generateID()
 	}
 
-	// Verify ID consistency
 	expectedID := se.generateID()
 	if se.ID != expectedID {
 		return fmt.Errorf("invalid evidence ID: matches content mismatch")
@@ -215,30 +240,27 @@ func (se *SlashingEvidence) Validate() error {
 		return fmt.Errorf("timestamp cannot be zero")
 	}
 
-	// Check timestamp is not too old or in future
 	now := time.Now().Unix()
-	if se.Timestamp > now+300 { // 5 minutes future tolerance
+	if se.Timestamp > now+300 {
 		return fmt.Errorf("evidence timestamp is in the future")
 	}
 
-	// [FIX M-02] Enforce strict staleness check (e.g., 7 days)
-	// This prevents processing evidence from ancient history or different chains
 	const MaxEvidenceAge = 86400 * 7 // 7 days
 	if se.Timestamp < now-MaxEvidenceAge {
 		return fmt.Errorf("evidence is too old (stale): %d seconds", now-se.Timestamp)
 	}
 
-	// Validate type-specific evidence
-	return se.validateTypeSpecific()
+	// ✅ NEW: Pass registry to type-specific validation
+	return se.validateTypeSpecific(registry)
 }
 
 // validateTypeSpecific validates evidence based on its type
-func (se *SlashingEvidence) validateTypeSpecific() error {
+func (se *SlashingEvidence) validateTypeSpecific(registry ValidatorRegistry) error {
 	switch se.Type {
 	case EvidenceDoubleVoting:
-		return se.validateDoubleVoteEvidence()
+		return se.validateDoubleVoteEvidence(registry)
 	case EvidenceSurroundVoting:
-		return se.validateSurroundVoteEvidence()
+		return se.validateSurroundVoteEvidence(registry)
 	case EvidenceInvalidProposal:
 		return se.validateInvalidProposalEvidence()
 	case EvidenceDowntime:
@@ -250,7 +272,7 @@ func (se *SlashingEvidence) validateTypeSpecific() error {
 	}
 }
 
-func (se *SlashingEvidence) validateDoubleVoteEvidence() error {
+func (se *SlashingEvidence) validateDoubleVoteEvidence(registry ValidatorRegistry) error {
 	evidence, ok := se.Evidence.(*DoubleVoteEvidence)
 	if !ok {
 		return fmt.Errorf("invalid evidence type for double voting")
@@ -265,6 +287,8 @@ func (se *SlashingEvidence) validateDoubleVoteEvidence() error {
 		return fmt.Errorf("attestations from different validators")
 	}
 
+	validatorAddr := evidence.Attestation1.ValidatorAddress
+
 	// Must be for same slot
 	if evidence.Attestation1.Slot != evidence.Attestation2.Slot {
 		return fmt.Errorf("attestations for different slots")
@@ -275,10 +299,36 @@ func (se *SlashingEvidence) validateDoubleVoteEvidence() error {
 		return fmt.Errorf("attestations for same block (not double voting)")
 	}
 
+	// ✅ H-01 FIX: Cryptographic verification
+	if registry == nil {
+		return fmt.Errorf("validator registry required for signature verification")
+	}
+
+	validator, err := registry.GetValidator(validatorAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get validator %s: %v", validatorAddr, err)
+	}
+
+	if validator == nil {
+		return fmt.Errorf("validator %s not found", validatorAddr)
+	}
+
+	// Verify signature on attestation 1
+	att1Hash := se.hashAttestation(evidence.Attestation1)
+	if !se.verifySignature(validator.Pubkey, att1Hash, evidence.Attestation1.Signature) {
+		return fmt.Errorf("invalid signature on attestation 1")
+	}
+
+	// Verify signature on attestation 2
+	att2Hash := se.hashAttestation(evidence.Attestation2)
+	if !se.verifySignature(validator.Pubkey, att2Hash, evidence.Attestation2.Signature) {
+		return fmt.Errorf("invalid signature on attestation 2")
+	}
+
 	return nil
 }
 
-func (se *SlashingEvidence) validateSurroundVoteEvidence() error {
+func (se *SlashingEvidence) validateSurroundVoteEvidence(registry ValidatorRegistry) error {
 	evidence, ok := se.Evidence.(*SurroundVoteEvidence)
 	if !ok {
 		return fmt.Errorf("invalid evidence type for surround voting")
@@ -291,6 +341,34 @@ func (se *SlashingEvidence) validateSurroundVoteEvidence() error {
 	// Must be from same validator
 	if evidence.InnerAttestation.ValidatorAddress != evidence.OuterAttestation.ValidatorAddress {
 		return fmt.Errorf("attestations from different validators")
+	}
+
+	validatorAddr := evidence.InnerAttestation.ValidatorAddress
+
+	// ✅ H-01 FIX: Cryptographic verification
+	if registry == nil {
+		return fmt.Errorf("validator registry required for signature verification")
+	}
+
+	validator, err := registry.GetValidator(validatorAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get validator %s: %v", validatorAddr, err)
+	}
+
+	if validator == nil {
+		return fmt.Errorf("validator %s not found", validatorAddr)
+	}
+
+	// Verify signature on inner attestation
+	innerHash := se.hashAttestation(evidence.InnerAttestation)
+	if !se.verifySignature(validator.Pubkey, innerHash, evidence.InnerAttestation.Signature) {
+		return fmt.Errorf("invalid signature on inner attestation")
+	}
+
+	// Verify signature on outer attestation
+	outerHash := se.hashAttestation(evidence.OuterAttestation)
+	if !se.verifySignature(validator.Pubkey, outerHash, evidence.OuterAttestation.Signature) {
+		return fmt.Errorf("invalid signature on outer attestation")
 	}
 
 	return nil

@@ -84,7 +84,7 @@ func (et *EvidenceTracker) cleanup() {
 // handleSlashingEvidence handles detected slashing evidence
 func (ce *ConsensusEngine) handleSlashingEvidence(evidence *SlashingEvidence) error {
 	// 1. Validate evidence structure
-	if err := evidence.Validate(); err != nil {
+	if err := evidence.Validate(ce.worldState); err != nil {
 		return fmt.Errorf("invalid slashing evidence: %v", err)
 	}
 
@@ -304,7 +304,7 @@ func (ce *ConsensusEngine) processReceivedSlashingEvidence(evidence *SlashingEvi
 	}
 
 	// Validate the evidence
-	if err := evidence.Validate(); err != nil {
+	if err := evidence.Validate(ce.worldState); err != nil {
 		return fmt.Errorf("invalid evidence: %v", err)
 	}
 
