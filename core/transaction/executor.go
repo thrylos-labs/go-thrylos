@@ -113,10 +113,7 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 	return receipt, nil
 }
 
-// core/transaction/executor.go
-
-// core/transaction/executor.go
-
+// ✅ FIXED: Reentrancy-protected executeEVMCall function
 func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, error) {
 	// 1. 🛡️ SECURITY FIX (H-05): Check Chain ID
 	if tx.ChainId != e.config.Network.ChainID {
@@ -160,7 +157,7 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce for execution: %v", err)
 	}
-	// (Optional) Enforce strict nonce ordering for Mainnet
+	// Enforce strict nonce ordering
 	if tx.Nonce != nonce {
 		return nil, fmt.Errorf("nonce mismatch: expected %d, got %d", nonce, tx.Nonce)
 	}
@@ -177,7 +174,19 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 		return nil, fmt.Errorf("insufficient funds for gas + value")
 	}
 
-	// 6. Execute
+	// ✅ SECURITY FIX (C-03): UPDATE STATE BEFORE EXTERNAL CALL
+	// This prevents reentrancy attacks by ensuring:
+	// 1. Nonce is incremented immediately (blocks duplicate transactions)
+	// 2. Max gas + value is deducted upfront (prevents double-spending)
+
+	// Deduct max gas + value immediately
+	newBalance := new(big.Int).Sub(balance, totalReq)
+	e.worldState.UpdateBalance(tx.From, newBalance)
+
+	// Increment nonce immediately (prevents reentrancy)
+	e.worldState.SetNonce(tx.From, nonce+1)
+
+	// 6. NOW Execute EVM Call (safe - state already updated)
 	returnData, gasUsed, err := e.evmExecutor.ExecuteCall(
 		caller,
 		contract,
@@ -187,21 +196,47 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 		nonce,
 	)
 
-	if err != nil {
-		return nil, fmt.Errorf("EVM execution failed: %v", err)
-	}
-
-	// 7. Deduct Actual Gas Cost
+	// 7. Calculate actual gas cost
 	gasUsedBig := new(big.Int).SetUint64(gasUsed)
 	actualGasCost := new(big.Int).Mul(gasUsedBig, gasPrice)
 
-	newBalance := new(big.Int).Sub(balance, actualGasCost)
-	e.worldState.UpdateBalance(tx.From, newBalance)
+	// 8. Refund unused gas
+	// We deducted maxGasCost, but only used actualGasCost
+	// So refund the difference
+	gasRefund := new(big.Int).Sub(maxGasCost, actualGasCost)
 
-	// Increment nonce
-	e.worldState.SetNonce(tx.From, nonce+1)
+	if gasRefund.Sign() > 0 {
+		// Get current balance and add refund
+		currentBalance, err := e.worldState.GetBalance(tx.From)
+		if err != nil {
+			log.Printf("⚠️ Warning: failed to get balance for gas refund: %v", err)
+		} else {
+			refundedBalance := new(big.Int).Add(currentBalance, gasRefund)
+			e.worldState.UpdateBalance(tx.From, refundedBalance)
+		}
+	}
 
-	// ✅ FIX: Use 'returnData' in the log so the compiler is happy
+	// 9. Handle execution failure
+	if err != nil {
+		// On failure, refund the VALUE portion (but gas was consumed)
+		// Note: Nonce stays incremented (failed txs still consume nonce)
+		currentBalance, balErr := e.worldState.GetBalance(tx.From)
+		if balErr != nil {
+			log.Printf("⚠️ Warning: failed to get balance for value refund: %v", balErr)
+		} else {
+			refundedBalance := new(big.Int).Add(currentBalance, value)
+			e.worldState.UpdateBalance(tx.From, refundedBalance)
+		}
+
+		return &ExecutionReceipt{
+			TxHash:  tx.Hash,
+			Status:  0, // Failed
+			GasUsed: int64(gasUsed),
+			Error:   err.Error(),
+		}, fmt.Errorf("EVM execution failed: %v", err)
+	}
+
+	// ✅ Success
 	log.Printf("✅ EVM call executed: gas used %d, return data len: %d", gasUsed, len(returnData))
 
 	return &ExecutionReceipt{
