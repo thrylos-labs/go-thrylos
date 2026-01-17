@@ -2,6 +2,7 @@ package evm
 
 import (
 	"crypto/rand"
+	"math"
 	"math/big"
 	"testing"
 
@@ -42,6 +43,61 @@ func (m *MockStateReader) GetContractCode(address string) ([]byte, error) {
 
 func (m *MockStateReader) GetContractStorage(address, key string) ([]byte, error) {
 	return make([]byte, 32), nil
+}
+
+func TestRevmExecutor_InputValidation(t *testing.T) {
+	cfg := &config.Config{Network: config.NetworkConfig{ChainID: "1"}}
+	executor, err := NewRevmExecutor(cfg, &MockStateReader{})
+	assert.NoError(t, err)
+	defer executor.Close()
+
+	caller := common.HexToAddress("0x1234")
+	contract := common.HexToAddress("0x5678")
+
+	t.Run("Rejects_Excessive_Gas", func(t *testing.T) {
+		_, _, err := executor.ExecuteCall(
+			caller,
+			contract,
+			[]byte{},
+			uint64(math.MaxUint64), // Too much gas
+			big.NewInt(0),
+			0,
+		)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "Gas limit exceeds maximum")
+	})
+
+	t.Run("Rejects_Large_Calldata", func(t *testing.T) {
+		// Try to send 10MB calldata
+		hugeData := make([]byte, 10*1024*1024)
+
+		_, _, err := executor.ExecuteCall(
+			caller,
+			contract,
+			hugeData,
+			1000000,
+			big.NewInt(0),
+			0,
+		)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "Calldata size")
+		assert.Contains(t, err.Error(), "exceeds maximum")
+	})
+
+	t.Run("Rejects_Large_Bytecode", func(t *testing.T) {
+		// Try to deploy 1MB contract
+		hugeBytecode := make([]byte, 1*1024*1024)
+
+		_, _, err := executor.DeployContract(
+			caller,
+			hugeBytecode,
+			1000000,
+			big.NewInt(0),
+		)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "Bytecode size")
+		assert.Contains(t, err.Error(), "exceeds maximum")
+	})
 }
 
 // ✅ NEW TEST: Verify nonce validation doesn't panic

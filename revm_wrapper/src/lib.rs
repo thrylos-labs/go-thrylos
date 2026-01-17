@@ -2,6 +2,26 @@
 // Ultra-fast EVM implementation using revm (Rust)
 // 5-10x faster than go-ethereum
 
+const MAX_GAS_LIMIT: u64 = 30_000_000;           // 30M gas (Ethereum block limit)
+const MAX_CALLDATA_SIZE: usize = 1_048_576;      // 1 MB max calldata
+const MAX_BYTECODE_SIZE: usize = 24_576;         // 24 KB (EIP-170 limit)
+const MIN_POINTER_ALIGNMENT: usize = 8;          // 64-bit alignment
+
+// Helper function for creating error results
+fn create_error_result(msg: &str) -> CExecutionResult {
+    CExecutionResult {
+        success: false,
+        gas_used: 0,
+        return_data: CByteSlice { 
+            data: ptr::null(), 
+            len: 0 
+        },
+        error_message: CString::new(msg)
+            .unwrap_or_else(|_| CString::new("Validation error").unwrap())
+            .into_raw(),
+    }
+}
+
 use revm::{
     db::CacheDB,
     primitives::{
@@ -33,7 +53,8 @@ pub struct CU256 {
 }
 
 #[repr(C)]
-pub struct CByteSlice { // RENAMED from CBytes
+#[derive(Clone, Copy)]  // ✅ ADD THIS LINE
+pub struct CByteSlice {
     data: *const u8,
     len: usize,
 }
@@ -44,6 +65,61 @@ pub struct CExecutionResult {
     gas_used: u64,
     return_data: CByteSlice, // Updated
     error_message: *const c_char,
+}
+
+
+// ============================================================================
+// Input Validation Helpers (C-02 Fix)
+// ============================================================================
+
+/// Validate executor pointer for safety
+fn validate_executor(executor: *mut EVMExecutor) -> Result<(), &'static str> {
+    if executor.is_null() {
+        return Err("Null executor pointer");
+    }
+    
+    // Check pointer alignment
+    if (executor as usize) % MIN_POINTER_ALIGNMENT != 0 {
+        return Err("Misaligned executor pointer");
+    }
+    
+    Ok(())
+}
+
+/// Validate gas limit is within safe bounds
+fn validate_gas_limit(gas_limit: u64) -> Result<(), &'static str> {
+    if gas_limit == 0 {
+        return Err("Gas limit cannot be zero");
+    }
+    
+    if gas_limit > MAX_GAS_LIMIT {
+        return Err("Gas limit exceeds maximum (30M)");
+    }
+    
+    Ok(())
+}
+
+/// Validate calldata/bytecode size and pointer
+fn validate_data(data: CByteSlice, max_size: usize, data_type: &str) -> Result<(), String> {
+    // If length is 0, pointer can be null
+    if data.len == 0 {
+        return Ok(());
+    }
+    
+    // If length > 0, pointer must be valid
+    if data.data.is_null() {
+        return Err(format!("{} pointer is null but length is {}", data_type, data.len));
+    }
+    
+    // Check size limit
+    if data.len > max_size {
+        return Err(format!(
+            "{} size {} exceeds maximum {}",
+            data_type, data.len, max_size
+        ));
+    }
+    
+    Ok(())
 }
 
 // ============================================================================
@@ -347,7 +423,7 @@ pub extern "C" fn revm_free_result(result: CExecutionResult) {
     }
 }
 
-#[no_mangle]  // ⚠️ ADD THIS LINE!
+#[no_mangle]
 pub extern "C" fn revm_execute_call(
     executor: *mut EVMExecutor,
     caller: CAddress,
@@ -357,43 +433,43 @@ pub extern "C" fn revm_execute_call(
     value: CU256,
     nonce: u64,
 ) -> CExecutionResult {
-    // Step 1: Validate executor pointer
-    if executor.is_null() {
-        return CExecutionResult {
-            success: false,
-            gas_used: 0,
-            return_data: CByteSlice { data: ptr::null(), len: 0 },
-            error_message: CString::new("Critical: Null executor pointer")
-                .unwrap_or_else(|_| CString::new("Error creating error message").unwrap())
-                .into_raw(),
-        };
+    // ✅ SECURITY FIX C-02: Validate ALL inputs before processing
+    
+    // 1. Validate executor pointer
+    if let Err(msg) = validate_executor(executor) {
+        return create_error_result(msg);
     }
 
-    // ✅ FIX: Validate nonce BEFORE catch_unwind and return error gracefully
-   // ✅ Add this BEFORE catch_unwind:
-let state_nonce = unsafe {
-    let executor_ref = &*executor;
-    (executor_ref.db.get_nonce_fn)(caller)
-};
+    // 2. Validate gas limit
+    if let Err(msg) = validate_gas_limit(gas_limit) {
+        return create_error_result(msg);
+    }
 
-if nonce != state_nonce {
-    return CExecutionResult {
-        success: false,
-        gas_used: 0,
-        return_data: CByteSlice { data: ptr::null(), len: 0 },
-        error_message: CString::new(format!(
+    // 3. Validate calldata size and pointer
+    if let Err(msg) = validate_data(data, MAX_CALLDATA_SIZE, "Calldata") {
+        return create_error_result(&msg);
+    }
+
+    // 4. Validate nonce (from C-01 fix)
+    let state_nonce = unsafe {
+        let executor_ref = &*executor;
+        (executor_ref.db.get_nonce_fn)(caller)
+    };
+
+    if nonce != state_nonce {
+        return create_error_result(&format!(
             "Nonce mismatch: expected {}, got {}",
             state_nonce, nonce
-        )).unwrap().into_raw(),
-    };
-}
+        ));
+    }
 
-    // Step 2: Execute the call (nonce already validated)
+    // 5. Now safe to execute
     let result = catch_unwind(AssertUnwindSafe(|| {
         let executor = unsafe { &mut *executor };
         let caller_addr = Address::from_slice(&caller.bytes);
         let to_addr = Address::from_slice(&to.bytes);
         
+        // Data is validated, safe to copy
         let data_bytes = if data.len > 0 {
             unsafe { Bytes::copy_from_slice(slice::from_raw_parts(data.data, data.len)) }
         } else {
@@ -402,11 +478,9 @@ if nonce != state_nonce {
         
         let value_u256 = U256::from_be_bytes(value.bytes);
 
-        // Nonce is already validated, safe to proceed
         executor.execute_call(caller_addr, to_addr, data_bytes, gas_limit, value_u256)
     }));
 
-    // Step 3: Handle any panics from execution (not from nonce validation)
     match result {
         Ok(exec_result) => exec_result,
         Err(e) => {
@@ -418,12 +492,7 @@ if nonce != state_nonce {
                 "Critical: Rust panic in execute_call".to_string()
             };
 
-            CExecutionResult {
-                success: false,
-                gas_used: 0,
-                return_data: CByteSlice { data: ptr::null(), len: 0 },
-                error_message: CString::new(msg).unwrap().into_raw(),
-            }
+            create_error_result(&msg)
         }
     }
 }
@@ -436,19 +505,29 @@ pub extern "C" fn revm_deploy_contract(
     gas_limit: u64,
     value: CU256,
 ) -> CExecutionResult {
-    if executor.is_null() {
-        return CExecutionResult {
-            success: false,
-            gas_used: 0,
-            return_data: CByteSlice { data: ptr::null(), len: 0 },
-            error_message: CString::new("Critical: Null executor pointer").unwrap().into_raw(),
-        };
+    // ✅ SECURITY FIX C-02: Validate ALL inputs
+    
+    // 1. Validate executor pointer
+    if let Err(msg) = validate_executor(executor) {
+        return create_error_result(msg);
     }
 
+    // 2. Validate gas limit
+    if let Err(msg) = validate_gas_limit(gas_limit) {
+        return create_error_result(msg);
+    }
+
+    // 3. Validate bytecode size (24KB EIP-170 limit)
+    if let Err(msg) = validate_data(bytecode, MAX_BYTECODE_SIZE, "Bytecode") {
+        return create_error_result(&msg);
+    }
+
+    // 4. Now safe to execute
     let result = catch_unwind(AssertUnwindSafe(|| {
         let executor = unsafe { &mut *executor };
         let deployer_addr = Address::from_slice(&deployer.bytes);
         
+        // Bytecode is validated, safe to copy
         let bytecode_bytes = if bytecode.len > 0 {
             unsafe { Bytes::copy_from_slice(slice::from_raw_parts(bytecode.data, bytecode.len)) }
         } else {
@@ -461,12 +540,7 @@ pub extern "C" fn revm_deploy_contract(
 
     match result {
         Ok(exec_result) => exec_result,
-        Err(_) => CExecutionResult {
-            success: false,
-            gas_used: 0,
-            return_data: CByteSlice { data: ptr::null(), len: 0 },
-            error_message: CString::new("Critical: Rust panic in deploy_contract").unwrap().into_raw(),
-        }
+        Err(_) => create_error_result("Critical: Rust panic in deploy_contract")
     }
 }
 
@@ -535,7 +609,21 @@ pub extern "C" fn revm_estimate_gas(
     data: CByteSlice,
     value: CU256,
 ) -> u64 {
-    // 🛡️ SECURITY FIX: Wrap everything in catch_unwind
+    // ✅ SECURITY FIX C-02: Validate inputs before estimation
+    
+    // 1. Validate executor
+    if validate_executor(executor).is_err() {
+        eprintln!("⚠️  Gas estimation failed: invalid executor");
+        return u64::MAX;
+    }
+
+    // 2. Validate calldata
+    if let Err(msg) = validate_data(data, MAX_CALLDATA_SIZE, "Calldata") {
+        eprintln!("⚠️  Gas estimation failed: {}", msg);
+        return u64::MAX;
+    }
+
+    // 3. Proceed with estimation
     let result = catch_unwind(AssertUnwindSafe(|| {
         let executor = unsafe { &mut *executor };
 
@@ -549,9 +637,8 @@ pub extern "C" fn revm_estimate_gas(
         };
         
         let value_u256 = U256::from_be_bytes(value.bytes);
-        let high_gas = 30_000_000u64;
+        let high_gas = MAX_GAS_LIMIT; // Use constant instead of hardcoded value
 
-        // Execute the call
         let exec_result = executor.execute_call(
             caller_addr,
             to_addr,
@@ -560,13 +647,9 @@ pub extern "C" fn revm_estimate_gas(
             value_u256,
         );
 
-        // 1. Extract the gas used (this is what we want)
         let gas_used = exec_result.gas_used;
 
-        // 2. MEMORY CLEANUP (CRITICAL)
-        // executor.execute_call allocates memory for return_data and error_message.
-        // Since we are NOT sending this struct to Go, we MUST free it here, 
-        // otherwise the node will leak RAM on every gas estimation.
+        // Memory cleanup (existing code)
         if !exec_result.return_data.data.is_null() {
             unsafe { 
                 let _ = Vec::from_raw_parts(
@@ -582,14 +665,14 @@ pub extern "C" fn revm_estimate_gas(
             }
         }
 
-        gas_used // Return the u64
+        gas_used
     }));
 
     match result {
         Ok(gas_estimate) => gas_estimate,
         Err(_) => {
-            eprintln!("🚨 CRITICAL: Rust panic caught in revm_estimate_gas! Preventing node crash.");
-            u64::MAX // Sentinel value for Go to handle
+            eprintln!("🚨 CRITICAL: Rust panic caught in revm_estimate_gas!");
+            u64::MAX
         }
     }
 }
