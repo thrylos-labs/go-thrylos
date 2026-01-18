@@ -44,21 +44,20 @@ import (
 )
 
 // BadgerStorage implements blockchain storage using BadgerDB v3
+// BadgerStorage implements blockchain storage using BadgerDB v3
 type BadgerStorage struct {
 	db      *badger.DB
-	dataDir string // Track which directory this instance uses
+	dataDir string
 	mu      sync.RWMutex
 }
 
 // NewBadgerStorage creates a new BadgerDB v3 storage instance
-
 func NewBadgerStorage(dataDir string) (*BadgerStorage, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory %s: %w", dataDir, err)
 	}
 
 	opts := badger.DefaultOptions(dataDir)
-	// You can keep or tweak logging as you like:
 	opts = opts.WithLogger(nil)
 
 	db, err := badger.Open(opts)
@@ -68,7 +67,7 @@ func NewBadgerStorage(dataDir string) (*BadgerStorage, error) {
 
 	return &BadgerStorage{
 		db:      db,
-		dataDir: dataDir, // 🔴 was `directory: dataDir`
+		dataDir: dataDir,
 	}, nil
 }
 
@@ -162,7 +161,7 @@ func (bs *BadgerStorage) Batch(operations []BatchOperation) error {
 	})
 }
 
-// Update executes a function within a write transaction
+// Update executes a function within a write transaction (Wrapper)
 func (bs *BadgerStorage) Update(fn func(txn Transaction) error) error {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
@@ -170,6 +169,24 @@ func (bs *BadgerStorage) Update(fn func(txn Transaction) error) error {
 	return bs.db.Update(func(txn *badger.Txn) error {
 		return fn(&BadgerTransaction{txn: txn})
 	})
+}
+
+// [FIX] AtomicUpdate executes a function with a raw Badger transaction.
+// This ensures that complex multi-step operations (like state transitions)
+// are fully atomic: either all changes persist, or none do.
+func (bs *BadgerStorage) AtomicUpdate(fn func(*badger.Txn) error) error {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+
+	// Explicit transaction management for auditing/safety
+	txn := bs.db.NewTransaction(true)
+	defer txn.Discard() // Safety catch: always roll back if Commit() isn't called
+
+	if err := fn(txn); err != nil {
+		return err // Logic failed; Discard() handles the rollback
+	}
+
+	return txn.Commit()
 }
 
 // View executes a function within a read transaction
@@ -194,8 +211,6 @@ func (bs *BadgerStorage) Iterator(prefix []byte) Iterator {
 func (bs *BadgerStorage) RunGC(discardRatio float64) error {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
-
-	// BadgerDB v3 uses RunValueLogGC
 	return bs.db.RunValueLogGC(discardRatio)
 }
 
@@ -206,8 +221,6 @@ func (bs *BadgerStorage) Size() (int64, error) {
 }
 
 // GetDB returns the underlying badger.DB instance
-// This is useful for components that need direct access to the database
-// such as the slashing manager for persistence
 func (bs *BadgerStorage) GetDB() *badger.DB {
 	return bs.db
 }
@@ -216,24 +229,19 @@ func (bs *BadgerStorage) GetDB() *badger.DB {
 func (bs *BadgerStorage) Flatten(workers int) error {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
-
 	return bs.db.Flatten(workers)
 }
 
 // Backup creates a backup of the database to a writer
-// [FIX L-03] Implemented online backup functionality
 func (bs *BadgerStorage) Backup(w interface{}, since uint64) (uint64, error) {
 	bs.mu.RLock()
 	defer bs.mu.RUnlock()
 
-	// Ensure the interface passed is actually a writer
 	writer, ok := w.(io.Writer)
 	if !ok {
 		return 0, fmt.Errorf("invalid writer: must implement io.Writer")
 	}
 
-	// Delegate to native BadgerDB backup
-	// This is a non-blocking online backup (safe to run while node is active)
 	return bs.db.Backup(writer, since)
 }
 
@@ -294,12 +302,11 @@ const (
 	BatchDelete
 )
 
-// Custom errors
 var (
 	ErrKeyNotFound = fmt.Errorf("key not found")
 )
 
-// Iterator interface for database iteration
+// Iterator interface
 type Iterator interface {
 	Next() bool
 	Key() []byte
@@ -308,7 +315,7 @@ type Iterator interface {
 	Close()
 }
 
-// BadgerIterator implements Iterator for BadgerDB v3
+// BadgerIterator implements Iterator
 type BadgerIterator struct {
 	db     *badger.DB
 	prefix []byte
@@ -326,7 +333,7 @@ func (bi *BadgerIterator) Next() bool {
 		bi.txn = bi.db.NewTransaction(false)
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchSize = 100
-		opts.PrefetchValues = false // Only prefetch keys for better performance
+		opts.PrefetchValues = false
 		bi.iter = bi.txn.NewIterator(opts)
 		bi.iter.Seek(bi.prefix)
 	} else {
@@ -352,7 +359,6 @@ func (bi *BadgerIterator) Value() []byte {
 }
 
 func (bi *BadgerIterator) Error() error {
-	// BadgerDB iterator doesn't return errors during iteration
 	return nil
 }
 
@@ -368,7 +374,7 @@ func (bi *BadgerIterator) Close() {
 	}
 }
 
-// Storage interface that BadgerStorage implements
+// Storage interface
 type Storage interface {
 	Get(key []byte) ([]byte, error)
 	Set(key, value []byte) error
@@ -376,6 +382,7 @@ type Storage interface {
 	Has(key []byte) (bool, error)
 	Batch(operations []BatchOperation) error
 	Update(fn func(txn Transaction) error) error
+	AtomicUpdate(fn func(*badger.Txn) error) error // Added to interface
 	View(fn func(txn Transaction) error) error
 	Iterator(prefix []byte) Iterator
 	Close() error
@@ -384,7 +391,7 @@ type Storage interface {
 	Flatten(workers int) error
 }
 
-// Key prefixes for different data types
+// Key prefixes
 const (
 	BlockPrefix     = "blk:"
 	AccountPrefix   = "acc:"
