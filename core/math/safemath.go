@@ -1,6 +1,7 @@
 // core/math/safemath.go
 // Safe arithmetic operations to prevent integer overflow/underflow vulnerabilities
-// CRITICAL: All balance and token operations MUST use these functions
+// CRITICAL: All balance, token, and GAS operations MUST use these functions
+// SECURITY FIX: Added uint64 functions for gas calculations (CRITICAL-01)
 
 package math
 
@@ -9,6 +10,140 @@ import (
 	"math"
 	"math/big"
 )
+
+// ============================================================================
+// UINT64 SAFE OPERATIONS (FOR GAS CALCULATIONS)
+// ============================================================================
+// These are critical for preventing gas calculation overflows that could
+// bypass gas limits or cause consensus failures
+
+// Add64 adds two uint64 values with overflow protection
+// Returns error if operation would overflow
+// USE THIS FOR: gas_used + base_gas, totalGas calculations
+func Add64(a, b uint64) (uint64, error) {
+	// Check if a + b would overflow
+	// Overflow occurs when: a + b > MaxUint64
+	// Rearranged: a > MaxUint64 - b
+	if a > math.MaxUint64-b {
+		return 0, fmt.Errorf("uint64 overflow: %d + %d exceeds MaxUint64", a, b)
+	}
+	return a + b, nil
+}
+
+// Mul64 multiplies two uint64 values with overflow protection
+// Returns error if operation would overflow
+// USE THIS FOR: gasLimit * gasPrice, gas * priorityFee calculations
+func Mul64(a, b uint64) (uint64, error) {
+	// Special cases
+	if a == 0 || b == 0 {
+		return 0, nil
+	}
+
+	// Check if result would overflow
+	// Overflow if: a * b > MaxUint64
+	// Check by: result / b != a (if overflow occurred, division won't match)
+	result := a * b
+	if result/b != a {
+		return 0, fmt.Errorf("uint64 overflow: %d * %d exceeds MaxUint64", a, b)
+	}
+
+	return result, nil
+}
+
+// Sub64 subtracts two uint64 values with underflow protection
+// Returns error if b > a (would underflow)
+// USE THIS FOR: gas_limit - gas_used calculations
+func Sub64(a, b uint64) (uint64, error) {
+	if b > a {
+		return 0, fmt.Errorf("uint64 underflow: %d - %d would be negative", a, b)
+	}
+	return a - b, nil
+}
+
+// Div64 divides two uint64 values with protection
+// Returns error if dividing by zero
+func Div64(a, b uint64) (uint64, error) {
+	if b == 0 {
+		return 0, fmt.Errorf("division by zero")
+	}
+	return a / b, nil
+}
+
+// AddMany64 adds multiple uint64 values with overflow protection
+// Returns error if any intermediate operation would overflow
+// USE THIS FOR: totalGas = gas1 + gas2 + gas3 + ...
+func AddMany64(values ...uint64) (uint64, error) {
+	if len(values) == 0 {
+		return 0, nil
+	}
+
+	result := values[0]
+	for i := 1; i < len(values); i++ {
+		newResult, err := Add64(result, values[i])
+		if err != nil {
+			return 0, fmt.Errorf("overflow at position %d: %v", i, err)
+		}
+		result = newResult
+	}
+	return result, nil
+}
+
+// MulAdd64 performs (a * b) + c with overflow protection
+// Useful for: (gasLimit * gasPrice) + baseFee calculations
+func MulAdd64(a, b, c uint64) (uint64, error) {
+	// First multiply
+	product, err := Mul64(a, b)
+	if err != nil {
+		return 0, fmt.Errorf("multiplication overflow: %v", err)
+	}
+
+	// Then add
+	result, err := Add64(product, c)
+	if err != nil {
+		return 0, fmt.Errorf("addition overflow after multiplication: %v", err)
+	}
+
+	return result, nil
+}
+
+// ============================================================================
+// CONVENIENCE WRAPPERS (USE WITH CAUTION)
+// ============================================================================
+// These panic on overflow. Only use when overflow is truly impossible.
+
+// MustAdd64 is a convenience wrapper that panics on overflow
+// WARNING: Only use when overflow is provably impossible
+func MustAdd64(a, b uint64) uint64 {
+	result, err := Add64(a, b)
+	if err != nil {
+		panic(fmt.Sprintf("MustAdd64 failed: %v", err))
+	}
+	return result
+}
+
+// MustMul64 is a convenience wrapper that panics on overflow
+// WARNING: Only use when overflow is provably impossible
+func MustMul64(a, b uint64) uint64 {
+	result, err := Mul64(a, b)
+	if err != nil {
+		panic(fmt.Sprintf("MustMul64 failed: %v", err))
+	}
+	return result
+}
+
+// MustSub64 is a convenience wrapper that panics on underflow
+// WARNING: Only use when underflow is provably impossible
+func MustSub64(a, b uint64) uint64 {
+	result, err := Sub64(a, b)
+	if err != nil {
+		panic(fmt.Sprintf("MustSub64 failed: %v", err))
+	}
+	return result
+}
+
+// ============================================================================
+// INT64 SAFE OPERATIONS (EXISTING - FOR BALANCES/STAKES)
+// ============================================================================
 
 // SafeAdd adds two int64 values with overflow protection
 // Returns error if operation would overflow or underflow
@@ -135,7 +270,9 @@ func MustSafeSub(a, b int64) int64 {
 	return result
 }
 
-// core/math/math.go
+// ============================================================================
+// BIG.INT SAFE OPERATIONS (FOR LARGE VALUES)
+// ============================================================================
 
 // SafePercentageBig calculates a percentage of a BigInt amount.
 // amount: The total amount (*big.Int)
@@ -160,4 +297,31 @@ func SafePercentageBig(amount *big.Int, percent int64) (*big.Int, error) {
 	result := new(big.Int).Div(product, divisor)
 
 	return result, nil
+}
+
+// ============================================================================
+// GAS ESTIMATION HELPERS
+// ============================================================================
+
+// EstimateTotalGas calculates total gas with overflow protection
+// Useful for validating blocks or transaction pools
+func EstimateTotalGas(gasValues []uint64) (uint64, error) {
+	return AddMany64(gasValues...)
+}
+
+// CalculateGasCost calculates gas * price with overflow protection
+// Returns gas cost or error if overflow
+func CalculateGasCost(gasUsed, gasPrice uint64) (uint64, error) {
+	return Mul64(gasUsed, gasPrice)
+}
+
+// ValidateGasLimit checks if gas limit is within acceptable range
+func ValidateGasLimit(gasLimit uint64, maxAllowed uint64) error {
+	if gasLimit > maxAllowed {
+		return fmt.Errorf("gas limit %d exceeds maximum allowed %d", gasLimit, maxAllowed)
+	}
+	if gasLimit == 0 {
+		return fmt.Errorf("gas limit cannot be zero")
+	}
+	return nil
 }

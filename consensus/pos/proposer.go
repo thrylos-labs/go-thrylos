@@ -5,12 +5,14 @@ package pos
 
 import (
 	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
 	block2 "github.com/thrylos-labs/go-thrylos/core/block"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	coremath "github.com/thrylos-labs/go-thrylos/core/math" // Safe BigInt math
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -113,7 +115,10 @@ func (bp *BlockProposer) ProposeBlock(slot uint64, epoch uint64) (*BlockConstruc
 
 	// Calculate metrics
 	constructionTime := time.Since(startTime)
-	totalGasUsed := bp.calculateTotalGas(selectedTxs)
+	totalGasUsed, err := bp.calculateTotalGas(selectedTxs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate total gas: %v", err)
+	}
 	totalFees := bp.calculateTotalFees(selectedTxs)
 	optimizationScore := bp.calculateOptimizationScore(selectedTxs, constructionTime)
 
@@ -394,7 +399,10 @@ func (bp *BlockProposer) constructBlock(transactions []*core.Transaction, slot u
 		blockIndex = 0
 	}
 
-	totalGasUsed := bp.calculateTotalGas(transactions)
+	totalGasUsed, err := bp.calculateTotalGas(transactions)
+	if err != nil {
+		return nil, err // or return nil, err depending on function signature
+	}
 	// totalFees is a string (BigInt)
 	totalFees := bp.calculateTotalFees(transactions)
 	merkleRoot := bp.calculateMerkleRoot(transactions)
@@ -447,12 +455,16 @@ func (bp *BlockProposer) createEmptyBlock(slot uint64, epoch uint64, startTime t
 }
 
 // calculateTotalGas calculates total gas used by transactions
-func (bp *BlockProposer) calculateTotalGas(transactions []*core.Transaction) int64 {
-	total := int64(0)
-	for _, tx := range transactions {
-		total += tx.Gas
+func (bp *BlockProposer) calculateTotalGas(transactions []*core.Transaction) (int64, error) {
+	totalGasUsed := int64(0)
+	for i, tx := range transactions {
+		newTotal, err := math.SafeAdd(totalGasUsed, tx.Gas)
+		if err != nil {
+			return 0, fmt.Errorf("gas overflow at transaction %d: %v", i, err)
+		}
+		totalGasUsed = newTotal
 	}
-	return total
+	return totalGasUsed, nil
 }
 
 // calculateTotalFees calculates total fees from transactions (GasPrice * Gas)
@@ -481,7 +493,14 @@ func (bp *BlockProposer) calculateOptimizationScore(transactions []*core.Transac
 		return 1.0
 	}
 
-	gasUtilization := float64(bp.calculateTotalGas(transactions)) / float64(bp.maxBlockSize)
+	// Get total gas with error handling
+	totalGas, err := bp.calculateTotalGas(transactions)
+	if err != nil {
+		log.Printf("Error calculating total gas: %v", err)
+		return 0.0
+	}
+
+	gasUtilization := float64(totalGas) / float64(bp.maxBlockSize)
 	txUtilization := float64(len(transactions)) / float64(bp.maxTransactions)
 
 	timeScore := 1.0
@@ -615,7 +634,10 @@ func (bp *BlockProposer) ProposeBlockWithVRF(
 
 	// Calculate metrics
 	constructionTime := time.Since(startTime)
-	totalGasUsed := bp.calculateTotalGas(selectedTxs)
+	totalGasUsed, err := bp.calculateTotalGas(selectedTxs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate total gas: %v", err)
+	}
 	totalFees := bp.calculateTotalFees(selectedTxs)
 	optimizationScore := bp.calculateOptimizationScore(selectedTxs, constructionTime)
 
@@ -655,7 +677,10 @@ func (bp *BlockProposer) constructBlockWithVRF(
 		blockIndex = 0
 	}
 
-	totalGasUsed := bp.calculateTotalGas(transactions)
+	totalGasUsed, err := bp.calculateTotalGas(transactions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate total gas: %v", err)
+	}
 	totalFees := bp.calculateTotalFees(transactions)
 	merkleRoot := bp.calculateMerkleRoot(transactions)
 
