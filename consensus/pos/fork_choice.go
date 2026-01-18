@@ -77,6 +77,8 @@ func NewForkChoiceWithConfig(config *config.Config, worldState WorldStateReader,
 		totalActiveStake:      "0",
 		totalActiveStakeTime:  time.Time{},
 		metrics:               &ForkChoiceMetrics{},
+		latestMessages:        make(map[uint64]map[string]string),
+		children:              make(map[string][]string),
 	}
 
 	// Start background cleanup if configured
@@ -124,16 +126,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 		}
 	}
 
-	// Check if this validator has already attested to this block
-	if fc.validatorAttestations[blockHash] == nil {
-		fc.validatorAttestations[blockHash] = make(map[string]bool)
-	}
-
-	if fc.validatorAttestations[blockHash][validatorAddr] {
-		return // Duplicate
-	}
-
-	// Get validator info
+	// Get validator info early
 	validator, err := fc.worldState.GetValidator(validatorAddr)
 	if err != nil || validator == nil {
 		fmt.Printf("⚠️ Failed to get validator %s for attestation: %v\n", validatorAddr, err)
@@ -147,10 +140,44 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 
 	validatorStake := validator.Stake // String (BigInt)
 
-	// Mark validator as having attested
+	// 2. Track latest messages and detect equivocations
+	if fc.latestMessages[epoch] == nil {
+		fc.latestMessages[epoch] = make(map[string]string)
+	}
+
+	// Check for equivocation (validator voting for different blocks in same epoch)
+	if prevVote, exists := fc.latestMessages[epoch][validatorAddr]; exists {
+		if prevVote != blockHash {
+			fmt.Printf("⚠️ EQUIVOCATION DETECTED: validator %s voted for both %s and %s in epoch %d\n",
+				validatorAddr, prevVote[:8], blockHash[:8], epoch)
+
+			// Handle equivocation slashing
+			if fc.slashingManager != nil {
+				// Equivocation is a slashable offense - validator voting for multiple blocks
+				// You may want to add a specific slashing method for this
+				fmt.Printf("⚠️ Validator %s will be slashed for equivocation\n", validatorAddr)
+			}
+			return
+		}
+		// Same block, allow (idempotent)
+	}
+
+	// Update latest message for this validator in this epoch
+	fc.latestMessages[epoch][validatorAddr] = blockHash
+
+	// 3. Check if this validator has already attested to this block
+	if fc.validatorAttestations[blockHash] == nil {
+		fc.validatorAttestations[blockHash] = make(map[string]bool)
+	}
+
+	if fc.validatorAttestations[blockHash][validatorAddr] {
+		return // Duplicate attestation for same block
+	}
+
+	// Mark validator as having attested to this block
 	fc.validatorAttestations[blockHash][validatorAddr] = true
 
-	// Check limit
+	// 4. Store attestation (with limit)
 	if fc.attestationsByBlock[blockHash] == nil {
 		fc.attestationsByBlock[blockHash] = make([]*types.Attestation, 0, fc.fcConfig.MaxAttestationsPerBlock)
 	}
@@ -163,7 +190,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 			blockHashShort, fc.fcConfig.MaxAttestationsPerBlock)
 	}
 
-	// Update block score using BigInt math
+	// 5. Update block score using BigInt math
 	currentScore := fc.blockScores[blockHash]
 	newScore := addBigIntStrings(currentScore, validatorStake)
 	fc.blockScores[blockHash] = newScore
@@ -171,7 +198,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 	// Track epoch mapping
 	fc.blockEpochMap[blockHash] = epoch
 
-	// Update epoch attestations
+	// 6. Update epoch attestations
 	if fc.epochAttestations[epoch] == nil {
 		fc.epochAttestations[epoch] = make(map[string]string)
 		fc.metrics.TotalEpochs++
@@ -180,7 +207,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 	newEpochScore := addBigIntStrings(currentEpochScore, validatorStake)
 	fc.epochAttestations[epoch][blockHash] = newEpochScore
 
-	// Check Quorum (2/3 of total stake)
+	// 7. Check Quorum (2/3 of total stake)
 	totalStakeStr := fc.getTotalActiveStake()
 	totalStakeBig := coremath.ParseBigInt(totalStakeStr)
 
@@ -262,6 +289,52 @@ func (fc *ForkChoice) GetHead() string {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 
+	// Start from justified checkpoint (or use fallback)
+	var startBlock string
+	if fc.finalizedCheckpoint != nil {
+		startBlock = fc.finalizedCheckpoint.BlockHash
+	} else if justified := fc.GetJustifiedCheckpoint(); justified != nil {
+		startBlock = justified.BlockHash
+	}
+
+	// Fallback: no justified checkpoint yet, use simple highest stake
+	if startBlock == "" {
+		return fc.getHeadByHighestStake()
+	}
+
+	// Walk down tree, choosing heaviest child (LMD GHOST)
+	currentBlock := startBlock
+	maxDepth := 1000 // Prevent infinite loops
+
+	for i := 0; i < maxDepth; i++ {
+		children := fc.children[currentBlock]
+		if len(children) == 0 {
+			return currentBlock // Leaf node - this is the head
+		}
+
+		// Find child with most stake from latest messages
+		heaviestChild := ""
+		heaviestStake := big.NewInt(0)
+
+		for _, childHash := range children {
+			childStake := fc.getSubtreeStake(childHash)
+			if childStake.Cmp(heaviestStake) > 0 {
+				heaviestStake = childStake
+				heaviestChild = childHash
+			}
+		}
+
+		if heaviestChild == "" {
+			return currentBlock
+		}
+		currentBlock = heaviestChild
+	}
+
+	return currentBlock
+}
+
+// getHeadByHighestStake is the fallback when no justified checkpoint exists
+func (fc *ForkChoice) getHeadByHighestStake() string {
 	if len(fc.blockScores) == 0 {
 		return ""
 	}
@@ -307,6 +380,42 @@ func (fc *ForkChoice) GetHead() string {
 	}
 
 	return bestBlock
+}
+
+// getSubtreeStake calculates stake supporting a subtree using latest messages
+func (fc *ForkChoice) getSubtreeStake(blockHash string) *big.Int {
+	currentEpoch := fc.getCurrentEpoch()
+	totalStake := big.NewInt(0)
+
+	// Get latest messages from current epoch
+	if latestVotes := fc.latestMessages[currentEpoch]; latestVotes != nil {
+		for validator, votedBlock := range latestVotes {
+			// Check if this validator's vote supports this block or descendants
+			if fc.isDescendant(votedBlock, blockHash) || votedBlock == blockHash {
+				validatorInfo, err := fc.worldState.GetValidator(validator)
+				if err == nil && validatorInfo != nil && validatorInfo.Active {
+					stake := coremath.ParseBigInt(validatorInfo.Stake)
+					totalStake = coremath.Add(totalStake, stake)
+				}
+			}
+		}
+	}
+
+	return totalStake
+}
+
+// OnBlockAdded tracks block relationships when adding blocks to the chain
+func (fc *ForkChoice) OnBlockAdded(block *core.Block) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	parentHash := block.Header.PrevHash
+	blockHash := block.Hash // Hash is on Block, not Header
+
+	if fc.children[parentHash] == nil {
+		fc.children[parentHash] = make([]string, 0)
+	}
+	fc.children[parentHash] = append(fc.children[parentHash], blockHash)
 }
 
 // HasQuorum checks if a specific block has achieved 2/3 quorum

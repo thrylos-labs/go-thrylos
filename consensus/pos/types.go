@@ -134,6 +134,12 @@ type ForkChoice struct {
 	epochAttestations     map[uint64]map[string]string // epoch -> blockHash -> totalStake (BigInt string)
 	blockEpochMap         map[string]uint64            // blockHash -> epoch (for cleanup)
 
+	// Track latest attestation per validator (epoch -> validator -> blockHash)
+	latestMessages map[uint64]map[string]string
+
+	// Track parent-child relationships
+	children map[string][]string // parentHash -> []childHashes
+
 	// Checkpoints for finality
 	justifiedCheckpoint *Checkpoint
 	finalizedCheckpoint *Checkpoint
