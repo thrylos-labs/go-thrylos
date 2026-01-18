@@ -84,7 +84,8 @@ func NewPool(
 	}
 }
 
-// AddTransaction adds a transaction to the pool after validation
+const MaxTransactionsPerSender = 100
+
 func (p *Pool) AddTransaction(tx *core.Transaction) error {
 	if err := p.validateTransactionForPool(tx); err != nil {
 		return fmt.Errorf("transaction validation failed: %v", err)
@@ -113,17 +114,34 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 		p.byAddress[tx.From] = senderTxs
 	}
 
+	// 🔴 PER-SENDER LIMIT: Check BEFORE any modifications
+	// Important: Check against len(senderTxs) BEFORE replace-by-fee
+	isReplacement := false
+	if existingTx, conflict := senderTxs[tx.Nonce]; conflict {
+		// This is a replacement, so don't count it toward the limit
+		isReplacement = true
+
+		// Verify replacement has higher gas price
+		if tx.GasPrice <= existingTx.GasPrice {
+			return fmt.Errorf("nonce %d already exists; replacement requires higher gas price", tx.Nonce)
+		}
+	} else {
+		// Not a replacement - check limit
+		if len(senderTxs) >= MaxTransactionsPerSender {
+			return fmt.Errorf("sender %s has reached maximum pending transactions (%d)",
+				tx.From, MaxTransactionsPerSender)
+		}
+	}
+
 	// 🔴 FIX-3: Check for nonce collision BEFORE Replace-by-Fee logic
-	// This prevents race where two concurrent requests get same nonce
 	if p.nonceReservations[tx.From][tx.Nonce] {
 		return fmt.Errorf("nonce %d is reserved for address %s (concurrent request in progress)", tx.Nonce, tx.From)
 	}
 
-	// 3. Check for Duplicate Nonce (Replace-by-Fee logic)
-	if existingTx, conflict := senderTxs[tx.Nonce]; conflict {
-		if tx.GasPrice <= existingTx.GasPrice {
-			return fmt.Errorf("nonce %d already exists; replacement requires higher gas price", tx.Nonce)
-		}
+	// 3. Handle replacement if needed
+	if isReplacement {
+		// Get the existing transaction again (we already validated it exists)
+		existingTx := senderTxs[tx.Nonce]
 		// Remove old transaction internally
 		p.removeInternal(existingTx)
 	}
@@ -133,7 +151,7 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 		return fmt.Errorf("insufficient balance for pending transactions: %v", err)
 	}
 
-	// 5. Check Capacity
+	// 5. Check Global Pool Capacity
 	if len(p.pending) >= p.maxTxs {
 		if !p.evictLowestGasPrice(tx.GasPrice) {
 			return fmt.Errorf("transaction pool is full")
