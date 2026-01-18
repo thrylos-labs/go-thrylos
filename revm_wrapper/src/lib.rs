@@ -637,8 +637,9 @@ pub extern "C" fn revm_estimate_gas(
         };
         
         let value_u256 = U256::from_be_bytes(value.bytes);
-        let high_gas = MAX_GAS_LIMIT; // Use constant instead of hardcoded value
+        let high_gas = MAX_GAS_LIMIT; 
 
+        // Execute the call
         let exec_result = executor.execute_call(
             caller_addr,
             to_addr,
@@ -647,23 +648,13 @@ pub extern "C" fn revm_estimate_gas(
             value_u256,
         );
 
+        // Capture the gas used before freeing the result
         let gas_used = exec_result.gas_used;
 
-        // Memory cleanup (existing code)
-        if !exec_result.return_data.data.is_null() {
-            unsafe { 
-                let _ = Vec::from_raw_parts(
-                    exec_result.return_data.data as *mut u8, 
-                    exec_result.return_data.len, 
-                    exec_result.return_data.len
-                ); 
-            }
-        }
-        if !exec_result.error_message.is_null() {
-            unsafe { 
-                let _ = CString::from_raw(exec_result.error_message as *mut c_char); 
-            }
-        }
+        // [FIX M-03] Use canonical cleanup function instead of manual unsafe code
+        // This ensures the pointers (return_data and error_message) are freed 
+        // using the exact same logic as they were allocated/freed elsewhere.
+        revm_free_result(exec_result);
 
         gas_used
     }));
