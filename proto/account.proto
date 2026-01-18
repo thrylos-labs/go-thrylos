@@ -65,6 +65,8 @@ message BlockHeader {
   uint64 epoch = 10;
   string total_fees = 11;
   string merkle_root = 12;
+  bytes vrf_output = 13;  // VRF randomness output
+  bytes vrf_proof = 14;   // VRF proof for verification
 }
 
 message Validator {

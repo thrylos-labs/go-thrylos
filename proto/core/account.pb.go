@@ -9,12 +9,11 @@
 package core
 
 import (
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
-
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -468,6 +467,8 @@ type BlockHeader struct {
 	Epoch         uint64                 `protobuf:"varint,10,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	TotalFees     string                 `protobuf:"bytes,11,opt,name=total_fees,json=totalFees,proto3" json:"total_fees,omitempty"`
 	MerkleRoot    string                 `protobuf:"bytes,12,opt,name=merkle_root,json=merkleRoot,proto3" json:"merkle_root,omitempty"`
+	VrfOutput     []byte                 `protobuf:"bytes,13,opt,name=vrf_output,json=vrfOutput,proto3" json:"vrf_output,omitempty"` // VRF randomness output
+	VrfProof      []byte                 `protobuf:"bytes,14,opt,name=vrf_proof,json=vrfProof,proto3" json:"vrf_proof,omitempty"`    // VRF proof for verification
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -584,6 +585,20 @@ func (x *BlockHeader) GetMerkleRoot() string {
 		return x.MerkleRoot
 	}
 	return ""
+}
+
+func (x *BlockHeader) GetVrfOutput() []byte {
+	if x != nil {
+		return x.VrfOutput
+	}
+	return nil
+}
+
+func (x *BlockHeader) GetVrfProof() []byte {
+	if x != nil {
+		return x.VrfProof
+	}
+	return nil
 }
 
 type Validator struct {
@@ -849,7 +864,7 @@ const file_proto_account_proto_rawDesc = "" +
 	"\x06header\x18\x01 \x01(\v2\x19.thrylos.core.BlockHeaderR\x06header\x12=\n" +
 	"\ftransactions\x18\x02 \x03(\v2\x19.thrylos.core.TransactionR\ftransactions\x12\x12\n" +
 	"\x04hash\x18\x03 \x01(\tR\x04hash\x12\x1c\n" +
-	"\tsignature\x18\x04 \x01(\fR\tsignature\"\xd6\x02\n" +
+	"\tsignature\x18\x04 \x01(\fR\tsignature\"\x92\x03\n" +
 	"\vBlockHeader\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x03R\x05index\x12\x1b\n" +
 	"\tprev_hash\x18\x02 \x01(\tR\bprevHash\x12\x1c\n" +
@@ -866,7 +881,10 @@ const file_proto_account_proto_rawDesc = "" +
 	"\n" +
 	"total_fees\x18\v \x01(\tR\ttotalFees\x12\x1f\n" +
 	"\vmerkle_root\x18\f \x01(\tR\n" +
-	"merkleRoot\"\xd6\x04\n" +
+	"merkleRoot\x12\x1d\n" +
+	"\n" +
+	"vrf_output\x18\r \x01(\fR\tvrfOutput\x12\x1b\n" +
+	"\tvrf_proof\x18\x0e \x01(\fR\bvrfProof\"\xd6\x04\n" +
 	"\tValidator\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x16\n" +
 	"\x06pubkey\x18\x02 \x01(\fR\x06pubkey\x12\x12\n" +

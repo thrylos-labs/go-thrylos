@@ -4,6 +4,7 @@
 package pos
 
 import (
+	"crypto/sha3"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -114,7 +115,30 @@ func NewConsensusEngine(
 	return engine
 }
 
-// ... [Include all other existing methods like Start, Stop, updateForkChoice, etc.] ...
+type VRFProof struct {
+	Output []byte // Random output
+	Proof  []byte // Cryptographic proof
+}
+
+// generateVRFProof generates VRF-style proof using validator's private key
+func (ce *ConsensusEngine) generateVRFProof(input []byte) (*VRFProof, error) {
+	// 1. Generate deterministic output from validator's key + input
+	keyMaterial := ce.nodePrivateKey.Bytes()
+
+	combined := make([]byte, 0, len(keyMaterial)+len(input))
+	combined = append(combined, keyMaterial...)
+	combined = append(combined, input...)
+
+	output := sha3.Sum256(combined)
+
+	// 2. Sign the output to prove we generated it
+	signature := ce.nodePrivateKey.Sign(output[:]) // ✅ Single return value
+
+	return &VRFProof{
+		Output: output[:],
+		Proof:  signature.Bytes(),
+	}, nil
+}
 
 // Start begins the consensus process
 func (ce *ConsensusEngine) Start() error {
@@ -362,19 +386,34 @@ func (ce *ConsensusEngine) updateValidatorActivity(validatorAddr string, wasBloc
 }
 
 // proposeBlock creates and broadcast a new block proposal
+// proposeBlock creates and broadcasts a new block proposal
 func (ce *ConsensusEngine) proposeBlock() error {
-	// Use the dedicated block proposer
-	result, err := ce.blockProposer.ProposeBlock(ce.currentSlot, ce.currentEpoch)
+	// ✅ STEP 1: Generate VRF proof BEFORE creating block
+	epochBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(epochBytes, ce.currentEpoch)
+
+	vrfProof, err := ce.generateVRFProof(epochBytes)
+	if err != nil {
+		return fmt.Errorf("VRF generation failed: %v", err)
+	}
+
+	// ✅ STEP 2: Create block (now WITH VRF data)
+	result, err := ce.blockProposer.ProposeBlockWithVRF(
+		ce.currentSlot,
+		ce.currentEpoch,
+		vrfProof.Output, // Pass VRF data to block construction
+		vrfProof.Proof,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create block: %v", err)
 	}
 
-	// 🔐 NEW: sign the block with this validator's key
+	// 🔐 Sign the block with validator's key (existing code)
 	if err := ce.signBlock(result.Block); err != nil {
 		return fmt.Errorf("failed to sign block: %v", err)
 	}
 
-	// Validate our own block (now includes signature checks, see below)
+	// Validate our own block (now includes VRF + signature checks)
 	if err := ce.blockValidator.ValidateBlock(result.Block); err != nil {
 		return fmt.Errorf("block validation failed: %v", err)
 	}
@@ -384,7 +423,7 @@ func (ce *ConsensusEngine) proposeBlock() error {
 		return fmt.Errorf("failed to add block to world state: %v", err)
 	}
 
-	// --- existing proposal-signing + broadcast logic stays as-is ---
+	// Create and sign proposal (existing code unchanged)
 	proposal := &BlockProposal{
 		Block:     result.Block,
 		Proposer:  ce.nodeAddress,
@@ -399,14 +438,12 @@ func (ce *ConsensusEngine) proposeBlock() error {
 
 	ce.broadcastChan <- proposal
 
-	fmt.Printf("Proposed block %s by validator %s with %d txs, gas: %d, fees: %s, construction time: %v, score: %.2f\n",
-		result.Block.Hash,
+	fmt.Printf("✅ Proposed block %s by validator %s with %d txs, gas: %d, fees: %s, VRF included\n",
+		result.Block.Hash[:8],
 		result.Block.Header.Validator,
 		result.TransactionCount,
 		result.TotalGasUsed,
-		result.TotalFees,
-		result.ConstructionTime,
-		result.OptimizationScore)
+		result.TotalFees)
 
 	return nil
 }
@@ -476,6 +513,41 @@ func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 	return selectedValidator.Address, nil
 }
 
+// verifyVRFProof verifies a VRF proof from a validator (Phase 1 implementation)
+func (ce *ConsensusEngine) verifyVRFProof(
+	validatorPubKey crypto.PublicKey,
+	input []byte,
+	vrfOutput []byte,
+	vrfProof []byte,
+) error {
+	// Validate inputs
+	if len(vrfOutput) == 0 {
+		return fmt.Errorf("VRF output is empty")
+	}
+	if len(vrfProof) == 0 {
+		return fmt.Errorf("VRF proof is empty")
+	}
+
+	// Parse signature from proof
+	sig, err := crypto.SignatureFromBytes(vrfProof)
+	if err != nil {
+		return fmt.Errorf("invalid VRF proof format: %v", err)
+	}
+
+	// Verify the signature over the VRF output
+	if err := validatorPubKey.Verify(vrfOutput, &sig); err != nil {
+		return fmt.Errorf("VRF proof verification failed: %v", err)
+	}
+
+	// Phase 1: We can't verify the output was derived correctly from input
+	// without the private key. This is acceptable because:
+	// 1. We trust that 2/3+ validators are honest
+	// 2. Signature proves this specific validator generated this output
+	// 3. Phase 2 will add true VRF verification
+
+	return nil
+}
+
 // selectValidatorByStake selects a validator based on stake weight and randomness
 // selectValidatorByStake selects a validator based on stake weight and randomness
 func (ce *ConsensusEngine) selectValidatorByStake(validators []*core.Validator, seed []byte) (*core.Validator, error) {
@@ -523,57 +595,70 @@ func (ce *ConsensusEngine) selectValidatorByStake(validators []*core.Validator, 
 // TESTNET IMPLEMENTATION: Uses block hash history.
 // MAINNET TODO: Replace with VDF (Verifiable Delay Function) or RANDAO to prevent stake grinding.
 func (ce *ConsensusEngine) getRandomnessSeed(slot uint64) []byte {
-	// 1. Define Epoch Parameters
 	const slotsPerEpoch = 32
 	currentEpoch := slot / slotsPerEpoch
 
-	var seedSource []byte
+	var baseEntropy []byte
 
-	// 2. Determine the Seed Source
 	if currentEpoch == 0 {
-		// Epoch 0: Use Genesis Hash
+		// Epoch 0: Use genesis hash
 		genesis, err := ce.worldState.GetBlock(0)
 		if err == nil && genesis != nil {
-			seedSource = []byte(genesis.Hash)
+			baseEntropy = []byte(genesis.Hash)
 		} else {
-			// Fallback for initialization safety
-			seedSource = make([]byte, 32)
+			baseEntropy = make([]byte, 32)
 		}
 	} else {
-		// Epoch N > 0: Use the hash of the last block of Epoch N-1.
-		// This prevents manipulating the current epoch's blocks to influence the current epoch's seed.
-		lookbackHeight := int64(currentEpoch*slotsPerEpoch) - 1
-
-		refBlock, err := ce.worldState.GetBlock(lookbackHeight)
-		if err != nil || refBlock == nil {
-			// Fallback to Genesis if historical block is missing
-			genesis, errGen := ce.worldState.GetBlock(0)
-			if errGen == nil && genesis != nil {
-				seedSource = []byte(genesis.Hash)
-			} else {
-				seedSource = make([]byte, 32)
-			}
-		} else {
-			seedSource = []byte(refBlock.Hash)
-		}
+		// Use accumulated randomness from previous epoch
+		baseEntropy = ce.getEpochRandomness(currentEpoch - 1)
 	}
 
-	// 3. Cryptographic Mixing (Hardened for Testnet)
-	// We use a Domain Separation Tag to prevent hash collisions with other protocol messages.
-	domainTag := []byte("THRYLOS_RANDOMNESS_V1_EPOCH_SEED")
-
+	// Mix with slot using domain separation
+	domainTag := []byte("THRYLOS_PROPOSER_SELECTION_V2")
 	slotBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(slotBytes, slot)
 
-	// Combine: Tag + SeedSource (Previous Epoch Hash) + Slot ID
-	combined := make([]byte, 0, len(domainTag)+len(seedSource)+len(slotBytes))
+	combined := make([]byte, 0, len(domainTag)+len(baseEntropy)+len(slotBytes))
 	combined = append(combined, domainTag...)
-	combined = append(combined, seedSource...)
+	combined = append(combined, baseEntropy...)
 	combined = append(combined, slotBytes...)
 
-	// 4. Generate final hash
-	hash := blake2b.Sum256(combined)
+	hash := sha3.Sum256(combined)
+	return hash[:]
+}
 
+func (ce *ConsensusEngine) getEpochRandomness(epoch uint64) []byte {
+	const slotsPerEpoch = 32
+	startSlot := epoch * slotsPerEpoch
+	endSlot := startSlot + slotsPerEpoch - 1
+
+	var entropyPool []byte
+
+	// Collect from all blocks in the epoch
+	for slot := startSlot; slot <= endSlot; slot++ {
+		block, err := ce.worldState.GetBlock(int64(slot))
+		if err == nil && block != nil {
+			// Mix: block hash + validator + VRF output if present
+			entropyPool = append(entropyPool, []byte(block.Hash)...)
+			entropyPool = append(entropyPool, []byte(block.Header.Validator)...)
+
+			if len(block.Header.VrfOutput) > 0 {
+				entropyPool = append(entropyPool, block.Header.VrfOutput...)
+			}
+		}
+	}
+
+	// Fallback if no blocks
+	if len(entropyPool) == 0 {
+		genesis, err := ce.worldState.GetBlock(0)
+		if err == nil && genesis != nil {
+			entropyPool = []byte(genesis.Hash)
+		} else {
+			entropyPool = make([]byte, 32)
+		}
+	}
+
+	hash := blake2b.Sum256(entropyPool)
 	return hash[:]
 }
 
@@ -978,6 +1063,7 @@ func NewBlockValidator(engine *ConsensusEngine) *BlockValidator {
 }
 
 // ValidateBlock validates a block proposal
+// ValidateBlock validates a block proposal
 func (bv *BlockValidator) ValidateBlock(block *core.Block) error {
 	if block == nil {
 		return fmt.Errorf("block cannot be nil")
@@ -997,9 +1083,16 @@ func (bv *BlockValidator) ValidateBlock(block *core.Block) error {
 		return fmt.Errorf("block hash validation failed: %v", err)
 	}
 
-	// 🔐 NEW: validate block signature
+	// 🔐 Validate block signature
 	if err := bv.validateBlockSignature(block); err != nil {
 		return fmt.Errorf("block signature validation failed: %v", err)
+	}
+
+	// ✅ NEW: Validate VRF proof (skip for genesis block)
+	if block.Header.Index > 0 {
+		if err := bv.validateVRFProof(block); err != nil {
+			return fmt.Errorf("VRF proof validation failed: %v", err)
+		}
 	}
 
 	// Validate transactions
@@ -1080,6 +1173,38 @@ func (bv *BlockValidator) validateBlockSignature(block *core.Block) error {
 
 	if err := pubKey.Verify(msg, &sig); err != nil {
 		return fmt.Errorf("block signature verification failed: %v", err)
+	}
+
+	return nil
+}
+
+// validateVRFProof validates the VRF proof in the block header
+func (bv *BlockValidator) validateVRFProof(block *core.Block) error {
+	// Get validator info
+	validator, err := bv.consensusEngine.worldState.GetValidator(block.Header.Validator)
+	if err != nil {
+		return fmt.Errorf("failed to get validator: %v", err)
+	}
+
+	// Reconstruct public key
+	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
+	if err != nil {
+		return fmt.Errorf("invalid validator pubkey: %v", err)
+	}
+
+	// Create input (epoch number)
+	epochBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(epochBytes, block.Header.Epoch)
+
+	// Verify VRF proof
+	err = bv.consensusEngine.verifyVRFProof(
+		pubKey,
+		epochBytes,
+		block.Header.VrfOutput,
+		block.Header.VrfProof,
+	)
+	if err != nil {
+		return fmt.Errorf("VRF verification failed: %v", err)
 	}
 
 	return nil

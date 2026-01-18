@@ -586,3 +586,129 @@ func (bp *BlockProposer) ResetMetrics() {
 	bp.avgTransactionCount = 0
 	bp.totalFeesCollected = "0"
 }
+
+func (bp *BlockProposer) ProposeBlockWithVRF(
+	slot uint64,
+	epoch uint64,
+	vrfOutput []byte,
+	vrfProof []byte,
+) (*BlockConstructionResult, error) {
+	startTime := time.Now()
+
+	// Get available transactions from the pool
+	availableTxs := bp.worldState.GetPendingTransactions()
+	if len(availableTxs) == 0 {
+		return bp.createEmptyBlockWithVRF(slot, epoch, vrfOutput, vrfProof, startTime)
+	}
+
+	// Select transactions for the block based on strategy
+	selectedTxs, excludedTxs, err := bp.selectTransactions(availableTxs)
+	if err != nil {
+		return nil, fmt.Errorf("transaction selection failed: %v", err)
+	}
+
+	// Construct the block WITH VRF data
+	block, err := bp.constructBlockWithVRF(selectedTxs, slot, epoch, vrfOutput, vrfProof)
+	if err != nil {
+		return nil, fmt.Errorf("block construction failed: %v", err)
+	}
+
+	// Calculate metrics
+	constructionTime := time.Since(startTime)
+	totalGasUsed := bp.calculateTotalGas(selectedTxs)
+	totalFees := bp.calculateTotalFees(selectedTxs)
+	optimizationScore := bp.calculateOptimizationScore(selectedTxs, constructionTime)
+
+	// Update proposer metrics
+	bp.updateMetrics(constructionTime, len(selectedTxs), totalFees)
+
+	return &BlockConstructionResult{
+		Block:             block,
+		IncludedTxs:       selectedTxs,
+		ExcludedTxs:       excludedTxs,
+		TotalGasUsed:      totalGasUsed,
+		TotalFees:         totalFees,
+		ConstructionTime:  constructionTime,
+		TransactionCount:  len(selectedTxs),
+		BlockSize:         bp.estimateBlockSize(selectedTxs),
+		OptimizationScore: optimizationScore,
+	}, nil
+}
+
+// constructBlockWithVRF creates a block with the selected transactions and VRF data
+func (bp *BlockProposer) constructBlockWithVRF(
+	transactions []*core.Transaction,
+	slot uint64,
+	epoch uint64,
+	vrfOutput []byte,
+	vrfProof []byte,
+) (*core.Block, error) {
+	currentBlock := bp.worldState.GetCurrentBlock()
+	var prevHash string
+	var blockIndex int64
+
+	if currentBlock != nil {
+		prevHash = currentBlock.Hash
+		blockIndex = currentBlock.Header.Index + 1
+	} else {
+		prevHash = ""
+		blockIndex = 0
+	}
+
+	totalGasUsed := bp.calculateTotalGas(transactions)
+	totalFees := bp.calculateTotalFees(transactions)
+	merkleRoot := bp.calculateMerkleRoot(transactions)
+
+	// ✅ Create header with VRF data
+	header := &core.BlockHeader{
+		Index:      blockIndex,
+		Timestamp:  time.Now().Unix(),
+		PrevHash:   prevHash,
+		Validator:  bp.nodeAddress,
+		TxRoot:     merkleRoot,
+		StateRoot:  bp.worldState.GetStateRoot(),
+		GasUsed:    totalGasUsed,
+		GasLimit:   bp.maxBlockSize,
+		Slot:       slot,
+		Epoch:      epoch,
+		TotalFees:  totalFees,
+		MerkleRoot: merkleRoot,
+		VrfOutput:  vrfOutput, // ✅ Add VRF output
+		VrfProof:   vrfProof,  // ✅ Add VRF proof
+	}
+
+	block := &core.Block{
+		Header:       header,
+		Transactions: transactions,
+	}
+
+	block.Hash = bp.calculateBlockHash(block)
+
+	return block, nil
+}
+
+// createEmptyBlockWithVRF creates an empty block with VRF data when no transactions are available
+func (bp *BlockProposer) createEmptyBlockWithVRF(
+	slot uint64,
+	epoch uint64,
+	vrfOutput []byte,
+	vrfProof []byte,
+	startTime time.Time,
+) (*BlockConstructionResult, error) {
+	block, err := bp.constructBlockWithVRF([]*core.Transaction{}, slot, epoch, vrfOutput, vrfProof)
+	if err != nil {
+		return nil, err
+	}
+
+	return &BlockConstructionResult{
+		Block:             block,
+		IncludedTxs:       []*core.Transaction{},
+		ExcludedTxs:       []*core.Transaction{},
+		TotalGasUsed:      0,
+		TotalFees:         "0",
+		ConstructionTime:  time.Since(startTime),
+		TransactionCount:  0,
+		BlockSize:         bp.estimateBlockSize([]*core.Transaction{}),
+		OptimizationScore: 1.0,
+	}, nil
+}
