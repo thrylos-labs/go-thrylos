@@ -80,6 +80,7 @@ type WorldState struct {
 	chainMu     sync.RWMutex
 	validatorMu sync.RWMutex
 	accountMu   *ShardedMutex
+	assetMu     *ShardedMutex
 
 	stateRootMu sync.RWMutex
 
@@ -373,20 +374,22 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply str
 }
 
 func (ws *WorldState) AddBlock(block *core.Block) error {
-	// 1. Acquire Chain Lock for validation and setup
 	ws.chainMu.Lock()
-	// Note: We defer Unlock() at the end, but we must be careful about deadlocks
-	// if we call other locked methods.
 	defer ws.chainMu.Unlock()
 
-	// Validate block can be added
 	if err := ws.validateBlockForAddition(block); err != nil {
 		return fmt.Errorf("block validation failed: %v", err)
 	}
 
-	// Execute all transactions in the block (unchanged)
+	// ✅ FIX: Use ExecuteTransaction which handles account locking
 	for _, tx := range block.Transactions {
-		receipt, err := ws.txExecutor.ExecuteTransaction(tx, ws.accountManager)
+		// Temporarily release chainMu to avoid deadlock
+		ws.chainMu.Unlock()
+
+		receipt, err := ws.ExecuteTransaction(tx) // This locks accounts properly
+
+		ws.chainMu.Lock() // Re-acquire
+
 		if err != nil {
 			return fmt.Errorf("failed to execute transaction %s: %v", tx.Id, err)
 		}
@@ -459,29 +462,28 @@ func (ws *WorldState) ValidateTransaction(tx *core.Transaction) error {
 // ExecuteTransaction executes a single transaction (helper method)
 func (ws *WorldState) ExecuteTransaction(tx *core.Transaction) (*transaction.ExecutionReceipt, error) {
 	// 1. Identify accounts to lock
-	// Always lock sender
 	accountsToLock := []string{tx.From}
-
-	// Lock receiver only if it exists and is different from sender
 	if tx.To != "" && tx.To != tx.From {
 		accountsToLock = append(accountsToLock, tx.To)
 	}
 
-	// 2. Sort addresses to prevent deadlocks (Canonical Locking Order)
-	// If Thread A locks X then Y, and Thread B locks Y then X -> Deadlock.
-	// Sorting ensures both always lock X then Y.
-	if len(accountsToLock) > 1 && accountsToLock[0] > accountsToLock[1] {
-		accountsToLock[0], accountsToLock[1] = accountsToLock[1], accountsToLock[0]
-	}
+	// 2. ✅ FIX: Sort ALL addresses (not just 2)
+	sort.Strings(accountsToLock)
 
-	// 3. Acquire locks
+	// 3. Acquire locks in sorted order
 	for _, addr := range accountsToLock {
 		ws.accountMu.Lock(addr)
-		// Defer unlock in LIFO order (reverse of acquisition)
-		defer ws.accountMu.Unlock(addr)
 	}
 
-	// 4. Execute logic
+	// 4. ✅ FIX: Unlock in REVERSE order (LIFO)
+	defer func() {
+		// Unlock in reverse order for proper LIFO semantics
+		for i := len(accountsToLock) - 1; i >= 0; i-- {
+			ws.accountMu.Unlock(accountsToLock[i])
+		}
+	}()
+
+	// 5. Execute logic
 	return ws.txExecutor.ExecuteTransaction(tx, ws.accountManager)
 }
 
@@ -516,11 +518,11 @@ func (ws *WorldState) ValidateTransactionExecution(tx *core.Transaction) error {
 }
 
 // GetAccount retrieves an account by address
+// NOTE: This function acquires accountMu[address] read lock.
+// AccountManager.GetAccount() MUST NOT acquire any locks internally.
 func (ws *WorldState) GetAccount(address string) (*core.Account, error) {
-	// Lock only the specific shard for this address
 	ws.accountMu.RLock(address)
 	defer ws.accountMu.RUnlock(address)
-
 	return ws.accountManager.GetAccount(address)
 }
 
@@ -1454,12 +1456,15 @@ func (ws *WorldState) GetStakingManager() *StakingManager {
 func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount int64) error {
 	ws := sm.worldState
 
-	ws.accountMu.Lock(delegatorAddr)
-	defer ws.accountMu.Unlock(delegatorAddr)
-	ws.validatorMu.Lock()
-	defer ws.validatorMu.Unlock()
+	// ✅ FIX: Correct lock order (chain → validator → accounts)
 	ws.chainMu.Lock()
 	defer ws.chainMu.Unlock()
+
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
+
+	ws.accountMu.Lock(delegatorAddr)
+	defer ws.accountMu.Unlock(delegatorAddr)
 
 	// --- 1. Conversions ---
 	amountBig := big.NewInt(amount)
@@ -1592,15 +1597,15 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount int64) error {
 	ws := sm.worldState
 
-	// Acquire locks
-	ws.accountMu.Lock(delegatorAddr)
-	defer ws.accountMu.Unlock(delegatorAddr)
+	// ✅ FIX: Correct lock order
+	ws.chainMu.Lock()
+	defer ws.chainMu.Unlock()
 
 	ws.validatorMu.Lock()
 	defer ws.validatorMu.Unlock()
 
-	ws.chainMu.Lock()
-	defer ws.chainMu.Unlock()
+	ws.accountMu.Lock(delegatorAddr)
+	defer ws.accountMu.Unlock(delegatorAddr)
 
 	// --- 1. Validation ---
 	if amount <= 0 {
@@ -2721,51 +2726,49 @@ func (ws *WorldState) GetAssetBalance(assetID, address string) (string, error) {
 	return balance, nil
 }
 
-// TransferAssetBalance transfers asset tokens between addresses
-// ✅ UPDATE: amount parameter changed from int64 to string
 func (ws *WorldState) TransferAssetBalance(assetID, from, to string, amount string) error {
-	// 1. Parse Amount
+	// 1. Validate amount
 	amountBig := math.ParseBigInt(amount)
 	if amountBig.Sign() <= 0 {
 		return fmt.Errorf("transfer amount must be positive")
 	}
 
-	// 2. Get current balances (Returns strings)
+	// 2. ✅ ONLY lock the asset (accounts aren't being modified!)
+	ws.assetMu.Lock(assetID)
+	defer ws.assetMu.Unlock(assetID)
+
+	// 3. Get current balances
 	fromBalanceStr, err := ws.GetAssetBalance(assetID, from)
 	if err != nil {
 		return fmt.Errorf("failed to get sender balance: %v", err)
 	}
 
-	// 3. Parse Sender Balance
 	fromBalanceBig := math.ParseBigInt(fromBalanceStr)
 
-	// Check insufficient funds: if fromBalance < amount
+	// 4. Check sufficient balance
 	if fromBalanceBig.Cmp(amountBig) < 0 {
-		return fmt.Errorf("insufficient balance: have %s, need %s", fromBalanceStr, amount)
+		return fmt.Errorf("insufficient balance: have %s, need %s",
+			fromBalanceStr, amount)
 	}
 
-	// 4. Get Recipient Balance
+	// 5. Get recipient balance
 	toBalanceStr, err := ws.GetAssetBalance(assetID, to)
 	if err != nil {
 		return fmt.Errorf("failed to get recipient balance: %v", err)
 	}
 	toBalanceBig := math.ParseBigInt(toBalanceStr)
 
-	// 5. Calculate New Balances
-	// newFrom = from - amount
+	// 6. Calculate new balances
 	newFromBalanceBig := new(big.Int).Sub(fromBalanceBig, amountBig)
-
-	// newTo = to + amount
 	newToBalanceBig := new(big.Int).Add(toBalanceBig, amountBig)
 
-	// 6. Perform transfer (commit)
-	// Pass strings to SetAssetBalance
+	// 7. Update balances atomically (protected by assetMu)
 	if err := ws.SetAssetBalance(assetID, from, newFromBalanceBig.String()); err != nil {
 		return fmt.Errorf("failed to update sender balance: %v", err)
 	}
 
 	if err := ws.SetAssetBalance(assetID, to, newToBalanceBig.String()); err != nil {
-		// Best-effort rollback on failure
+		// Rollback
 		_ = ws.SetAssetBalance(assetID, from, fromBalanceStr)
 		return fmt.Errorf("failed to update recipient balance: %v", err)
 	}
