@@ -310,22 +310,40 @@ func (v *Validator) ValidateTimestamp(block *core.Block, prevBlock *core.Block, 
 	blockTime := block.Header.Timestamp
 	now := time.Now().Unix()
 
-	// 1. Block timestamp must not be too far in future
+	// 1. Block timestamp must not be too far in future (Wall Clock)
 	if blockTime > now+int64(maxFutureTime.Seconds()) {
 		return fmt.Errorf("block timestamp too far in future: %d > %d",
 			blockTime, now+int64(maxFutureTime.Seconds()))
 	}
 
-	// 2. Block timestamp must not be too far in past
+	// 2. Block timestamp must not be too far in past (Wall Clock)
 	if blockTime < now-int64(maxPastTime.Seconds()) {
 		return fmt.Errorf("block timestamp too far in past: %d < %d",
 			blockTime, now-int64(maxPastTime.Seconds()))
 	}
 
-	// 3. Block timestamp must be strictly after previous block
-	if prevBlock != nil && blockTime <= prevBlock.Header.Timestamp {
-		return fmt.Errorf("block timestamp must be after previous block: %d <= %d",
-			blockTime, prevBlock.Header.Timestamp)
+	// Checks relative to Parent Block
+	if prevBlock != nil {
+		// 3. Block timestamp must be strictly after previous block
+		if blockTime <= prevBlock.Header.Timestamp {
+			return fmt.Errorf("block timestamp must be after previous block: %d <= %d",
+				blockTime, prevBlock.Header.Timestamp)
+		}
+
+		// 4. [FIX M-01] Not too far ahead of parent (Drift Check)
+
+		// Define default safety fallback if config is somehow nil
+		maxDrift := 10 * time.Minute
+		if v.config != nil {
+			maxDrift = v.config.Consensus.MaxBlockTimeDrift
+		}
+
+		timeDiff := blockTime - prevBlock.Header.Timestamp
+
+		if timeDiff > int64(maxDrift.Seconds()) {
+			return fmt.Errorf("block timestamp drift too large: %d seconds (max allowed: %d)",
+				timeDiff, int64(maxDrift.Seconds()))
+		}
 	}
 
 	return nil

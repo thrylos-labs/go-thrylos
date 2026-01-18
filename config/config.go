@@ -153,6 +153,7 @@ type ConsensusConfig struct {
 	SlashingEnabled    bool          `json:"slashing_enabled"`
 	MaxFutureBlockTime time.Duration `json:"max_future_block_time"`
 	MaxPastBlockTime   time.Duration `json:"max_past_block_time"`
+	MaxBlockTimeDrift  time.Duration `json:"max_block_time_drift"`
 	MaxTimestampSkew   time.Duration `json:"max_timestamp_skew"`
 	MaxTimestampAge    time.Duration `json:"max_timestamp_age"`
 	MaxTxDataSize      int           `json:"max_tx_data_size"`
@@ -288,6 +289,7 @@ func Load() (*Config, error) {
 			ValidatorRotation:  24 * time.Hour,
 			MaxFutureBlockTime: 15 * time.Second,
 			MaxPastBlockTime:   2 * time.Hour,
+			MaxBlockTimeDrift:  10 * time.Minute,
 			MaxTimestampSkew:   5 * time.Minute,
 			MaxTimestampAge:    1 * time.Hour,
 			MaxTxDataSize:      1024 * 1024,
