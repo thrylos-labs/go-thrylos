@@ -13,6 +13,15 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
+// 🔴 H-05: Rate limiting and unbonding constants
+const (
+	MaxValidatorChangePercent = 10.0   // Max 10% change per epoch
+	MaxValidatorsPerEpoch     = 100    // Absolute cap
+	UnbondingPeriodBlocks     = 201600 // ~7 days at 3s/block
+	ActivationDelayEpochs     = 2      // Must wait 2 epochs
+	SlotsPerEpoch             = 32     // Match consensus.go
+)
+
 // LifecycleManager handles validator lifecycle transitions
 type LifecycleManager struct {
 	config     *config.Config
@@ -27,6 +36,18 @@ type LifecycleManager struct {
 	activationThreshold   float64
 	deactivationThreshold float64
 	removalThreshold      float64
+
+	// 🔴 H-05 FIX: Simple epoch tracking
+	registrationEpoch  map[string]int64 // address -> epoch registered
+	epochRegistrations map[int64]int    // epoch -> registration count
+
+	// 🔴 H-05 FIX: Unbonding system
+	unbondingValidators map[string]*UnbondingEntry
+	unbondingPeriod     int64 // blocks
+
+	// 🔴 H-05 FIX: Consensus lock
+	votingInProgress bool
+	votingLock       sync.RWMutex
 
 	// Synchronization
 	mu sync.RWMutex
@@ -79,6 +100,7 @@ const (
 	EventPerformanceUpdate LifecycleEventType = "performance_update"
 	EventRemoval           LifecycleEventType = "removal"
 	EventRejoin            LifecycleEventType = "rejoin"
+	EventUnbondingComplete LifecycleEventType = "unbonding_complete"
 )
 
 // LifecycleTransition represents a pending state transition
@@ -86,9 +108,15 @@ type LifecycleTransition struct {
 	ValidatorAddress string         `json:"validator_address"`
 	TargetState      ValidatorState `json:"target_state"`
 	Reason           string         `json:"reason"`
+	ScheduledBlock   int64          `json:"scheduled_block"`
+}
 
-	// 🛡️ FIX CK-04: Use Block Height instead of Time
-	ScheduledBlock int64 `json:"scheduled_block"`
+// 🔴 H-05 FIX: UnbondingEntry tracks stake being unbonded
+type UnbondingEntry struct {
+	ValidatorAddress string `json:"validator_address"`
+	Amount           string `json:"amount"`
+	CompletionBlock  int64  `json:"completion_block"`
+	CreatedAt        int64  `json:"created_at"`
 }
 
 // NewLifecycleManager creates a new validator lifecycle manager
@@ -105,6 +133,12 @@ func NewLifecycleManager(config *config.Config, worldState *state.WorldState, ma
 		deactivationThreshold: 0.3,
 		removalThreshold:      0.1,
 
+		// 🔴 H-05 FIX: Initialize tracking
+		registrationEpoch:   make(map[string]int64),
+		epochRegistrations:  make(map[int64]int),
+		unbondingValidators: make(map[string]*UnbondingEntry),
+		unbondingPeriod:     UnbondingPeriodBlocks,
+
 		stopChan: make(chan struct{}),
 	}
 }
@@ -119,8 +153,6 @@ func (lm *LifecycleManager) Start() error {
 	}
 
 	lm.isRunning = true
-
-	// Start lifecycle worker
 	go lm.lifecycleWorker()
 
 	return nil
@@ -141,6 +173,7 @@ func (lm *LifecycleManager) Stop() error {
 }
 
 // RegisterValidator handles new validator registration
+// 🔴 H-05 FIX: Added epoch-based rate limiting and stake verification
 func (lm *LifecycleManager) RegisterValidator(
 	address string,
 	pubkey []byte,
@@ -151,36 +184,107 @@ func (lm *LifecycleManager) RegisterValidator(
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
+	// 1. Validate registration
 	if err := lm.validateRegistrationRequirements(address, stake, commission, selfDelegation); err != nil {
 		return fmt.Errorf("registration validation failed: %v", err)
 	}
 
+	// 🔴 H-05 FIX: Verify stake actually exists in account
+	account, err := lm.worldState.GetAccount(address)
+	if err != nil {
+		return fmt.Errorf("account not found: %v", err)
+	}
+
+	accountBalance, _ := new(big.Int).SetString(account.Balance, 10)
+	if accountBalance == nil {
+		accountBalance = big.NewInt(0)
+	}
+
+	requiredStake, _ := new(big.Int).SetString(stake, 10)
+	if requiredStake == nil {
+		return fmt.Errorf("invalid stake amount")
+	}
+
+	if accountBalance.Cmp(requiredStake) < 0 {
+		return fmt.Errorf("insufficient account balance for stake: have %s, need %s",
+			account.Balance, stake)
+	}
+
+	// 🔴 H-05 FIX: Check rate limit for current epoch
+	currentEpoch := lm.getCurrentEpoch()
+
+	if lm.epochRegistrations[currentEpoch] >= MaxValidatorsPerEpoch {
+		return fmt.Errorf("maximum validator registrations (%d) reached for epoch %d",
+			MaxValidatorsPerEpoch, currentEpoch)
+	}
+
+	// 🔴 H-05 FIX: Check % change limit
+	if err := lm.checkPercentageChangeLimit(); err != nil {
+		return fmt.Errorf("rate limit exceeded: %v", err)
+	}
+
+	// 2. Register validator (inactive until delay passes)
 	if err := lm.manager.RegisterValidator(address, pubkey, stake, commission); err != nil {
 		return fmt.Errorf("validator registration failed: %v", err)
 	}
 
-	// Record lifecycle event
+	validator, err := lm.worldState.GetValidator(address)
+	if err != nil {
+		return fmt.Errorf("failed to get validator after registration: %v", err)
+	}
+
+	validator.Active = false
+	if err := lm.worldState.UpdateValidator(validator); err != nil {
+		return fmt.Errorf("failed to mark validator inactive: %v", err)
+	}
+
+	// 🔴 H-05 FIX: Track registration epoch
+	lm.registrationEpoch[address] = currentEpoch
+	lm.epochRegistrations[currentEpoch]++
+
+	activationEpoch := currentEpoch + ActivationDelayEpochs
+
 	lm.recordLifecycleEvent(address, &LifecycleEvent{
 		ValidatorAddress: address,
 		EventType:        EventRegistration,
 		ToState:          StateRegistered,
 		Timestamp:        time.Now().Unix(),
 		BlockHeight:      lm.worldState.GetHeight(),
-		Reason:           "New validator registration",
+		Reason:           fmt.Sprintf("Registered (can activate at epoch %d)", activationEpoch),
 		Data: map[string]interface{}{
-			"stake":      stake,
-			"commission": commission,
+			"stake":              stake,
+			"commission":         commission,
+			"registration_epoch": currentEpoch,
+			"activation_epoch":   activationEpoch,
 		},
 	})
-
-	// Schedule activation check for next block
-	lm.scheduleTransition(address, StatePending, "Pending activation review", lm.worldState.GetHeight()+1)
 
 	return nil
 }
 
 // ProcessActivation handles validator activation
+// 🔴 H-05 FIX: Checks activation delay and consensus lock
 func (lm *LifecycleManager) ProcessActivation(address string) error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	// 🔴 H-05 FIX: Check consensus lock
+	if err := lm.canModifyValidatorSet(); err != nil {
+		return err
+	}
+
+	// 🔴 H-05 FIX: Check epoch delay
+	registeredEpoch, exists := lm.registrationEpoch[address]
+	if !exists {
+		return fmt.Errorf("validator %s registration epoch not found", address)
+	}
+
+	currentEpoch := lm.getCurrentEpoch()
+	if currentEpoch < registeredEpoch+ActivationDelayEpochs {
+		return fmt.Errorf("must wait %d epochs before activation (registered: %d, current: %d)",
+			ActivationDelayEpochs, registeredEpoch, currentEpoch)
+	}
+
 	validator, err := lm.worldState.GetValidator(address)
 	if err != nil {
 		return fmt.Errorf("validator not found: %v", err)
@@ -214,6 +318,14 @@ func (lm *LifecycleManager) ProcessActivation(address string) error {
 
 // ProcessDeactivation handles validator deactivation
 func (lm *LifecycleManager) ProcessDeactivation(address string, reason string) error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	// 🔴 H-05 FIX: Check consensus lock
+	if err := lm.canModifyValidatorSet(); err != nil {
+		return err
+	}
+
 	validator, err := lm.worldState.GetValidator(address)
 	if err != nil {
 		return fmt.Errorf("validator not found: %v", err)
@@ -239,9 +351,10 @@ func (lm *LifecycleManager) ProcessDeactivation(address string, reason string) e
 }
 
 // ProcessJailing handles validator jailing
-// ProcessJailing handles validator jailing
 func (lm *LifecycleManager) ProcessJailing(address string, reason SlashingReason, duration time.Duration) error {
-	// 1. Get current validator state
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
 	validator, err := lm.worldState.GetValidator(address)
 	if err != nil {
 		return fmt.Errorf("validator not found: %v", err)
@@ -249,8 +362,7 @@ func (lm *LifecycleManager) ProcessJailing(address string, reason SlashingReason
 
 	currentState := lm.getValidatorState(validator)
 
-	// 2. Calculate Block-Based Jail Duration (CK-04 Fix)
-	// Convert time duration to blocks (assuming ~3s per block)
+	// Calculate block-based jail duration
 	const AvgBlockTime = 3 * time.Second
 	blocksToJail := int64(duration / AvgBlockTime)
 	if blocksToJail < 1 {
@@ -259,27 +371,21 @@ func (lm *LifecycleManager) ProcessJailing(address string, reason SlashingReason
 
 	jailUntilBlock := lm.worldState.GetHeight() + blocksToJail
 
-	// 3. Call SlashValidator (Pass 'nil' for evidence as per signature)
 	if err := lm.manager.SlashValidator(address, reason, nil); err != nil {
 		return fmt.Errorf("slashing failed: %v", err)
 	}
 
-	// 4. FORCE UPDATE: Overwrite the 'JailUntil' field with our Block Height
-	// We must reload the validator in case SlashValidator modified it
 	validator, err = lm.worldState.GetValidator(address)
 	if err != nil {
 		return fmt.Errorf("failed to reload validator after slashing: %v", err)
 	}
 
-	// Set the block height (this field is int64, so it fits)
 	validator.JailUntil = jailUntilBlock
 
-	// Save the updated jail time back to WorldState
 	if err := lm.worldState.UpdateValidator(validator); err != nil {
 		return fmt.Errorf("failed to update validator jail duration: %v", err)
 	}
 
-	// 5. Record Event & Schedule Unjailing
 	lm.recordLifecycleEvent(address, &LifecycleEvent{
 		ValidatorAddress: address,
 		EventType:        EventJailing,
@@ -295,7 +401,6 @@ func (lm *LifecycleManager) ProcessJailing(address string, reason SlashingReason
 		},
 	})
 
-	// Schedule unjailing check at exact block
 	lm.scheduleTransition(address, StateActive, "Scheduled unjailing", jailUntilBlock)
 
 	return nil
@@ -303,6 +408,9 @@ func (lm *LifecycleManager) ProcessJailing(address string, reason SlashingReason
 
 // ProcessUnjailing handles validator unjailing
 func (lm *LifecycleManager) ProcessUnjailing(address string) error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
 	validator, err := lm.worldState.GetValidator(address)
 	if err != nil {
 		return fmt.Errorf("validator not found: %v", err)
@@ -310,10 +418,10 @@ func (lm *LifecycleManager) ProcessUnjailing(address string) error {
 
 	currentState := lm.getValidatorState(validator)
 
-	// 🛡️ FIX CK-04: Check Block Height, not Time
 	currentBlock := lm.worldState.GetHeight()
-	if validator.JailUntil > currentBlock { // Assuming JailUntil now stores BLOCK HEIGHT
-		return fmt.Errorf("validator %s is still jailed until block %d (current: %d)", address, validator.JailUntil, currentBlock)
+	if validator.JailUntil > currentBlock {
+		return fmt.Errorf("validator %s is still jailed until block %d (current: %d)",
+			address, validator.JailUntil, currentBlock)
 	}
 
 	if err := lm.manager.UnjailValidator(address); err != nil {
@@ -338,7 +446,11 @@ func (lm *LifecycleManager) ProcessUnjailing(address string) error {
 }
 
 // ProcessStakeChange handles stake updates
+// 🔴 H-05 FIX: Uses unbonding for decreases
 func (lm *LifecycleManager) ProcessStakeChange(address string, oldStake, newStake string) error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
 	validator, err := lm.worldState.GetValidator(address)
 	if err != nil {
 		return fmt.Errorf("validator not found: %v", err)
@@ -366,21 +478,26 @@ func (lm *LifecycleManager) ProcessStakeChange(address string, oldStake, newStak
 	var reason string
 
 	if stakeDelta.Sign() > 0 {
+		// Stake increase - immediate
 		eventType = EventStakeIncrease
 		reason = fmt.Sprintf("Stake increased by %s", stakeDelta.String())
 	} else {
+		// 🔴 H-05 FIX: Stake decrease - trigger unbonding
 		eventType = EventStakeDecrease
-		reason = fmt.Sprintf("Stake decreased by %s", new(big.Int).Neg(stakeDelta).String())
+		decreaseAmount := new(big.Int).Neg(stakeDelta)
+		reason = fmt.Sprintf("Stake decreased by %s (unbonding)", decreaseAmount.String())
+
+		if err := lm.startUnbonding(address, decreaseAmount.String()); err != nil {
+			return fmt.Errorf("failed to start unbonding: %v", err)
+		}
 	}
 
 	// Check thresholds
 	if newStakeBig.Cmp(minStakeBig) < 0 {
 		if currentState == StateActive {
+			lm.mu.Unlock()
 			lm.ProcessDeactivation(address, "Stake below minimum threshold")
-		}
-	} else {
-		if oldStakeBig.Cmp(minStakeBig) < 0 && (currentState == StateInactive || currentState == StateRegistered) {
-			lm.scheduleTransition(address, StatePending, "Stake meets minimum threshold", lm.worldState.GetHeight()+1)
+			lm.mu.Lock()
 		}
 	}
 
@@ -402,8 +519,101 @@ func (lm *LifecycleManager) ProcessStakeChange(address string, oldStake, newStak
 	return nil
 }
 
+// 🔴 H-05 FIX: startUnbonding initiates stake unbonding
+func (lm *LifecycleManager) startUnbonding(address string, amount string) error {
+	validator, err := lm.worldState.GetValidator(address)
+	if err != nil {
+		return fmt.Errorf("validator not found: %v", err)
+	}
+
+	completionBlock := lm.worldState.GetHeight() + lm.unbondingPeriod
+
+	unbonding := &UnbondingEntry{
+		ValidatorAddress: address,
+		Amount:           amount,
+		CompletionBlock:  completionBlock,
+		CreatedAt:        lm.worldState.GetHeight(),
+	}
+
+	key := fmt.Sprintf("%s-%d", address, lm.worldState.GetHeight())
+	lm.unbondingValidators[key] = unbonding
+
+	// Immediately reduce voting power
+	stakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
+	decreaseBig, _ := new(big.Int).SetString(amount, 10)
+
+	if stakeBig == nil {
+		stakeBig = big.NewInt(0)
+	}
+	if decreaseBig == nil {
+		return fmt.Errorf("invalid decrease amount")
+	}
+
+	newStake := new(big.Int).Sub(stakeBig, decreaseBig)
+	if newStake.Sign() < 0 {
+		return fmt.Errorf("cannot decrease stake below zero")
+	}
+
+	validator.Stake = newStake.String()
+
+	if err := lm.worldState.UpdateValidator(validator); err != nil {
+		return fmt.Errorf("failed to update validator stake: %v", err)
+	}
+
+	return nil
+}
+
+// 🔴 H-05 FIX: processCompletedUnbonding returns stake after unbonding period
+func (lm *LifecycleManager) processCompletedUnbonding() {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	currentBlock := lm.worldState.GetHeight()
+
+	for key, unbonding := range lm.unbondingValidators {
+		if unbonding.CompletionBlock <= currentBlock {
+			account, err := lm.worldState.GetAccount(unbonding.ValidatorAddress)
+			if err != nil {
+				continue
+			}
+
+			balanceBig, _ := new(big.Int).SetString(account.Balance, 10)
+			unbondingBig, _ := new(big.Int).SetString(unbonding.Amount, 10)
+
+			if balanceBig == nil {
+				balanceBig = big.NewInt(0)
+			}
+			if unbondingBig == nil {
+				continue
+			}
+
+			newBalance := new(big.Int).Add(balanceBig, unbondingBig)
+			account.Balance = newBalance.String()
+
+			lm.worldState.UpdateAccountWithStorage(account)
+
+			lm.recordLifecycleEvent(unbonding.ValidatorAddress, &LifecycleEvent{
+				ValidatorAddress: unbonding.ValidatorAddress,
+				EventType:        EventUnbondingComplete,
+				Timestamp:        time.Now().Unix(),
+				BlockHeight:      currentBlock,
+				Reason:           fmt.Sprintf("Unbonding of %s completed", unbonding.Amount),
+				Data: map[string]interface{}{
+					"amount":   unbonding.Amount,
+					"duration": currentBlock - unbonding.CreatedAt,
+				},
+			})
+
+			delete(lm.unbondingValidators, key)
+		}
+	}
+}
+
 // ProcessPerformanceUpdate handles performance-based lifecycle decisions
 func (lm *LifecycleManager) ProcessPerformanceUpdate(address string, performanceScore float64) error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
 	validator, err := lm.worldState.GetValidator(address)
 	if err != nil {
 		return fmt.Errorf("validator not found: %v", err)
@@ -414,11 +624,15 @@ func (lm *LifecycleManager) ProcessPerformanceUpdate(address string, performance
 	switch currentState {
 	case StateActive:
 		if performanceScore < lm.deactivationThreshold {
-			lm.scheduleTransition(address, StateDeactivating, fmt.Sprintf("Poor performance: %.2f", performanceScore), lm.worldState.GetHeight()+10)
+			lm.scheduleTransition(address, StateDeactivating,
+				fmt.Sprintf("Poor performance: %.2f", performanceScore),
+				lm.worldState.GetHeight()+10)
 		}
 	case StateInactive, StateRegistered:
 		if performanceScore >= lm.activationThreshold {
-			lm.scheduleTransition(address, StatePending, fmt.Sprintf("Good performance: %.2f", performanceScore), lm.worldState.GetHeight()+10)
+			lm.scheduleTransition(address, StatePending,
+				fmt.Sprintf("Good performance: %.2f", performanceScore),
+				lm.worldState.GetHeight()+10)
 		}
 	}
 
@@ -436,11 +650,70 @@ func (lm *LifecycleManager) ProcessPerformanceUpdate(address string, performance
 	return nil
 }
 
+// 🔴 H-05 FIX: checkPercentageChangeLimit enforces max % change per epoch
+func (lm *LifecycleManager) checkPercentageChangeLimit() error {
+	activeValidators := lm.worldState.GetActiveValidators()
+	currentCount := len(activeValidators)
+
+	if currentCount == 0 {
+		return nil // Bootstrap case
+	}
+
+	currentEpoch := lm.getCurrentEpoch()
+	newRegistrations := lm.epochRegistrations[currentEpoch]
+
+	changePercent := (float64(newRegistrations) / float64(currentCount)) * 100
+	if changePercent > MaxValidatorChangePercent {
+		return fmt.Errorf("validator set change of %.2f%% exceeds maximum %.2f%%",
+			changePercent, MaxValidatorChangePercent)
+	}
+
+	return nil
+}
+
+// 🔴 H-05 FIX: BeginVoting locks validator set during voting
+func (lm *LifecycleManager) BeginVoting() error {
+	lm.votingLock.Lock()
+	defer lm.votingLock.Unlock()
+
+	if lm.votingInProgress {
+		return fmt.Errorf("voting already in progress")
+	}
+
+	lm.votingInProgress = true
+	return nil
+}
+
+// 🔴 H-05 FIX: EndVoting unlocks validator set after voting
+func (lm *LifecycleManager) EndVoting() error {
+	lm.votingLock.Lock()
+	defer lm.votingLock.Unlock()
+
+	lm.votingInProgress = false
+	return nil
+}
+
+// 🔴 H-05 FIX: canModifyValidatorSet checks if modifications are allowed
+func (lm *LifecycleManager) canModifyValidatorSet() error {
+	lm.votingLock.RLock()
+	defer lm.votingLock.RUnlock()
+
+	if lm.votingInProgress {
+		return fmt.Errorf("cannot modify validator set during voting")
+	}
+
+	return nil
+}
+
+// 🔴 H-05 FIX: getCurrentEpoch calculates current epoch from block height
+func (lm *LifecycleManager) getCurrentEpoch() int64 {
+	return lm.worldState.GetHeight() / SlotsPerEpoch
+}
+
 // getValidatorState determines the current state of a validator
 func (lm *LifecycleManager) getValidatorState(validator *core.Validator) ValidatorState {
 	currentBlock := lm.worldState.GetHeight()
 
-	// 🛡️ FIX CK-04: Block Height check
 	if validator.JailUntil > currentBlock {
 		return StateJailed
 	}
@@ -502,7 +775,6 @@ func (lm *LifecycleManager) validateActivationRequirements(validator *core.Valid
 		return fmt.Errorf("self-stake below minimum")
 	}
 
-	// 🛡️ FIX CK-04: Block check
 	if validator.JailUntil > lm.worldState.GetHeight() {
 		return fmt.Errorf("validator is jailed until block %d", validator.JailUntil)
 	}
@@ -510,7 +782,7 @@ func (lm *LifecycleManager) validateActivationRequirements(validator *core.Valid
 	return nil
 }
 
-// scheduleTransition schedules a state transition at a specific BLOCK
+// scheduleTransition schedules a state transition at a specific block
 func (lm *LifecycleManager) scheduleTransition(address string, targetState ValidatorState, reason string, scheduledBlock int64) {
 	if scheduledBlock == 0 {
 		scheduledBlock = lm.worldState.GetHeight() + 1
@@ -526,7 +798,7 @@ func (lm *LifecycleManager) scheduleTransition(address string, targetState Valid
 	select {
 	case lm.transitionQueue <- transition:
 	default:
-		fmt.Printf("Transition queue full, dropping transition for %s\n", address)
+		fmt.Printf("⚠️ Transition queue full, dropping transition for %s\n", address)
 	}
 }
 
@@ -542,9 +814,9 @@ func (lm *LifecycleManager) recordLifecycleEvent(address string, event *Lifecycl
 	}
 }
 
-// lifecycleWorker processes scheduled transitions
+// lifecycleWorker processes scheduled transitions and unbonding
 func (lm *LifecycleManager) lifecycleWorker() {
-	ticker := time.NewTicker(3 * time.Second) // Check every block (~3s)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -563,42 +835,56 @@ func (lm *LifecycleManager) lifecycleWorker() {
 func (lm *LifecycleManager) processScheduledTransition(transition *LifecycleTransition) {
 	currentBlock := lm.worldState.GetHeight()
 
-	// 🛡️ FIX CK-04: Wait for Block Height
 	if transition.ScheduledBlock > currentBlock {
-		// Not time yet, push back to queue (or hold in separate wait list)
-		// For simplicity, we re-queue with a small sleep to avoid tight loop
 		go func() {
 			time.Sleep(1 * time.Second)
-			lm.transitionQueue <- transition
+			select {
+			case lm.transitionQueue <- transition:
+			default:
+			}
 		}()
 		return
 	}
+
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
 
 	switch transition.TargetState {
 	case StatePending:
 		validator, err := lm.worldState.GetValidator(transition.ValidatorAddress)
 		if err == nil && lm.validateActivationRequirements(validator) == nil {
+			lm.mu.Unlock()
 			lm.ProcessActivation(transition.ValidatorAddress)
+			lm.mu.Lock()
 		}
 	case StateActive:
+		lm.mu.Unlock()
 		lm.ProcessUnjailing(transition.ValidatorAddress)
+		lm.mu.Lock()
 	case StateDeactivating:
+		lm.mu.Unlock()
 		lm.ProcessDeactivation(transition.ValidatorAddress, transition.Reason)
+		lm.mu.Lock()
 	}
 }
 
 // performPeriodicChecks performs various periodic lifecycle checks
 func (lm *LifecycleManager) performPeriodicChecks() {
+	// Process completed unbonding
+	lm.processCompletedUnbonding()
+
+	// Check for automatic unjailing
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
-	activeValidators := lm.worldState.GetActiveValidators()
 	currentBlock := lm.worldState.GetHeight()
+	activeValidators := lm.worldState.GetActiveValidators()
 
 	for _, validator := range activeValidators {
-		// Check for automatic unjailing based on BLOCK HEIGHT
 		if validator.JailUntil > 0 && validator.JailUntil <= currentBlock {
+			lm.mu.Unlock()
 			lm.ProcessUnjailing(validator.Address)
+			lm.mu.Lock()
 		}
 	}
 }
@@ -607,6 +893,7 @@ func (lm *LifecycleManager) performPeriodicChecks() {
 func (lm *LifecycleManager) GetLifecycleEvents(address string) ([]*LifecycleEvent, error) {
 	lm.mu.RLock()
 	defer lm.mu.RUnlock()
+
 	events, exists := lm.lifecycleEvents[address]
 	if !exists {
 		return []*LifecycleEvent{}, nil
@@ -615,4 +902,19 @@ func (lm *LifecycleManager) GetLifecycleEvents(address string) ([]*LifecycleEven
 	eventsCopy := make([]*LifecycleEvent, len(events))
 	copy(eventsCopy, events)
 	return eventsCopy, nil
+}
+
+// GetUnbondingEntries returns unbonding entries for a validator
+func (lm *LifecycleManager) GetUnbondingEntries(address string) ([]*UnbondingEntry, error) {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	var entries []*UnbondingEntry
+	for _, unbonding := range lm.unbondingValidators {
+		if unbonding.ValidatorAddress == address {
+			entries = append(entries, unbonding)
+		}
+	}
+
+	return entries, nil
 }
