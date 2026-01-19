@@ -8,6 +8,7 @@ import (
 	"time"
 
 	coremath "github.com/thrylos-labs/go-thrylos/core/math" // Use the safe math package
+	"github.com/thrylos-labs/go-thrylos/core/security"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 	"github.com/thrylos-labs/go-thrylos/types"
@@ -173,6 +174,11 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 	// Process based on evidence type
 	switch evidence.Type {
 	case EvidenceDoubleVoting:
+		//  Log double signing attempt for security audit
+		dvEvidence, ok := evidence.Evidence.(*DoubleVoteEvidence)
+		if ok && dvEvidence.Attestation1 != nil {
+			security.LogDoubleSign(evidence.ValidatorAddress, dvEvidence.Attestation1.Slot)
+		}
 		return sm.processDoubleVoteEvidence(evidence)
 	case EvidenceSurroundVoting:
 		return sm.processSurroundVoteEvidence(evidence)
@@ -465,6 +471,7 @@ func (sm *SlashingManager) slashValidator(validatorKey string, percent int64, re
 	if err := sm.applySlashing(record); err == nil {
 		sm.processedEvidence[evidenceHash] = true
 	}
+
 }
 
 // forceUnstake permanently removes a validator from the active set

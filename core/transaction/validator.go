@@ -29,6 +29,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/math"
+	"github.com/thrylos-labs/go-thrylos/core/security"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
@@ -673,6 +674,8 @@ func (v *Validator) ValidateTransaction(tx *core.Transaction, stateReader StateI
 
 	// Signature validation
 	if err := v.validateSignature(tx); err != nil {
+		// Log invalid signature for security audit
+		security.LogInvalidSignature(tx.From, tx.Id)
 		return fmt.Errorf("signature validation failed: %v", err)
 	}
 

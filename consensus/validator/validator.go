@@ -21,6 +21,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/math"
+	"github.com/thrylos-labs/go-thrylos/core/security"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
@@ -361,6 +362,7 @@ func (vm *Manager) DeactivateValidator(address string, reason string) error {
 // SlashValidator slashes a validator for misbehavior
 // SlashValidator slashes a validator for misbehavior
 func (vm *Manager) SlashValidator(
+
 	address string,
 	reason SlashingReason,
 	evidence []byte,
@@ -441,6 +443,9 @@ func (vm *Manager) SlashValidator(
 		vm.slashingEvents[address] = make([]*SlashingEvent, 0)
 	}
 	vm.slashingEvents[address] = append(vm.slashingEvents[address], slashingEvent)
+
+	// ✅ ADD THIS: Log the slashing event for security audit
+	security.LogSlashing(address, string(reason), slashAmountBig.String())
 
 	// 6. Update metrics
 	if metrics, exists := vm.validatorMetrics[address]; exists {
