@@ -42,6 +42,10 @@ type Pool struct {
 	minGasPrice *big.Int
 	maxCount    int
 
+	// Lifecycle management
+	stopChan chan struct{}
+	wg       sync.WaitGroup
+
 	// Statistics
 	totalAdded   int64
 	totalRemoved int64
@@ -62,6 +66,7 @@ type PoolStats struct {
 }
 
 // NewPool creates a new transaction pool for a shard
+// NewPool creates a new transaction pool for a shard
 func NewPool(
 	shardID account.ShardID,
 	totalShards int,
@@ -71,17 +76,49 @@ func NewPool(
 ) *Pool {
 
 	minGasPriceBig := math.ParseBigInt(minGasPrice)
-	return &Pool{
+	pool := &Pool{
 		pending:           make(map[string]*TransactionEntry),
 		byAddress:         make(map[string]map[uint64]*core.Transaction),
 		byHash:            make(map[string]*core.Transaction),
 		nonceReservations: make(map[string]map[uint64]bool),
+		stopChan:          make(chan struct{}),
 		accountManager:    accountManager,
 		shardID:           shardID,
 		totalShards:       totalShards,
 		maxTxs:            maxCount,
 		minGasPrice:       minGasPriceBig,
 	}
+
+	// Start automatic cleanup
+	pool.wg.Add(1)
+	go pool.startAutoCleanup()
+
+	return pool
+}
+
+// startAutoCleanup runs periodic cleanup of expired transactions
+// startAutoCleanup with graceful shutdown support
+func (p *Pool) startAutoCleanup() {
+	defer p.wg.Done()
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			p.CleanupExpired()
+		case <-p.stopChan:
+			log.Println("Transaction pool cleanup stopped")
+			return
+		}
+	}
+}
+
+// Stop gracefully stops the transaction pool
+func (p *Pool) Stop() {
+	close(p.stopChan)
+	p.wg.Wait()
 }
 
 const MaxTransactionsPerSender = 100
