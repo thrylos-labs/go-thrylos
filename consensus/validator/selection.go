@@ -142,16 +142,15 @@ func (vs *Set) UpdateValidator(validator *core.Validator) error {
 }
 
 // SelectProposer selects a validator to propose a block using stake-weighted randomness
-// SelectProposer selects a validator to propose a block using stake-weighted randomness
 func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error) {
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
+	// ✅ Use write lock since we modify selectionHistory
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
 
 	if len(vs.activeList) == 0 {
 		return nil, fmt.Errorf("no active validators")
 	}
 
-	// ✅ Fix: Check zero stake using BigInt parsing or string comparison
 	// Quick string check first for efficiency
 	if vs.totalStake == "0" || vs.totalStake == "" {
 		return nil, fmt.Errorf("total stake is zero")
@@ -174,7 +173,6 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 	hashInt := new(big.Int).SetBytes(hash[:])
 
 	// Apply anti-concentration adjustment
-	// Note: calculateAdjustedStakes currently returns int64 weights, so we keep that logic
 	adjustedStakes := vs.calculateAdjustedStakes()
 	totalAdjustedStake := int64(0)
 	for _, stake := range adjustedStakes {
@@ -195,17 +193,15 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 		cumulativeStake += adjustedStake
 
 		if randomStake < cumulativeStake {
-			// Update selection statistics
+			// ✅ Now safe to update selection statistics with write lock
 			vs.updateSelectionStatsUnsafe(validator.Address)
 
 			return &SelectionResult{
 				SelectedValidator: validator,
 				SelectionSeed:     hash[:],
-				// ✅ Fix: Convert BigInt string back to int64 for the struct
-				// (Assuming SelectionResult.TotalStake is still int64)
-				TotalStake:      totalStakeBig.Int64(),
-				SelectionWeight: adjustedStake,
-				Timestamp:       time.Now().Unix(),
+				TotalStake:        totalStakeBig.Int64(),
+				SelectionWeight:   adjustedStake,
+				Timestamp:         time.Now().Unix(),
 			}, nil
 		}
 	}
@@ -217,10 +213,9 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 	return &SelectionResult{
 		SelectedValidator: lastValidator,
 		SelectionSeed:     hash[:],
-		// ✅ Fix: Convert BigInt string back to int64
-		TotalStake:      totalStakeBig.Int64(),
-		SelectionWeight: adjustedStakes[lastValidator.Address],
-		Timestamp:       time.Now().Unix(),
+		TotalStake:        totalStakeBig.Int64(),
+		SelectionWeight:   adjustedStakes[lastValidator.Address],
+		Timestamp:         time.Now().Unix(),
 	}, nil
 }
 
