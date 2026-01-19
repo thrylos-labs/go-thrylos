@@ -249,6 +249,8 @@ type APIConfig struct {
 
 	// Faucet / funding endpoint
 	EnableFaucet bool `json:"enable_faucet"`
+
+	MaxRequestSize int64 `yaml:"max_request_size"`
 }
 
 // ValidatorKeyConfig controls how the node loads its validator key in production.

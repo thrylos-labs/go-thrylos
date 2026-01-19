@@ -32,6 +32,10 @@ type RateLimiter struct {
 
 	cleanupInterval time.Duration
 	maxIdleTime     time.Duration
+
+	blockedIPs     map[string]time.Time // IP -> unblock time
+	violationCount map[string]int       // IP -> violation count
+	blockDuration  time.Duration        // How long to block IPs
 }
 
 // IPRateLimiter manages rate limiting per IP address
@@ -104,6 +108,10 @@ func NewRateLimiter(config *RateLimitConfig) *RateLimiter {
 
 		cleanupInterval: config.CleanupInterval,
 		maxIdleTime:     config.MaxIdleTime,
+
+		blockedIPs:     make(map[string]time.Time),
+		violationCount: make(map[string]int),
+		blockDuration:  15 * time.Minute, // Block for 15 minutes
 	}
 
 	// Initialize limiters for each tier
@@ -115,6 +123,22 @@ func NewRateLimiter(config *RateLimitConfig) *RateLimiter {
 	go rl.cleanupRoutine()
 
 	return rl
+}
+
+// IsBlocked checks if an IP is currently blocked
+func (rl *RateLimiter) IsBlocked(ip string) bool {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+
+	if unblockTime, exists := rl.blockedIPs[ip]; exists {
+		if time.Now().Before(unblockTime) {
+			return true // Still blocked
+		}
+		// Block expired, clean up
+		delete(rl.blockedIPs, ip)
+		delete(rl.violationCount, ip)
+	}
+	return false
 }
 
 // newIPRateLimiter creates a new IP-based rate limiter
@@ -158,8 +182,38 @@ func (ipl *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
 
 // Allow checks if a request from the given IP is allowed for the tier
 func (rl *RateLimiter) Allow(ip string, tier string) bool {
-	limiter := rl.getLimiter(ip, tier)
-	return limiter.Allow()
+	// ✅ CHECK IF BLOCKED FIRST:
+	if rl.IsBlocked(ip) {
+		return false
+	}
+
+	rl.mu.RLock()
+	ipRateLimiter, exists := rl.limiters[tier]
+	rl.mu.RUnlock()
+
+	if !exists {
+		return true
+	}
+
+	// ✅ FIX: Get the limiter for this specific IP, then call Allow()
+	limiter := ipRateLimiter.getLimiter(ip)
+	allowed := limiter.Allow() // rate.Limiter.Allow() takes no arguments
+
+	// ✅ TRACK VIOLATIONS:
+	if !allowed {
+		rl.mu.Lock()
+		rl.violationCount[ip]++
+
+		// Block after 10 violations within cleanup window
+		if rl.violationCount[ip] >= 10 {
+			rl.blockedIPs[ip] = time.Now().Add(rl.blockDuration)
+			fmt.Printf("⚠️  IP %s blocked for %v due to repeated rate limit violations\n",
+				ip, rl.blockDuration)
+		}
+		rl.mu.Unlock()
+	}
+
+	return allowed
 }
 
 // cleanupRoutine periodically removes idle IP limiters
@@ -168,7 +222,23 @@ func (rl *RateLimiter) cleanupRoutine() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		rl.cleanup()
+		rl.mu.Lock()
+
+		// Existing cleanup code for limiters...
+		for tier, ipLimiter := range rl.limiters {
+			ipLimiter.cleanup(rl.maxIdleTime)
+			_ = tier
+		}
+
+		// ✅ ADD: Clean up expired violations
+		for ip, count := range rl.violationCount {
+			// Reset violation count after maxIdleTime
+			if _, blocked := rl.blockedIPs[ip]; !blocked && count < 10 {
+				delete(rl.violationCount, ip)
+			}
+		}
+
+		rl.mu.Unlock()
 	}
 }
 
@@ -210,7 +280,6 @@ func parseFirstIP(xff string) string {
 func (s *Server) RateLimitMiddleware(tier string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip rate limiting if disabled
 			if s.rateLimiter == nil {
 				next.ServeHTTP(w, r)
 				return
@@ -218,8 +287,16 @@ func (s *Server) RateLimitMiddleware(tier string) func(http.Handler) http.Handle
 
 			ip := getClientIP(r)
 
+			// ✅ CHECK IF BLOCKED:
+			if s.rateLimiter.IsBlocked(ip) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "900") // 15 minutes
+				w.WriteHeader(http.StatusForbidden)
+				s.writeError(w, "IP temporarily blocked due to excessive rate limit violations", http.StatusForbidden)
+				return
+			}
+
 			if !s.rateLimiter.Allow(ip, tier) {
-				// Rate limit exceeded
 				s.writeRateLimitError(w, tier)
 				return
 			}

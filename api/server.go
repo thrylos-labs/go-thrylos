@@ -207,6 +207,13 @@ func parseChainID(chainIDStr string) int64 {
 func (s *Server) setupRoutes() {
 	s.router = mux.NewRouter()
 
+	// ✅ ADD REQUEST SIZE LIMIT GLOBALLY:
+	maxRequestSize := int64(1024 * 1024) // 1MB default
+	if s.config != nil && s.config.API.MaxRequestSize > 0 {
+		maxRequestSize = s.config.API.MaxRequestSize
+	}
+	s.router.Use(s.RequestSizeLimitMiddleware(maxRequestSize))
+
 	// ---------------------------------------------------------
 	// 1. Initialize EVM RPC Handler
 	// ---------------------------------------------------------
@@ -583,6 +590,17 @@ func (s *Server) getAccountRewards(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, response)
+}
+
+// RequestSizeLimitMiddleware limits the size of request bodies
+func (s *Server) RequestSizeLimitMiddleware(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Limit request body size
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func (s *Server) getAccountDelegations(w http.ResponseWriter, r *http.Request) {
