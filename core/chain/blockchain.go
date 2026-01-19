@@ -423,7 +423,7 @@ func (bc *Blockchain) CreateBlock(validator string, privateKey crypto.PrivateKey
 }
 
 const (
-	MaxReorgDepth = 100 // Maximum blocks to reorg
+	MaxReorgDepth = 1024 // Maximum blocks to reorg
 )
 
 // ReorganizeChain switches the canonical chain to a new fork.
