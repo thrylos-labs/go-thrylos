@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
+	"github.com/thrylos-labs/go-thrylos/consensus/validator"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/block"
 	"github.com/thrylos-labs/go-thrylos/core/state"
@@ -54,6 +55,8 @@ type Blockchain struct {
 
 	// Cross-shard communication
 	crossShardEnabled bool
+
+	validatorManager *validator.Manager
 }
 
 // ConsensusEngine interface for PoS integration
@@ -89,6 +92,7 @@ type BlockchainConfig struct {
 	Config            *config.Config
 	WorldState        *state.WorldState
 	ShardID           account.ShardID
+	ValidatorManager  *validator.Manager
 	TotalShards       int
 	MaxReorgDepth     int64
 	CrossShardEnabled bool
@@ -119,6 +123,8 @@ func NewBlockchain(cfg *BlockchainConfig) (*Blockchain, error) {
 
 		// Block management
 		blockCreator: blockCreator,
+
+		validatorManager: cfg.ValidatorManager,
 
 		// Validation
 		validators: make(map[string]*ChainValidator),
@@ -277,6 +283,14 @@ func (bc *Blockchain) addBlockUnsafe(block *core.Block) error {
 	// Let WorldState handle the block addition (includes transaction execution)
 	if err := bc.worldState.AddBlock(block); err != nil {
 		return fmt.Errorf("world state block addition failed: %v", err)
+	}
+
+	if bc.validatorManager != nil {
+		if err := bc.validatorManager.ProcessUnbondings(); err != nil {
+			// Log warning but don't fail block addition
+			// This is defensive - unbonding processing shouldn't block chain progress
+			fmt.Printf("Warning: failed to process unbondings at block %d: %v\n", block.Header.Index, err)
+		}
 	}
 
 	// Update blockchain metrics

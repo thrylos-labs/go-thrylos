@@ -169,9 +169,12 @@ type ConsensusConfig struct {
 }
 
 type StakingConfig struct {
-	MinValidatorStake          string        `json:"min_validator_stake"` // ✅ Changed to string
-	MinDelegation              string        `json:"min_delegation"`      // ✅ Changed to string
-	MinSelfStake               string        `json:"min_self_stake"`      // ✅ Changed to string
+	MinValidatorStake          string        `json:"min_validator_stake"`
+	MinDelegation              string        `json:"min_delegation"`
+	MinSelfStake               string        `json:"min_self_stake"`
+	MaxValidatorStake          string        `yaml:"max_validator_stake"`  // e.g., "10000000000000000000000000" (10M tokens)
+	MaxStakePercentage         float64       `yaml:"max_stake_percentage"` // e.g., 0.15 (15%)
+	UnbondingPeriod            time.Duration `yaml:"unbonding_period"`     // e.g., 604800s (7 days)
 	MaxCommission              float64       `json:"max_commission"`
 	CommissionChangeMax        float64       `json:"commission_change_max"`
 	UnbondingTime              time.Duration `json:"unbonding_time"`

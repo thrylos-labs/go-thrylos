@@ -114,8 +114,9 @@ type LifecycleTransition struct {
 // 🔴 H-05 FIX: UnbondingEntry tracks stake being unbonded
 type UnbondingEntry struct {
 	ValidatorAddress string `json:"validator_address"`
+	DelegatorAddress string `json:"delegator_address"` // ✅ ADD THIS LINE
 	Amount           string `json:"amount"`
-	CompletionBlock  int64  `json:"completion_block"`
+	CompletionBlock  int64  `json:"completion_block"` // Keep this (block-based is fine)
 	CreatedAt        int64  `json:"created_at"`
 }
 

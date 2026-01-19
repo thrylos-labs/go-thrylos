@@ -141,10 +141,16 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to create revm executor: %v", err)
 	}
 
+	// Initialize PoS components
+	validatorManager := validator.NewManager(nodeConfig.Config, worldState)
+	rewardDistributor := rewards.NewDistributor(nodeConfig.Config, worldState)
+	inflationManager := rewards.NewInflationManager(nodeConfig.Config, worldState)
+
 	// Initialize Blockchain with WorldState
 	blockchainConfig := &chain.BlockchainConfig{
 		Config:            nodeConfig.Config,
 		WorldState:        worldState,
+		ValidatorManager:  validatorManager,
 		ShardID:           nodeConfig.ShardID,
 		TotalShards:       nodeConfig.TotalShards,
 		MaxReorgDepth:     100,
@@ -152,16 +158,12 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	}
 
 	bc, err := chain.NewBlockchain(blockchainConfig)
+
 	if err != nil {
 		storage.Close() // Clean up storage
 		cancelFunc()    // Prevent context leak
 		return nil, fmt.Errorf("failed to create blockchain: %v", err)
 	}
-
-	// Initialize PoS components
-	validatorManager := validator.NewManager(nodeConfig.Config, worldState)
-	rewardDistributor := rewards.NewDistributor(nodeConfig.Config, worldState)
-	inflationManager := rewards.NewInflationManager(nodeConfig.Config, worldState)
 
 	// Initialize networking channels for consensus
 	broadcastChan := make(chan interface{}, 1000)

@@ -37,6 +37,8 @@ type Manager struct {
 	// Slashing tracking
 	slashingEvents map[string][]*SlashingEvent
 
+	unbondingQueue map[string][]*UnbondingEntry // key: delegatorAddr
+
 	// Performance tracking
 	performanceWindow int64 // Number of blocks to track for performance
 }
@@ -88,12 +90,128 @@ type JailEvent struct {
 // NewManager creates a new validator manager
 func NewManager(config *config.Config, worldState *state.WorldState) *Manager {
 	return &Manager{
-		config:            config,
-		worldState:        worldState,
-		validatorMetrics:  make(map[string]*ValidatorMetrics),
-		slashingEvents:    make(map[string][]*SlashingEvent),
+		config:           config,
+		worldState:       worldState,
+		validatorMetrics: make(map[string]*ValidatorMetrics),
+		slashingEvents:   make(map[string][]*SlashingEvent),
+
+		unbondingQueue: make(map[string][]*UnbondingEntry),
+
 		performanceWindow: config.Staking.SignedBlocksWindow,
 	}
+}
+
+// BeginUnbonding initiates unbonding process
+func (vm *Manager) BeginUnbonding(validatorAddr, delegatorAddr string, amount string) error {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+
+	validator, err := vm.worldState.GetValidator(validatorAddr)
+	if err != nil {
+		return fmt.Errorf("validator not found: %v", err)
+	}
+
+	// Check delegation exists
+	amountBig := math.ParseBigInt(amount)
+	currentDelegationStr := "0"
+	if val, exists := validator.Delegators[delegatorAddr]; exists {
+		currentDelegationStr = val
+	}
+	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+
+	if math.Cmp(currentDelegationBig, amountBig) < 0 {
+		return fmt.Errorf("insufficient delegation: have %s, trying to unbond %s",
+			currentDelegationStr, amount)
+	}
+
+	// Calculate completion block (current block + unbonding period in blocks)
+	currentBlock := vm.worldState.GetHeight()
+	unbondingBlocks := int64(vm.config.Staking.UnbondingPeriod.Seconds() / 12) // Assuming 12s blocks
+	completionBlock := currentBlock + unbondingBlocks
+
+	// Create unbonding entry
+	entry := &UnbondingEntry{
+		ValidatorAddress: validatorAddr,
+		DelegatorAddress: delegatorAddr, // ✅ Now included
+		Amount:           amount,
+		CompletionBlock:  completionBlock,
+		CreatedAt:        time.Now().Unix(),
+	}
+
+	if vm.unbondingQueue[delegatorAddr] == nil {
+		vm.unbondingQueue[delegatorAddr] = make([]*UnbondingEntry, 0)
+	}
+	vm.unbondingQueue[delegatorAddr] = append(vm.unbondingQueue[delegatorAddr], entry)
+
+	return nil
+}
+
+// ProcessUnbondings processes completed unbonding entries
+func (vm *Manager) ProcessUnbondings() error {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+
+	currentBlock := vm.worldState.GetHeight()
+
+	for delegatorAddr, entries := range vm.unbondingQueue {
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+
+			// Check if unbonding period completed
+			if currentBlock >= entry.CompletionBlock {
+				// Complete the unbonding
+				validator, err := vm.worldState.GetValidator(entry.ValidatorAddress)
+				if err != nil {
+					continue
+				}
+
+				amountBig := math.ParseBigInt(entry.Amount)
+
+				// Remove delegation
+				currentBig := math.ParseBigInt(validator.Delegators[delegatorAddr])
+				currentBig = math.Sub(currentBig, amountBig)
+
+				if currentBig.Sign() == 0 {
+					delete(validator.Delegators, delegatorAddr)
+				} else {
+					validator.Delegators[delegatorAddr] = currentBig.String()
+				}
+
+				// Update totals
+				delegatedBig := math.ParseBigInt(validator.DelegatedStake)
+				delegatedBig = math.Sub(delegatedBig, amountBig)
+				validator.DelegatedStake = delegatedBig.String()
+
+				stakeBig := math.ParseBigInt(validator.Stake)
+				stakeBig = math.Sub(stakeBig, amountBig)
+				validator.Stake = stakeBig.String()
+
+				validator.UpdatedAt = time.Now().Unix()
+
+				// Check minimum stake
+				minStakeBig := math.ParseBigInt(vm.config.Staking.MinValidatorStake)
+				if validator.Active && math.Cmp(stakeBig, minStakeBig) < 0 {
+					validator.Active = false
+				}
+
+				vm.worldState.UpdateValidator(validator)
+
+				// Return funds
+				vm.worldState.GetAccountManager().AddRewards(delegatorAddr, amountBig.Int64())
+
+				// Remove from queue
+				entries = append(entries[:i], entries[i+1:]...)
+			}
+		}
+
+		if len(entries) == 0 {
+			delete(vm.unbondingQueue, delegatorAddr)
+		} else {
+			vm.unbondingQueue[delegatorAddr] = entries
+		}
+	}
+
+	return nil
 }
 
 // RegisterValidator registers a new validator
@@ -194,15 +312,21 @@ func (vm *Manager) ActivateValidator(address string) error {
 		return fmt.Errorf("validator not found: %v", err)
 	}
 
-	// Check minimum stake requirement
-	if validator.Stake < vm.config.Staking.MinValidatorStake {
-		return fmt.Errorf("validator stake %d below minimum %d",
+	// ✅ FIX: Check minimum stake requirement with BigInt comparison
+	stakeBig := math.ParseBigInt(validator.Stake)
+	minStakeBig := math.ParseBigInt(vm.config.Staking.MinValidatorStake)
+
+	if stakeBig.Cmp(minStakeBig) < 0 {
+		return fmt.Errorf("validator stake %s below minimum %s",
 			validator.Stake, vm.config.Staking.MinValidatorStake)
 	}
 
-	// Check minimum self-stake requirement
-	if validator.SelfStake < vm.config.Staking.MinSelfStake {
-		return fmt.Errorf("validator self-stake %d below minimum %d",
+	// ✅ FIX: Check minimum self-stake requirement with BigInt comparison
+	selfStakeBig := math.ParseBigInt(validator.SelfStake)
+	minSelfStakeBig := math.ParseBigInt(vm.config.Staking.MinSelfStake)
+
+	if selfStakeBig.Cmp(minSelfStakeBig) < 0 {
+		return fmt.Errorf("validator self-stake %s below minimum %s",
 			validator.SelfStake, vm.config.Staking.MinSelfStake)
 	}
 
@@ -362,9 +486,12 @@ func (vm *Manager) UnjailValidator(address string) error {
 		return fmt.Errorf("validator jail time has not expired")
 	}
 
-	// Check if validator still meets minimum requirements
-	if validator.Stake < vm.config.Staking.MinValidatorStake {
-		return fmt.Errorf("validator stake %d below minimum %d after slashing",
+	// ✅ FIX: Check if validator still meets minimum requirements with BigInt comparison
+	stakeBig := math.ParseBigInt(validator.Stake)
+	minStakeBig := math.ParseBigInt(vm.config.Staking.MinValidatorStake)
+
+	if stakeBig.Cmp(minStakeBig) < 0 {
+		return fmt.Errorf("validator stake %s below minimum %s after slashing",
 			validator.Stake, vm.config.Staking.MinValidatorStake)
 	}
 
@@ -524,8 +651,6 @@ func (vm *Manager) updateUptimePercentage(metrics *ValidatorMetrics) {
 }
 
 // AddDelegation adds a delegation to a validator
-// AddDelegation adds a delegation to a validator
-// ✅ UPDATE: amount changed from int64 -> string
 func (vm *Manager) AddDelegation(validatorAddr, delegatorAddr string, amount string) error {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
@@ -535,45 +660,58 @@ func (vm *Manager) AddDelegation(validatorAddr, delegatorAddr string, amount str
 		return fmt.Errorf("validator not found: %v", err)
 	}
 
-	// Check delegation limits
+	// CHECK 1: Delegation limits
 	if len(validator.Delegators) >= vm.config.Staking.MaxDelegationsPerValidator {
 		return fmt.Errorf("validator has reached maximum delegations (%d)",
 			vm.config.Staking.MaxDelegationsPerValidator)
 	}
 
-	// Initialize map correctly if nil
+	// ✅ NEW CHECK 2: Maximum stake per validator
+	amountBig := math.ParseBigInt(amount)
+	currentStakeBig := math.ParseBigInt(validator.Stake)
+	newStakeBig := math.Add(currentStakeBig, amountBig)
+	maxStakeBig := math.ParseBigInt(vm.config.Staking.MaxValidatorStake)
+
+	if math.Cmp(newStakeBig, maxStakeBig) > 0 {
+		return fmt.Errorf("validator stake would exceed maximum: %s > %s",
+			newStakeBig.String(), vm.config.Staking.MaxValidatorStake)
+	}
+
+	// ✅ NEW CHECK 3: Stake concentration
+	totalNetworkStake := vm.worldState.GetTotalStaked()
+	if totalNetworkStake != nil && totalNetworkStake.Sign() > 0 {
+		// Calculate: (newValidatorStake / totalNetworkStake)
+		newStakeF := new(big.Float).SetInt(newStakeBig)
+		totalStakeF := new(big.Float).SetInt(totalNetworkStake)
+		percentageF := new(big.Float).Quo(newStakeF, totalStakeF)
+		percentage, _ := percentageF.Float64()
+
+		if percentage > vm.config.Staking.MaxStakePercentage {
+			return fmt.Errorf("delegation would exceed concentration limit: %.2f%% > %.2f%%",
+				percentage*100, vm.config.Staking.MaxStakePercentage*100)
+		}
+	}
+
+	// YOUR EXISTING CODE (unchanged):
 	if validator.Delegators == nil {
-		// ✅ Fix: Initialize as map[string]string
 		validator.Delegators = make(map[string]string)
 	}
 
-	// 1. Parse Input Amount
-	amountBig := math.ParseBigInt(amount)
-
-	// 2. Update Specific Delegator Entry
-	// Get current delegation (default to "0" if missing)
 	currentDelegationStr := "0"
 	if val, exists := validator.Delegators[delegatorAddr]; exists {
 		currentDelegationStr = val
 	}
 
 	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
-
-	// Add amount
-	currentDelegationBig.Add(currentDelegationBig, amountBig)
-
-	// Store back as string
+	currentDelegationBig = math.Add(currentDelegationBig, amountBig)
 	validator.Delegators[delegatorAddr] = currentDelegationBig.String()
 
-	// 3. Update Total Delegated Stake
 	totalDelegatedBig := math.ParseBigInt(validator.DelegatedStake)
-	totalDelegatedBig.Add(totalDelegatedBig, amountBig)
+	totalDelegatedBig = math.Add(totalDelegatedBig, amountBig)
 	validator.DelegatedStake = totalDelegatedBig.String()
 
-	// 4. Update Total Validator Stake (Self + Delegated)
-	// Note: Assuming 'Stake' includes delegated amounts. If Stake is only self-stake, remove this step.
 	totalStakeBig := math.ParseBigInt(validator.Stake)
-	totalStakeBig.Add(totalStakeBig, amountBig)
+	totalStakeBig = math.Add(totalStakeBig, amountBig)
 	validator.Stake = totalStakeBig.String()
 
 	validator.UpdatedAt = time.Now().Unix()
@@ -676,9 +814,11 @@ func (vm *Manager) GetSlashingHistory(address string) ([]*SlashingEvent, error) 
 func (vm *Manager) GetTopValidators(limit int) ([]*core.Validator, error) {
 	activeValidators := vm.worldState.GetActiveValidators()
 
-	// Sort by stake (descending)
+	// ✅ FIX: Sort by stake (descending) using BigInt comparison
 	sort.Slice(activeValidators, func(i, j int) bool {
-		return activeValidators[i].Stake > activeValidators[j].Stake
+		stakeI := math.ParseBigInt(activeValidators[i].Stake)
+		stakeJ := math.ParseBigInt(activeValidators[j].Stake)
+		return stakeI.Cmp(stakeJ) > 0 // descending order
 	})
 
 	if limit > 0 && len(activeValidators) > limit {
