@@ -437,6 +437,12 @@ func (bc *Blockchain) ReorganizeChain(newBlocks []*core.Block) error {
 		return fmt.Errorf("no blocks to reorganize")
 	}
 
+	// 🔒 SAFETY CHECK 1: Enforce maximum reorg depth
+	if len(newBlocks) > MaxReorgDepth {
+		return fmt.Errorf("reorg too deep: %d blocks exceeds maximum %d",
+			len(newBlocks), MaxReorgDepth)
+	}
+
 	firstNewBlock := newBlocks[0]
 
 	// 1. Validate link to common ancestor
