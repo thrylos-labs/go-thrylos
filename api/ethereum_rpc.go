@@ -170,8 +170,13 @@ func (h *EthereumRPCHandler) SendRawTransaction(w http.ResponseWriter, r *http.R
 
 	// 🛡️ INPUT VALIDATION (Medium) - FIXED
 	// Validate fields before submitting to mempool/blockchain
+	const maxGasLimit = 30000000
 	if thrylosTx.Gas < 21000 {
 		respondError(w, -32602, "Intrinsic gas too low")
+		return
+	}
+	if thrylosTx.Gas > maxGasLimit {
+		respondError(w, -32602, fmt.Sprintf("Gas limit %d exceeds maximum %d", thrylosTx.Gas, maxGasLimit))
 		return
 	}
 	// Check Address Length (0x + 40 chars = 42)
@@ -253,6 +258,13 @@ func (h *EthereumRPCHandler) EstimateGas(w http.ResponseWriter, r *http.Request)
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, -32700, "Parse error")
+		return
+	}
+
+	// SECURITY: Validate gas if provided
+	const maxGasLimit = 30000000
+	if req.CallData.Gas > 0 && uint64(req.CallData.Gas) > maxGasLimit {
+		respondError(w, -32602, fmt.Sprintf("Gas limit %d exceeds maximum %d", req.CallData.Gas, maxGasLimit))
 		return
 	}
 

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+
+	"github.com/thrylos-labs/go-thrylos/core/security"
 )
 
 // ============================================================================
@@ -21,10 +23,9 @@ import (
 // Returns error if operation would overflow
 // USE THIS FOR: gas_used + base_gas, totalGas calculations
 func Add64(a, b uint64) (uint64, error) {
-	// Check if a + b would overflow
-	// Overflow occurs when: a + b > MaxUint64
-	// Rearranged: a > MaxUint64 - b
 	if a > math.MaxUint64-b {
+		// Log potential attack
+		security.LogGasOverflowAttempt("Add64", a, b)
 		return 0, fmt.Errorf("uint64 overflow: %d + %d exceeds MaxUint64", a, b)
 	}
 	return a + b, nil
@@ -34,16 +35,14 @@ func Add64(a, b uint64) (uint64, error) {
 // Returns error if operation would overflow
 // USE THIS FOR: gasLimit * gasPrice, gas * priorityFee calculations
 func Mul64(a, b uint64) (uint64, error) {
-	// Special cases
 	if a == 0 || b == 0 {
 		return 0, nil
 	}
 
-	// Check if result would overflow
-	// Overflow if: a * b > MaxUint64
-	// Check by: result / b != a (if overflow occurred, division won't match)
 	result := a * b
 	if result/b != a {
+		// Log potential attack
+		security.LogGasOverflowAttempt("Mul64", a, b)
 		return 0, fmt.Errorf("uint64 overflow: %d * %d exceeds MaxUint64", a, b)
 	}
 

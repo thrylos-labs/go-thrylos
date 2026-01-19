@@ -118,6 +118,15 @@ func (e *RevmExecutor) Close() {
 // ExecuteCall executes a message call and safely cleans up memory
 // ExecuteCall executes a message call and safely cleans up memory
 func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte, gas uint64, value *big.Int, nonce uint64) ([]byte, uint64, error) {
+	// SECURITY: Validate gas parameter
+	const maxGasLimit = 30000000
+	if gas > maxGasLimit {
+		return nil, 0, fmt.Errorf("gas limit %d exceeds maximum %d", gas, maxGasLimit)
+	}
+	if gas == 0 {
+		return nil, 0, fmt.Errorf("gas limit cannot be zero")
+	}
+
 	// 1. Convert Go types to C types
 	cCaller := addressToC(caller)
 	cContract := addressToC(contract)
@@ -147,6 +156,15 @@ func (e *RevmExecutor) GetNonce(address common.Address) uint64 {
 
 // DeployContract creates a new contract and safely cleans up memory
 func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, gas uint64, value *big.Int) (common.Address, uint64, error) {
+	// SECURITY: Validate gas parameter
+	const maxGasLimit = 30000000
+	if gas > maxGasLimit {
+		return common.Address{}, 0, fmt.Errorf("gas limit %d exceeds maximum %d", gas, maxGasLimit)
+	}
+	if gas == 0 {
+		return common.Address{}, 0, fmt.Errorf("gas limit cannot be zero")
+	}
+
 	nonce, _ := e.worldState.GetNonce(deployer.Hex())
 	cDeployer := addressToC(deployer)
 
@@ -204,6 +222,13 @@ func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data
 // Helpers
 func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, error) {
 	gasUsed := uint64(res.gas_used)
+
+	// SECURITY: Validate gas used is reasonable
+	const maxReasonableGas = 50000000
+	if gasUsed > maxReasonableGas {
+		return nil, 0, fmt.Errorf("suspicious gas value: %d exceeds maximum %d", gasUsed, maxReasonableGas)
+	}
+
 	var data []byte
 
 	// Copy return data to Go-managed memory
