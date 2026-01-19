@@ -4,6 +4,7 @@
 package pos
 
 import (
+	"crypto/rand"
 	"crypto/sha3"
 	"encoding/binary"
 	"fmt"
@@ -611,6 +612,15 @@ func (ce *ConsensusEngine) getRandomnessSeed(slot uint64) []byte {
 	} else {
 		// Use accumulated randomness from previous epoch
 		baseEntropy = ce.getEpochRandomness(currentEpoch - 1)
+	}
+
+	// ✅ ADD THIS: Mix in additional entropy from crypto/rand
+	extraEntropy := make([]byte, 32)
+	if _, err := rand.Read(extraEntropy); err == nil {
+		// XOR with base entropy for additional unpredictability
+		for i := 0; i < len(baseEntropy) && i < len(extraEntropy); i++ {
+			baseEntropy[i] ^= extraEntropy[i]
+		}
 	}
 
 	// Mix with slot using domain separation
