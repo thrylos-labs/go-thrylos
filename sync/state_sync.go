@@ -43,6 +43,9 @@ type StateSyncer struct {
 	snapshotsApplied  int64
 	syncErrors        int64
 	lastSnapshotSize  int64
+	// Simple peer tracking for banning
+	bannedPeers map[string]time.Time // peerID -> ban expiry time
+	banMu       sync.RWMutex
 }
 
 // StateSnapshot represents a snapshot of the world state
@@ -95,7 +98,7 @@ type StateSyncMetrics struct {
 // NewStateSyncer creates a new state synchronizer
 func NewStateSyncer(
 	worldState *state.WorldState,
-	blockchain *chain.Blockchain, // [SEC-FIX] Added parameter
+	blockchain *chain.Blockchain,
 	p2pNetwork *network.P2PNetwork,
 	config *SyncConfig,
 ) *StateSyncer {
@@ -103,11 +106,12 @@ func NewStateSyncer(
 
 	return &StateSyncer{
 		worldState:   worldState,
-		blockchain:   blockchain, // [SEC-FIX] Set field
+		blockchain:   blockchain,
 		p2pNetwork:   p2pNetwork,
 		config:       config,
 		snapshots:    make(map[string]*p2p.StateSnapshot),
 		syncRequests: make(map[string]*StateSyncRequest),
+		bannedPeers:  make(map[string]time.Time), // ✅ Added
 		ctx:          ctx,
 		cancelFunc:   cancelFunc,
 	}
@@ -152,10 +156,46 @@ func (ss *StateSyncer) Stop() error {
 	return nil
 }
 
+// isBanned checks if peer is currently banned
+func (ss *StateSyncer) isBanned(peerID string) bool {
+	ss.banMu.RLock()
+	defer ss.banMu.RUnlock()
+
+	if banExpiry, exists := ss.bannedPeers[peerID]; exists {
+		if time.Now().Before(banExpiry) {
+			return true
+		}
+		// Ban expired, remove it
+		delete(ss.bannedPeers, peerID)
+	}
+	return false
+}
+
+// banPeer bans a peer for 24 hours and disconnects them
+func (ss *StateSyncer) banPeer(peerID string, reason string) {
+	ss.banMu.Lock()
+	ss.bannedPeers[peerID] = time.Now().Add(24 * time.Hour)
+	ss.banMu.Unlock()
+
+	fmt.Printf("🚫 BANNED peer %s for 24h: %s\n", peerID, reason)
+
+	// Disconnect the peer
+	if ss.p2pNetwork != nil {
+		if err := ss.p2pNetwork.DisconnectPeer(peerID); err != nil {
+			fmt.Printf("⚠️ Failed to disconnect banned peer %s: %v\n", peerID, err)
+		}
+	}
+}
+
 // RequestStateSnapshot requests a state snapshot from a peer
 func (ss *StateSyncer) RequestStateSnapshot(peerID string, height int64) (*p2p.StateSnapshot, error) {
 	if !ss.isRunning {
 		return nil, fmt.Errorf("state syncer not running")
+	}
+
+	// ✅ Check if peer is banned
+	if ss.isBanned(peerID) {
+		return nil, fmt.Errorf("peer %s is banned", peerID)
 	}
 
 	requestID := fmt.Sprintf("state-sync-%s-%d-%d", peerID, height, time.Now().UnixNano())
@@ -187,6 +227,7 @@ func (ss *StateSyncer) RequestStateSnapshot(peerID string, height int64) (*p2p.S
 	if err := ss.validateSnapshot(snapshot); err != nil {
 		request.Status = StateSyncFailed
 		request.Error = err
+		ss.banPeer(peerID, fmt.Sprintf("invalid snapshot: %v", err))
 		return nil, fmt.Errorf("invalid snapshot: %v", err)
 	}
 
@@ -254,12 +295,20 @@ func (ss *StateSyncer) SyncWorldState() error {
 
 	// Get available peers
 	peers := ss.getAvailablePeers()
+	// ✅ Filter out banned peers
+	validPeers := make([]string, 0)
+	for _, peerID := range peers {
+		if !ss.isBanned(peerID) {
+			validPeers = append(validPeers, peerID)
+		}
+	}
+
 	if len(peers) == 0 {
 		return fmt.Errorf("no peers available for state sync")
 	}
 
 	// Get target height from best peer
-	targetHeight := ss.getMaxPeerHeight(peers)
+	targetHeight := ss.getMaxPeerHeight(validPeers)
 	currentHeight := ss.worldState.GetCurrentHeight()
 
 	if currentHeight >= targetHeight {

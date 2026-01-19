@@ -1029,3 +1029,20 @@ func (m *Manager) handleStateSnapshotRequest(s network.Stream) {
 func (m *Manager) GetValidationMetrics() map[string]interface{} {
 	return m.validator.GetMetrics()
 }
+
+// DisconnectPeer disconnects from a specific peer
+func (m *Manager) DisconnectPeer(peerIDStr string) error {
+	// Convert string to peer.ID
+	peerID, err := peer.Decode(peerIDStr)
+	if err != nil {
+		return fmt.Errorf("invalid peer ID: %v", err)
+	}
+
+	// Close connection to peer
+	if err := m.Host.Network().ClosePeer(peerID); err != nil { // ✅ Capital H
+		return fmt.Errorf("failed to disconnect peer %s: %v", peerIDStr, err)
+	}
+
+	log.Printf("🚫 Disconnected from peer %s\n", peerIDStr)
+	return nil
+}

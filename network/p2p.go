@@ -332,3 +332,11 @@ func (n *P2PNetwork) GetConnectedPeerIDs() []string {
 	}
 	return n.manager.GetConnectedPeerIDs()
 }
+
+// DisconnectPeer disconnects from a specific peer
+func (n *P2PNetwork) DisconnectPeer(peerID string) error {
+	if n.manager == nil {
+		return fmt.Errorf("P2P manager not available")
+	}
+	return n.manager.DisconnectPeer(peerID)
+}
