@@ -422,8 +422,13 @@ func (bc *Blockchain) CreateBlock(validator string, privateKey crypto.PrivateKey
 	return block, nil
 }
 
+const (
+	MaxReorgDepth = 100 // Maximum blocks to reorg
+)
+
 // ReorganizeChain switches the canonical chain to a new fork.
 // newBlocks must be sorted from oldest (common ancestor + 1) to newest (new head).
+// ReorganizeChain switches the canonical chain to a new fork.
 func (bc *Blockchain) ReorganizeChain(newBlocks []*core.Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -440,18 +445,56 @@ func (bc *Blockchain) ReorganizeChain(newBlocks []*core.Block) error {
 		return fmt.Errorf("common ancestor block %s not found", firstNewBlock.Header.PrevHash)
 	}
 
-	fmt.Printf("🔀 Executing Reorg: Switching from height %d to fork starting at %d\n",
-		bc.worldState.GetHeight(), firstNewBlock.Header.Index)
+	// 🔒 SAFETY CHECK 2: Calculate actual reorg depth
+	currentHead := bc.worldState.GetCurrentBlock()
+	reorgDepth := currentHead.Header.Index - commonAncestor.Header.Index
+	if reorgDepth > int64(MaxReorgDepth) {
+		return fmt.Errorf("reorg depth %d exceeds maximum %d", reorgDepth, MaxReorgDepth)
+	}
 
-	// 2. Apply new blocks
-	for _, block := range newBlocks {
-		// [FIX] Removed ExecuteBatchTransactions to prevent double execution.
-		// WorldState.AddBlock() already executes transactions internally.
+	fmt.Printf("🔀 Executing Reorg: Switching from height %d to fork starting at %d (depth: %d)\n",
+		bc.worldState.GetHeight(), firstNewBlock.Header.Index, reorgDepth)
 
-		// Force add the block (overwriting canonical pointer)
+	// 🔒 SAFETY CHECK 3: Validate ALL blocks BEFORE applying any
+	// This prevents partial application that would corrupt state
+	for i, block := range newBlocks {
+		// Verify block links correctly
+		if i == 0 {
+			if block.Header.PrevHash != commonAncestor.Hash {
+				return fmt.Errorf("first reorg block doesn't link to common ancestor")
+			}
+		} else {
+			if block.Header.PrevHash != newBlocks[i-1].Hash {
+				return fmt.Errorf("reorg block %d doesn't link to previous block", i)
+			}
+		}
+
+		// Validate block structure
+		if err := bc.validateBlockStructure(block); err != nil {
+			return fmt.Errorf("reorg block %d validation failed: %v", i, err)
+		}
+
+		// Validate with consensus engine if available
+		if bc.consensusEngine != nil {
+			if err := bc.consensusEngine.ValidateBlock(block); err != nil {
+				return fmt.Errorf("reorg block %d consensus validation failed: %v", i, err)
+			}
+		}
+	}
+
+	// 2. Apply new blocks (now we know they're ALL valid)
+	// If AddBlock fails here, it's a critical error (validation passed but execution failed)
+	for i, block := range newBlocks {
 		if err := bc.worldState.AddBlock(block); err != nil {
+			// 🚨 CRITICAL: Validation passed but application failed
+			// This indicates a serious bug or state corruption
+			fmt.Printf("❌ CRITICAL: Reorg failed during block application at block %d after validation passed\n", i)
+			fmt.Printf("   This may indicate state corruption. Manual recovery may be needed.\n")
 			return fmt.Errorf("reorg failed: could not add block %d: %v", block.Header.Index, err)
 		}
+
+		fmt.Printf("  ✓ Applied reorg block %d/%d (height %d)\n",
+			i+1, len(newBlocks), block.Header.Index)
 	}
 
 	fmt.Printf("✅ Reorg complete. New head height: %d\n", bc.worldState.GetHeight())
