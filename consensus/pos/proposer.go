@@ -310,7 +310,16 @@ func (bp *BlockProposer) packTransactions(sortedTxs []*core.Transaction) ([]*cor
 			continue
 		}
 
-		if totalGasUsed+tx.Gas > bp.maxBlockSize {
+		// ✅ SECURITY FIX: Safe gas calculation with overflow check
+		newTotal, err := math.SafeAdd(totalGasUsed, tx.Gas)
+		if err != nil {
+			// Gas overflow - reject transaction
+			log.Printf("Warning: transaction from %s would cause gas overflow, excluding", tx.From)
+			excludedTxs = append(excludedTxs, tx)
+			continue
+		}
+
+		if newTotal > bp.maxBlockSize {
 			excludedTxs = append(excludedTxs, tx)
 			continue
 		}
@@ -333,7 +342,7 @@ func (bp *BlockProposer) packTransactions(sortedTxs []*core.Transaction) ([]*cor
 		}
 
 		selectedTxs = append(selectedTxs, tx)
-		totalGasUsed += tx.Gas
+		totalGasUsed = newTotal // ✅ Use safely calculated value
 		accountNonces[tx.From]++
 	}
 

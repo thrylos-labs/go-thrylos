@@ -323,6 +323,15 @@ func (e *Executor) executeTransfer(tx *core.Transaction, accountManager *account
 			tx.From, senderShard, e.shardID)
 	}
 
+	// Validate gas limit
+	const maxGasLimit = 30000000
+	if tx.Gas > maxGasLimit {
+		return fmt.Errorf("gas limit %d exceeds maximum %d", tx.Gas, maxGasLimit)
+	}
+	if tx.Gas <= 0 {
+		return fmt.Errorf("invalid gas limit: %d", tx.Gas)
+	}
+
 	// 1. Calculate Total Cost (Amount + Gas*GasPrice)
 	amountBig := math.ParseBigInt(tx.Amount)
 	gasLimitBig := big.NewInt(tx.Gas)
@@ -387,6 +396,15 @@ func (e *Executor) executeStake(tx *core.Transaction, accountManager *account.Ac
 		return fmt.Errorf("failed to get account: %v", err)
 	}
 
+	// Validate gas limit
+	const maxGasLimit = 30000000
+	if tx.Gas > maxGasLimit {
+		return fmt.Errorf("gas limit %d exceeds maximum %d", tx.Gas, maxGasLimit)
+	}
+	if tx.Gas <= 0 {
+		return fmt.Errorf("invalid gas limit: %d", tx.Gas)
+	}
+
 	// 1. Calculate Total Cost
 	amountBig := math.ParseBigInt(tx.Amount)
 	gasLimitBig := big.NewInt(tx.Gas)
@@ -429,6 +447,14 @@ func (e *Executor) executeUnstake(tx *core.Transaction, accountManager *account.
 	account, err := accountManager.GetAccount(tx.From)
 	if err != nil {
 		return fmt.Errorf("failed to get account: %v", err)
+	}
+
+	const maxGasLimit = 30000000
+	if tx.Gas > maxGasLimit {
+		return fmt.Errorf("gas limit %d exceeds maximum %d", tx.Gas, maxGasLimit)
+	}
+	if tx.Gas <= 0 {
+		return fmt.Errorf("invalid gas limit: %d", tx.Gas)
 	}
 
 	// 1. Calculate Gas Cost
@@ -479,6 +505,14 @@ func (e *Executor) executeDelegate(tx *core.Transaction, accountManager *account
 	delegator, err := accountManager.GetAccount(tx.From)
 	if err != nil {
 		return fmt.Errorf("failed to get delegator account: %v", err)
+	}
+
+	const maxGasLimit = 30000000
+	if tx.Gas > maxGasLimit {
+		return fmt.Errorf("gas limit %d exceeds maximum %d", tx.Gas, maxGasLimit)
+	}
+	if tx.Gas <= 0 {
+		return fmt.Errorf("invalid gas limit: %d", tx.Gas)
 	}
 
 	// 1. Calculate Total Cost
@@ -542,6 +576,15 @@ func (e *Executor) executeUndelegate(tx *core.Transaction, accountManager *accou
 	delegator, err := accountManager.GetAccount(tx.From)
 	if err != nil {
 		return fmt.Errorf("failed to get delegator account: %v", err)
+	}
+
+	// Validate gas limit
+	const maxGasLimit = 30000000
+	if tx.Gas > maxGasLimit {
+		return fmt.Errorf("gas limit %d exceeds maximum %d", tx.Gas, maxGasLimit)
+	}
+	if tx.Gas <= 0 {
+		return fmt.Errorf("invalid gas limit: %d", tx.Gas)
 	}
 
 	// 1. Calculate Gas Cost
@@ -624,6 +667,14 @@ func (e *Executor) executeClaimRewards(tx *core.Transaction, accountManager *acc
 		return fmt.Errorf("failed to get account: %v", err)
 	}
 
+	const maxGasLimit = 30000000
+	if tx.Gas > maxGasLimit {
+		return fmt.Errorf("gas limit %d exceeds maximum %d", tx.Gas, maxGasLimit)
+	}
+	if tx.Gas <= 0 {
+		return fmt.Errorf("invalid gas limit: %d", tx.Gas)
+	}
+
 	// 1. Calculate Gas Cost
 	gasLimitBig := big.NewInt(tx.Gas)
 	gasPriceBig := math.ParseBigInt(tx.GasPrice)
@@ -687,6 +738,14 @@ func (e *Executor) ValidateExecution(tx *core.Transaction, accountManager *accou
 	// Validate nonce
 	if sender.Nonce != tx.Nonce {
 		return fmt.Errorf("invalid nonce: expected %d, got %d", sender.Nonce, tx.Nonce)
+	}
+
+	const maxGasLimit = 30000000
+	if tx.Gas > maxGasLimit {
+		return fmt.Errorf("gas limit %d exceeds maximum %d", tx.Gas, maxGasLimit)
+	}
+	if tx.Gas <= 0 {
+		return fmt.Errorf("invalid gas limit: %d", tx.Gas)
 	}
 
 	// Calculate common costs

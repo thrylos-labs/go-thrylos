@@ -7,6 +7,7 @@ import (
 
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
@@ -40,7 +41,6 @@ func (v *Validator) ValidateBlock(block *core.Block, prevBlock *core.Block, publ
 	}
 
 	// [FIX M-03] Enforce Timestamp Validation
-	// Use safe defaults if config is nil
 	maxFuture := 15 * time.Second
 	maxPast := 2 * time.Hour
 	if v.config != nil {
@@ -55,6 +55,11 @@ func (v *Validator) ValidateBlock(block *core.Block, prevBlock *core.Block, publ
 	// Shard-specific validation
 	if err := v.validateShardTransactions(block); err != nil {
 		return fmt.Errorf("shard transaction validation failed: %v", err)
+	}
+
+	// ✅ ADD THIS: Gas usage validation with overflow protection
+	if err := v.ValidateGasUsage(block); err != nil {
+		return fmt.Errorf("gas usage validation failed: %v", err)
 	}
 
 	// Cryptographic validation
@@ -291,15 +296,30 @@ func (v *Validator) verifyBlockSignature(block *core.Block, publicKey *crypto.Pu
 }
 
 // ValidateGasUsage validates that gas usage calculations are correct
+// ValidateGasUsage validates that gas usage calculations are correct
 func (v *Validator) ValidateGasUsage(block *core.Block) error {
 	calculatedGas := int64(0)
-	for _, tx := range block.Transactions {
-		calculatedGas += tx.Gas
+
+	// Calculate total gas with overflow protection
+	for i, tx := range block.Transactions {
+		newTotal, err := math.SafeAdd(calculatedGas, tx.Gas)
+		if err != nil {
+			return fmt.Errorf("gas overflow at transaction %d: %v", i, err)
+		}
+		calculatedGas = newTotal
 	}
 
+	// Verify against block header
 	if block.Header.GasUsed != calculatedGas {
 		return fmt.Errorf("gas used mismatch: header shows %d, calculated %d",
 			block.Header.GasUsed, calculatedGas)
+	}
+
+	// Verify doesn't exceed block limit
+	const maxBlockGas = 30000000 // 30M gas
+	if calculatedGas > maxBlockGas {
+		return fmt.Errorf("block gas %d exceeds maximum %d",
+			calculatedGas, maxBlockGas)
 	}
 
 	return nil
