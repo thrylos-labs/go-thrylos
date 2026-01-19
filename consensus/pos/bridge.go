@@ -95,9 +95,9 @@ func (cb *ConsensusBridge) forwardNetworkToConsensus() {
 			blockProposal := &BlockProposal{
 				Block:     block,
 				Proposer:  block.Header.Validator,
-				Slot:      uint64(block.Header.Index), // Approximation
+				Slot:      uint64(block.Header.Index),
 				Epoch:     uint64(block.Header.Index) / 32,
-				Signature: nil,
+				Signature: block.Signature, // ✅ FIX: Was nil, should copy from block
 			}
 			cb.consensus.receiveChan <- blockProposal
 			log.Printf("📦 Forwarded block %s to consensus", block.Hash[:min(8, len(block.Hash))])
