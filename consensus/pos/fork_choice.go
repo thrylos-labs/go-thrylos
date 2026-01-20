@@ -99,7 +99,9 @@ func (fc *ForkChoice) backgroundCleanup() {
 	}
 }
 
-// ProcessAttestation processes an attestation for fork choice with stake-weighted voting
+// CORRECTED ProcessAttestation method for fork_choice.go
+// Replace your current ProcessAttestation with this:
+
 func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
@@ -226,6 +228,14 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 
 		fmt.Printf("✅ Block %s reached 2/3 quorum: %s/%s stake (%.1f%%)\n",
 			blockHashShort, attestingStakeBig.String(), totalStakeBig.String(), percentage)
+
+		// ✅ CREATE CHECKPOINT (NEW - ADD THIS!)
+		fc.EnsurePeriodicCheckpoint(
+			epoch,
+			blockHash,
+			attestingStakeBig.String(),
+			totalStakeBig.String(),
+		)
 
 		// Check justification (passing strings)
 		fc.checkJustification(epoch, blockHash, attestingStakeBig.String(), totalStakeBig.String())
