@@ -55,6 +55,7 @@ type Server struct {
 	// Rate limiting
 	rateLimiter     *RateLimiter
 	rateLimitConfig *RateLimitConfig
+	endpointLimiter *EndpointLimiter
 }
 
 // ServerConfig represents server configuration
@@ -136,6 +137,7 @@ func NewServerWithConfig(
 	worldState *state.WorldState,
 	blockchain *chain.Blockchain, // <--- Add arg
 	evmExecutor *evm.RevmExecutor,
+
 	cfg *config.Config, // <--- Add arg
 ) *Server {
 
@@ -166,6 +168,7 @@ func NewServerWithConfig(
 	}
 
 	server.rateLimiter = NewRateLimiter(server.rateLimitConfig)
+	server.endpointLimiter = newEndpointLimiter()
 	server.setupRoutes()
 	return server
 }

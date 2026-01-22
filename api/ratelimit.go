@@ -287,15 +287,19 @@ func (s *Server) RateLimitMiddleware(tier string) func(http.Handler) http.Handle
 
 			ip := getClientIP(r)
 
-			// ✅ CHECK IF BLOCKED:
+			// Check if blocked
 			if s.rateLimiter.IsBlocked(ip) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Retry-After", "900") // 15 minutes
-				w.WriteHeader(http.StatusForbidden)
-				s.writeError(w, "IP temporarily blocked due to excessive rate limit violations", http.StatusForbidden)
+				// ... existing block code
 				return
 			}
 
+			// ✅ ADD: Check per-endpoint limit
+			if s.endpointLimiter != nil && !s.endpointLimiter.allow(r.URL.Path) {
+				s.writeRateLimitError(w, "endpoint")
+				return
+			}
+
+			// Existing IP rate limit check
 			if !s.rateLimiter.Allow(ip, tier) {
 				s.writeRateLimitError(w, tier)
 				return
@@ -321,6 +325,9 @@ func (s *Server) writeRateLimitError(w http.ResponseWriter, tier string) {
 	case "permissive":
 		message = "Rate limit exceeded. Please reduce request frequency."
 		retryAfter = 1 // 1 second
+	case "endpoint":
+		message = "Endpoint rate limit exceeded. This endpoint is receiving too many requests."
+		retryAfter = 5
 	default:
 		message = "Rate limit exceeded."
 		retryAfter = 10
@@ -386,4 +393,29 @@ func (rl *RateLimiter) GetStats() map[string]interface{} {
 	}
 
 	return stats
+}
+
+// EndpointLimiter tracks rate limits per endpoint
+type EndpointLimiter struct {
+	limiters map[string]*rate.Limiter
+	mu       sync.RWMutex
+}
+
+func newEndpointLimiter() *EndpointLimiter {
+	return &EndpointLimiter{
+		limiters: make(map[string]*rate.Limiter),
+	}
+}
+
+func (el *EndpointLimiter) allow(endpoint string) bool {
+	el.mu.Lock()
+	defer el.mu.Unlock()
+
+	limiter, exists := el.limiters[endpoint]
+	if !exists {
+		limiter = rate.NewLimiter(100, 200) // 100 req/sec, burst 200
+		el.limiters[endpoint] = limiter
+	}
+
+	return limiter.Allow()
 }
