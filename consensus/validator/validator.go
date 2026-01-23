@@ -13,6 +13,7 @@ package validator
 
 import (
 	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"sync"
@@ -24,6 +25,13 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/security"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+)
+
+const (
+	// Default slashing enforcement values
+	DefaultMaxSlashingEvents    = 3
+	DefaultMinStakeRetention    = 0.5 // 50%
+	DefaultAutoRemoveDoubleSign = true
 )
 
 // Manager handles validator operations
@@ -100,6 +108,29 @@ func NewManager(config *config.Config, worldState *state.WorldState) *Manager {
 
 		performanceWindow: config.Staking.SignedBlocksWindow,
 	}
+}
+
+// RemoveValidator permanently removes a validator from the active set
+// RemoveValidator permanently removes a validator from the active set
+func (vm *Manager) RemoveValidator(address string, reason string) error {
+	validator, err := vm.worldState.GetValidator(address)
+	if err != nil {
+		return fmt.Errorf("validator not found: %w", err)
+	}
+
+	// Mark validator as inactive and jail permanently
+	validator.Active = false
+	validator.JailUntil = time.Now().Add(365 * 24 * time.Hour).Unix()
+
+	// Update validator in world state
+	if err := vm.worldState.SetValidator(address, validator); err != nil {
+		return fmt.Errorf("failed to update validator: %w", err)
+	}
+
+	// Log removal
+	log.Printf("🚨 VALIDATOR REMOVED: %s (reason: %s)", address, reason)
+
+	return nil
 }
 
 // BeginUnbonding initiates unbonding process
@@ -362,7 +393,6 @@ func (vm *Manager) DeactivateValidator(address string, reason string) error {
 // SlashValidator slashes a validator for misbehavior
 // SlashValidator slashes a validator for misbehavior
 func (vm *Manager) SlashValidator(
-
 	address string,
 	reason SlashingReason,
 	evidence []byte,
@@ -375,6 +405,24 @@ func (vm *Manager) SlashValidator(
 		return fmt.Errorf("validator not found: %v", err)
 	}
 
+	// Get config values (with defaults if not set)
+	maxEvents := DefaultMaxSlashingEvents
+	minRetention := DefaultMinStakeRetention
+	autoRemoveDoubleSign := DefaultAutoRemoveDoubleSign
+
+	if vm.config != nil && vm.config.Staking.MaxSlashingEvents > 0 {
+		maxEvents = vm.config.Staking.MaxSlashingEvents
+	}
+	if vm.config != nil && vm.config.Staking.MinStakeRetention > 0 {
+		minRetention = vm.config.Staking.MinStakeRetention
+	}
+	if vm.config != nil {
+		autoRemoveDoubleSign = vm.config.Staking.AutoRemoveOnDoubleSign
+	}
+
+	// Count total slashing events for this validator (before adding new one)
+	slashCount := len(vm.slashingEvents[address])
+
 	// Calculate slash amount based on reason
 	var slashFraction float64
 	var jailDuration time.Duration
@@ -385,7 +433,15 @@ func (vm *Manager) SlashValidator(
 		jailDuration = 30 * 24 * time.Hour
 	case SlashingDowntime:
 		slashFraction = vm.config.Staking.SlashFractionDowntime
-		jailDuration = vm.config.Staking.DowntimeJailDuration
+		// ✅ Graduated jailing based on offense count
+		switch slashCount {
+		case 0:
+			jailDuration = 24 * time.Hour // First offense: 1 day
+		case 1:
+			jailDuration = 7 * 24 * time.Hour // Second offense: 1 week
+		default:
+			jailDuration = 30 * 24 * time.Hour // Third+ offense: 30 days
+		}
 	case SlashingInvalidBlock:
 		slashFraction = 0.01 // 1%
 		jailDuration = 24 * time.Hour
@@ -397,12 +453,9 @@ func (vm *Manager) SlashValidator(
 	stakeBig := math.ParseBigInt(validator.Stake)
 
 	// 2. Calculate Slash Amount: (Stake * Fraction)
-	// Use BigFloat for precision multiplication
 	fStake := new(big.Float).SetInt(stakeBig)
 	fFraction := big.NewFloat(slashFraction)
 	fSlashResult := new(big.Float).Mul(fStake, fFraction)
-
-	// Convert result back to BigInt
 	slashAmountBig, _ := fSlashResult.Int(nil)
 
 	// Ensure minimum slash of 1 Wei if fraction > 0 but result is 0
@@ -418,25 +471,20 @@ func (vm *Manager) SlashValidator(
 		stakeBig.SetInt64(0)
 	}
 
-	// 4. Update Validator State (Store as string)
+	// 4. Update Validator State
 	validator.Stake = stakeBig.String()
-
-	// Jail the validator
 	validator.JailUntil = time.Now().Add(jailDuration).Unix()
 	validator.Active = false
 	validator.UpdatedAt = time.Now().Unix()
 
-	// 5. Record slashing event (Convert slash amount to string)
+	// 5. Record slashing event
 	slashingEvent := &SlashingEvent{
 		ValidatorAddress: address,
 		Reason:           reason,
-
-		// ✅ Fix: Amount is likely now a string field in SlashingEvent too
-		Amount: slashAmountBig.String(),
-
-		BlockHeight: vm.worldState.GetHeight(),
-		Timestamp:   time.Now().Unix(),
-		Evidence:    evidence,
+		Amount:           slashAmountBig.String(),
+		BlockHeight:      vm.worldState.GetHeight(),
+		Timestamp:        time.Now().Unix(),
+		Evidence:         evidence,
 	}
 
 	if vm.slashingEvents[address] == nil {
@@ -444,14 +492,12 @@ func (vm *Manager) SlashValidator(
 	}
 	vm.slashingEvents[address] = append(vm.slashingEvents[address], slashingEvent)
 
-	// ✅ ADD THIS: Log the slashing event for security audit
+	// Log the slashing event for security audit
 	security.LogSlashing(address, string(reason), slashAmountBig.String())
 
 	// 6. Update metrics
 	if metrics, exists := vm.validatorMetrics[address]; exists {
 		metrics.SlashCount++
-
-		// Accumulate TotalSlashed (Parse -> Add -> Store)
 		currentSlashed := math.ParseBigInt(metrics.TotalSlashed)
 		currentSlashed.Add(currentSlashed, slashAmountBig)
 		metrics.TotalSlashed = currentSlashed.String()
@@ -463,10 +509,56 @@ func (vm *Manager) SlashValidator(
 		})
 	}
 
-	// Update validator in world state
+	// ============================================================================
+	// ENFORCEMENT RULES (using slashCount + 1 for new total)
+	// ============================================================================
+	newSlashCount := slashCount + 1 // Include the event we just added
+
+	// ENFORCEMENT RULE 1: Double-signing → Immediate removal
+	if reason == SlashingDoubleSign && autoRemoveDoubleSign {
+		if err := vm.RemoveValidator(address, "double_sign_detected"); err != nil {
+			log.Printf("⚠️ Failed to remove double-signer: %v", err)
+			// Still update the validator even if removal fails
+			vm.worldState.UpdateValidator(validator)
+		} else {
+			log.Printf("🚨 VALIDATOR REMOVED: %s (double-signing)", address)
+		}
+		return nil // Exit after removal attempt
+	}
+
+	// ENFORCEMENT RULE 2: Three Strikes → Permanent removal
+	if newSlashCount >= maxEvents {
+		if err := vm.RemoveValidator(address, fmt.Sprintf("exceeded_max_events_%d", maxEvents)); err != nil {
+			log.Printf("⚠️ Failed to remove repeat offender: %v", err)
+			vm.worldState.UpdateValidator(validator)
+		} else {
+			log.Printf("🚨 VALIDATOR REMOVED: %s (%d slashing events)", address, newSlashCount)
+		}
+		return nil
+	}
+
+	// ENFORCEMENT RULE 3: Stake below safety threshold → Remove
+	minStake := math.ParseBigInt(vm.config.Staking.MinValidatorStake)
+	safetyThreshold := new(big.Int).Mul(minStake, big.NewInt(int64(minRetention*100)))
+	safetyThreshold.Div(safetyThreshold, big.NewInt(100))
+
+	if stakeBig.Cmp(safetyThreshold) < 0 {
+		if err := vm.RemoveValidator(address, "stake_below_threshold"); err != nil {
+			log.Printf("⚠️ Failed to remove underfunded validator: %v", err)
+			vm.worldState.UpdateValidator(validator)
+		} else {
+			log.Printf("🚨 VALIDATOR REMOVED: %s (insufficient stake after slashing)", address)
+		}
+		return nil
+	}
+
+	// ENFORCEMENT RULE 4: If not removed, update validator normally
 	if err := vm.worldState.UpdateValidator(validator); err != nil {
 		return fmt.Errorf("failed to update slashed validator: %v", err)
 	}
+
+	log.Printf("⚙️ VALIDATOR SLASHED: %s (reason: %s, count: %d, jail: %v)",
+		address, reason, newSlashCount, jailDuration)
 
 	return nil
 }

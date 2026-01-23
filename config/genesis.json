@@ -21,6 +21,13 @@
       "purpose": "Bootnode 2 Stake (5M Tokens)",
       "locked": false,
       "unlock_blocks": 0
-    }
+    },
+    {
+  "staking": {
+    "max_slashing_events": 3,
+    "min_stake_retention": 0.5,
+    "auto_remove_double_sign": true
+  }
+}
   ]
 }

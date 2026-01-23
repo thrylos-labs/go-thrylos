@@ -184,6 +184,9 @@ type StakingConfig struct {
 	DowntimeJailDuration       time.Duration `json:"downtime_jail_duration"`
 	MinSignedPerWindow         float64       `json:"min_signed_per_window"`
 	SignedBlocksWindow         int64         `json:"signed_blocks_window"`
+	MaxSlashingEvents          int           `json:"max_slashing_events"`     // Default: 3
+	MinStakeRetention          float64       `json:"min_stake_retention"`     // Default: 0.5 (50%)
+	AutoRemoveOnDoubleSign     bool          `json:"auto_remove_double_sign"` // Default: true
 }
 
 type EconomicsConfig struct {
