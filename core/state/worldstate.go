@@ -294,7 +294,8 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 	ws.txExecutor = transaction.NewExecutor(
 		shardID,
 		totalShards,
-		ws,
+		ws.state, // ← ADD THIS LINE (your existing state field!)
+		ws,       // worldState
 		txValidator,
 		cfg,
 		revmExec,
@@ -304,6 +305,11 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 	ws.crossShardManager = NewCrossShardManager(ws)
 
 	return ws, nil
+}
+
+func (ws *WorldState) AtomicIncrementNonce(address string, expectedNonce uint64) (success bool, currentNonce uint64, err error) {
+	// Delegate to the state storage's atomic nonce method
+	return ws.state.AtomicIncrementNonce(address, expectedNonce)
 }
 
 // GetStateStorage returns the state storage handler (needed for consensus persistence)
@@ -1198,7 +1204,6 @@ func (csm *CrossShardManager) InitiateTransfer(from, to string, amount string, n
 	newBalanceBig := new(big.Int).Sub(balanceBig, amountBig)
 
 	senderAccount.Balance = newBalanceBig.String()
-	senderAccount.Nonce++
 
 	if err := csm.worldState.accountManager.UpdateAccount(senderAccount); err != nil {
 		return nil, fmt.Errorf("failed to update sender account: %v", err)

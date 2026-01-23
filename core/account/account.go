@@ -544,7 +544,6 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 
 	// Update Balances
 	fromAccount.Balance = new(big.Int).Sub(fromBalBig, amountBig).String()
-	fromAccount.Nonce++
 
 	toBalBig, _ := new(big.Int).SetString(toAccount.Balance, 10)
 	if toBalBig == nil {

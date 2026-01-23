@@ -1339,7 +1339,6 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 		// Update Balance
 		balanceBig.Sub(balanceBig, totalCostBig)
 		account.Balance = balanceBig.String()
-		account.Nonce++
 
 	case core.TransactionType_STAKE:
 		// Total Cost = Amount + GasCost
@@ -1358,8 +1357,6 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 		// Update Staked Amount: Staked + Amount
 		stakedBig.Add(stakedBig, amountBig)
 		account.StakedAmount = stakedBig.String()
-
-		account.Nonce++
 
 	case core.TransactionType_UNSTAKE:
 		// Check Balance for Gas
@@ -1384,8 +1381,6 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 		// Deduct from Staked Amount
 		stakedBig.Sub(stakedBig, amountBig)
 		account.StakedAmount = stakedBig.String()
-
-		account.Nonce++
 
 	case core.TransactionType_DELEGATE:
 		// Total Cost = Amount + GasCost
@@ -1420,8 +1415,6 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 
 		currentDelegationBig.Add(currentDelegationBig, amountBig)
 		account.DelegatedTo[tx.To] = currentDelegationBig.String()
-
-		account.Nonce++
 
 	case core.TransactionType_UNDELEGATE:
 		// Check Balance for Gas
@@ -1468,8 +1461,6 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 			account.DelegatedTo[tx.To] = currentDelegationBig.String()
 		}
 
-		account.Nonce++
-
 	case core.TransactionType_CLAIM_REWARDS:
 		// Check Balance for Gas
 		if balanceBig.Cmp(gasCostBig) < 0 {
@@ -1486,7 +1477,6 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 
 		// Reset Rewards
 		account.Rewards = "0"
-		account.Nonce++
 	}
 
 	return nil

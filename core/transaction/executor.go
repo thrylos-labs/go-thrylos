@@ -20,6 +20,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/storage"
 )
 
 // ExecutionReceipt represents the result of transaction execution
@@ -33,30 +34,33 @@ type ExecutionReceipt struct {
 
 // Executor handles transaction execution against account state
 type Executor struct {
-	shardID     account.ShardID
-	totalShards int
-	worldState  StateInterface
-	validator   *Validator
-	config      *config.Config
-	evmExecutor EVMExecutorInterface
+	shardID      account.ShardID
+	totalShards  int
+	stateStorage *storage.StateStorage
+	worldState   StateInterface
+	validator    *Validator
+	config       *config.Config
+	evmExecutor  EVMExecutorInterface
 }
 
 // NewExecutor creates a new transaction executor
 func NewExecutor(
 	shardID account.ShardID,
 	totalShards int,
+	stateStorage *storage.StateStorage, // ← ADD THIS LINE
 	worldState StateInterface,
 	validator *Validator,
 	cfg *config.Config,
 	evmExecutor EVMExecutorInterface,
 ) *Executor {
 	return &Executor{
-		shardID:     shardID,
-		totalShards: totalShards,
-		worldState:  worldState,
-		validator:   validator,
-		config:      cfg,
-		evmExecutor: evmExecutor,
+		shardID:      shardID,
+		totalShards:  totalShards,
+		worldState:   worldState,
+		stateStorage: stateStorage,
+		validator:    validator,
+		config:       cfg,
+		evmExecutor:  evmExecutor,
 	}
 }
 
@@ -73,39 +77,75 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 		Status:  0, // Default to failure
 	}
 
-	var err error
+	// ============================================================================
+	// CRITICAL: ATOMIC NONCE VALIDATION
+	// This prevents race conditions and double-spending
+	// ============================================================================
+
+	// Get the sender address from the transaction
+	senderAddress := tx.From // Assuming tx.From contains the sender's address as string
+
+	// Attempt to atomically increment the nonce if it matches the expected value
+	success, currentNonce, err := e.stateStorage.AtomicIncrementNonce(senderAddress, tx.Nonce)
+
+	if err != nil {
+		receipt.Error = fmt.Sprintf("nonce validation failed: %v", err)
+		return receipt, fmt.Errorf("nonce validation failed: %w", err)
+	}
+
+	if !success {
+		// Nonce mismatch - this transaction is either:
+		// 1. Too old (already processed)
+		// 2. Too new (gaps in nonce sequence)
+		// 3. Another transaction with same nonce was processed first (race condition prevented!)
+		receipt.Error = fmt.Sprintf("nonce mismatch: expected %d, but account nonce is %d", tx.Nonce, currentNonce)
+		return receipt, fmt.Errorf("nonce mismatch: expected %d, but account nonce is %d", tx.Nonce, currentNonce)
+	}
+
+	// ✅ At this point, the nonce has been atomically incremented
+	// Even if execution fails below, we DO NOT roll back the nonce increment
+	// This is intentional and matches Ethereum behavior to prevent replay attacks
+
+	// ============================================================================
+	// EXECUTE TRANSACTION LOGIC
+	// ============================================================================
+
+	var execErr error
 
 	switch tx.Type {
 	case core.TransactionType_TRANSFER:
-		err = e.executeTransfer(tx, accountManager)
+		execErr = e.executeTransfer(tx, accountManager)
 	case core.TransactionType_STAKE:
-		err = e.executeStake(tx, accountManager)
+		execErr = e.executeStake(tx, accountManager)
 	case core.TransactionType_UNSTAKE:
-		err = e.executeUnstake(tx, accountManager)
+		execErr = e.executeUnstake(tx, accountManager)
 	case core.TransactionType_DELEGATE:
-		err = e.executeDelegate(tx, accountManager)
+		execErr = e.executeDelegate(tx, accountManager)
 	case core.TransactionType_UNDELEGATE:
-		err = e.executeUndelegate(tx, accountManager)
+		execErr = e.executeUndelegate(tx, accountManager)
 	case core.TransactionType_CLAIM_REWARDS:
-		err = e.executeClaimRewards(tx, accountManager)
+		execErr = e.executeClaimRewards(tx, accountManager)
 
 	// EVM CASES
 	case core.TransactionType_EVM_CONTRACT_CALL:
 		// executeEVMCall returns (receipt, error), so we return immediately
+		// Note: Nonce is already incremented above, so we're safe
 		return e.executeEVMCall(tx)
 
 	case core.TransactionType_EVM_CONTRACT_DEPLOY:
-		// executeEVMDeploy returns ONLY error. We must assign it to err.
-		err = e.executeEVMDeploy(tx)
+		// executeEVMDeploy returns ONLY error. We must assign it to execErr.
+		execErr = e.executeEVMDeploy(tx)
 
 	default:
-		err = fmt.Errorf("unknown transaction type: %v", tx.Type)
+		execErr = fmt.Errorf("unknown transaction type: %v", tx.Type)
 	}
 
-	// Handle standard errors (Transfer, Stake, Deploy, etc.)
-	if err != nil {
-		receipt.Error = err.Error()
-		return receipt, err
+	// Handle execution errors
+	// IMPORTANT: Even if execution fails, we already incremented the nonce
+	// This prevents replay attacks where someone tries to re-submit a failed transaction
+	if execErr != nil {
+		receipt.Error = execErr.Error()
+		return receipt, execErr
 	}
 
 	// Mark as successful if no error
@@ -182,9 +222,6 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 	// Deduct max gas + value immediately
 	newBalance := new(big.Int).Sub(balance, totalReq)
 	e.worldState.UpdateBalance(tx.From, newBalance)
-
-	// Increment nonce immediately (prevents reentrancy)
-	e.worldState.SetNonce(tx.From, nonce+1)
 
 	// 6. NOW Execute EVM Call (safe - state already updated)
 	returnData, gasUsed, err := e.evmExecutor.ExecuteCall(
@@ -281,10 +318,6 @@ func (e *Executor) executeEVMDeploy(tx *core.Transaction) error {
 	balanceBig.Sub(balanceBig, gasCostBig)
 	e.worldState.UpdateBalance(tx.From, balanceBig)
 
-	// Increment nonce
-	nonce, _ := e.worldState.GetNonce(tx.From)
-	e.worldState.SetNonce(tx.From, nonce+1)
-
 	log.Printf("✅ Contract deployed at %s, gas used: %d",
 		contractAddr.Hex(), gasUsed)
 
@@ -368,7 +401,6 @@ func (e *Executor) executeTransfer(tx *core.Transaction, accountManager *account
 	receiverBalanceBig.Add(receiverBalanceBig, amountBig)
 
 	sender.Balance = senderBalanceBig.String()
-	sender.Nonce++
 	receiver.Balance = receiverBalanceBig.String()
 
 	// Save accounts
@@ -431,7 +463,6 @@ func (e *Executor) executeStake(tx *core.Transaction, accountManager *account.Ac
 
 	account.Balance = senderBalanceBig.String()
 	account.StakedAmount = stakedAmountBig.String()
-	account.Nonce++
 
 	return accountManager.UpdateAccount(account)
 }
@@ -489,7 +520,6 @@ func (e *Executor) executeUnstake(tx *core.Transaction, accountManager *account.
 
 	account.Balance = senderBalanceBig.String()
 	account.StakedAmount = stakedAmountBig.String()
-	account.Nonce++
 
 	return accountManager.UpdateAccount(account)
 }
@@ -546,7 +576,6 @@ func (e *Executor) executeDelegate(tx *core.Transaction, accountManager *account
 
 	delegator.Balance = delegatorBalanceBig.String()
 	delegator.StakedAmount = stakedAmountBig.String()
-	delegator.Nonce++
 
 	// Update Delegation Map
 	if delegator.DelegatedTo == nil {
@@ -643,7 +672,6 @@ func (e *Executor) executeUndelegate(tx *core.Transaction, accountManager *accou
 
 	delegator.Balance = delegatorBalanceBig.String()
 	delegator.StakedAmount = stakedAmountBig.String()
-	delegator.Nonce++
 
 	if currentDelegationBig.Sign() == 0 {
 		delete(delegator.DelegatedTo, validatorAddr)
@@ -704,7 +732,6 @@ func (e *Executor) executeClaimRewards(tx *core.Transaction, accountManager *acc
 
 	account.Balance = senderBalanceBig.String()
 	account.Rewards = "0"
-	account.Nonce++
 
 	return accountManager.UpdateAccount(account)
 }

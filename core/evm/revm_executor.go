@@ -38,13 +38,13 @@ void revm_free_result(CExecutionResult result);
 // 👇 UPDATED SIGNATURE: Added uint64_t nonce at the end
 CExecutionResult revm_execute_call(void* executor, CAddress caller, CAddress to, CByteSlice data, uint64_t gas, CU256 value, uint64_t nonce);
 
-CExecutionResult revm_deploy_contract(void* executor, CAddress deployer, CByteSlice code, uint64_t gas, CU256 value);
+CExecutionResult revm_deploy_contract(void* executor, CAddress deployer, CByteSlice code, uint64_t gas, CU256 value, uint64_t nonce);
 CAddress revm_calculate_create_address(CAddress deployer, uint64_t nonce);
 uint64_t revm_estimate_gas(void* executor, CAddress caller, CAddress to, CByteSlice data, CU256 value);
 void revm_free_string(char* s);
 void revm_free_bytes(uint8_t* data, size_t len);
 */
-import "C" // <--- SUCCESS: Touching the comment block
+import "C"
 import (
 	"fmt"
 	"math/big"
@@ -61,6 +61,7 @@ type StateReader interface {
 	GetNonce(address string) (uint64, error)
 	GetContractCode(address string) ([]byte, error)
 	GetContractStorage(address, key string) ([]byte, error)
+	AtomicIncrementNonce(address string, expectedNonce uint64) (success bool, currentNonce uint64, err error)
 }
 
 type RevmExecutor struct {
@@ -115,8 +116,9 @@ func (e *RevmExecutor) Close() {
 	}
 }
 
-// ExecuteCall executes a message call and safely cleans up memory
-// ExecuteCall executes a message call and safely cleans up memory
+// ============================================================================
+// ExecuteCall - UPDATED with atomic nonce validation
+// ============================================================================
 func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte, gas uint64, value *big.Int, nonce uint64) ([]byte, uint64, error) {
 	// SECURITY: Validate gas parameter
 	const maxGasLimit = 30000000
@@ -126,6 +128,21 @@ func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte
 	if gas == 0 {
 		return nil, 0, fmt.Errorf("gas limit cannot be zero")
 	}
+
+	// ✅ CRITICAL: ATOMIC NONCE VALIDATION
+	// This prevents race conditions and double-spending at the EVM layer
+	success, currentNonce, err := e.worldState.AtomicIncrementNonce(caller.Hex(), nonce)
+
+	if err != nil {
+		return nil, 0, fmt.Errorf("nonce validation failed: %w", err)
+	}
+
+	if !success {
+		return nil, 0, fmt.Errorf("nonce mismatch: expected %d, but account nonce is %d", nonce, currentNonce)
+	}
+
+	// ✅ Nonce is now atomically incremented - safe to execute
+	// Even if EVM execution fails below, we DO NOT roll back the nonce
 
 	// 1. Convert Go types to C types
 	cCaller := addressToC(caller)
@@ -139,7 +156,7 @@ func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte
 
 	cValue := bigIntToC(value)
 
-	// 2. Call Rust (Now with Nonce for H-02 Security Fix)
+	// 2. Call Rust (Now with Nonce - but validation already done above)
 	res := C.revm_execute_call(e.executor, cCaller, cContract, cData, C.uint64_t(gas), cValue, C.uint64_t(nonce))
 
 	// 3. 🛡️ SECURITY FIX: Clean up Rust memory immediately after execution
@@ -154,7 +171,9 @@ func (e *RevmExecutor) GetNonce(address common.Address) uint64 {
 	return n
 }
 
-// DeployContract creates a new contract and safely cleans up memory
+// ============================================================================
+// DeployContract - UPDATED with atomic nonce validation
+// ============================================================================
 func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, gas uint64, value *big.Int) (common.Address, uint64, error) {
 	// SECURITY: Validate gas parameter
 	const maxGasLimit = 30000000
@@ -165,10 +184,28 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 		return common.Address{}, 0, fmt.Errorf("gas limit cannot be zero")
 	}
 
-	nonce, _ := e.worldState.GetNonce(deployer.Hex())
+	// Get current nonce for address calculation
+	nonce, err := e.worldState.GetNonce(deployer.Hex())
+	if err != nil {
+		return common.Address{}, 0, fmt.Errorf("failed to get nonce: %w", err)
+	}
+
+	// ✅ CRITICAL: ATOMIC NONCE VALIDATION for deployment
+	success, currentNonce, err := e.worldState.AtomicIncrementNonce(deployer.Hex(), nonce)
+
+	if err != nil {
+		return common.Address{}, 0, fmt.Errorf("nonce validation failed: %w", err)
+	}
+
+	if !success {
+		return common.Address{}, 0, fmt.Errorf("nonce mismatch: expected %d, but account nonce is %d", nonce, currentNonce)
+	}
+
+	// ✅ Nonce is now atomically incremented - safe to deploy
+
 	cDeployer := addressToC(deployer)
 
-	// Calculate contract address via Rust helper
+	// Calculate contract address via Rust helper (using the nonce BEFORE increment)
 	cAddr := C.revm_calculate_create_address(cDeployer, C.uint64_t(nonce))
 	contractAddr := cToAddress(cAddr)
 
@@ -180,7 +217,7 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 
 	cValue := bigIntToC(value)
 
-	res := C.revm_deploy_contract(e.executor, cDeployer, cCode, C.uint64_t(gas), cValue)
+	res := C.revm_deploy_contract(e.executor, cDeployer, cCode, C.uint64_t(gas), cValue, C.uint64_t(nonce))
 
 	// 🛡️ SECURITY FIX: Clean up Rust memory after Go copies it
 	defer C.revm_free_result(res)
@@ -189,6 +226,9 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 	return contractAddr, gasUsed, err
 }
 
+// ============================================================================
+// EstimateGas - Read-only, does NOT increment nonce
+// ============================================================================
 func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data []byte, value *big.Int) (uint64, error) {
 	cFrom := addressToC(from)
 	var cTo C.CAddress
@@ -203,6 +243,9 @@ func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data
 	}
 
 	cValue := bigIntToC(value)
+
+	// ✅ Gas estimation is read-only - uses GetNonce (no increment)
+	// The Rust side handles this correctly already
 
 	// Call the Rust function
 	gas := C.revm_estimate_gas(e.executor, cFrom, cTo, cData, cValue)
@@ -309,6 +352,8 @@ func getNonceCallback(addr C.CAddress) C.uint64_t {
 	if globalExecutor == nil {
 		return 0
 	}
+	// ✅ This is read-only - used for gas estimation and queries
+	// Does NOT increment nonce
 	val, _ := globalExecutor.worldState.GetNonce(cToAddress(addr).Hex())
 	return C.uint64_t(val)
 }

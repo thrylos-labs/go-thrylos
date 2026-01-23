@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/dgraph-io/badger/v3"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/types"
 )
@@ -324,4 +325,71 @@ func (ss *StateStorage) SaveConsensusVote(vote *types.Vote) error {
 func (ss *StateStorage) HasVoted(epoch uint64, validatorAddr string) (bool, error) {
 	key := []byte(fmt.Sprintf("consensus:vote:%d:%s", epoch, validatorAddr))
 	return ss.storage.Has(key)
+}
+
+// Returns true if successful, false if nonce mismatch (someone else incremented it)
+func (ss *StateStorage) AtomicIncrementNonce(address string, expectedNonce uint64) (success bool, currentNonce uint64, err error) {
+	// Build the key for this address's nonce
+	key := []byte("nonce_" + address)
+
+	// Use AtomicUpdate which provides a badger transaction
+	err = ss.storage.AtomicUpdate(func(txn *badger.Txn) error {
+		// Read current nonce inside the transaction
+		item, err := txn.Get(key)
+		if err == badger.ErrKeyNotFound {
+			// Key doesn't exist, current nonce is 0
+			currentNonce = 0
+		} else if err != nil {
+			return err
+		} else {
+			// Parse the existing nonce value
+			err = item.Value(func(val []byte) error {
+				currentNonce = binary.BigEndian.Uint64(val)
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+
+		// Check if nonce matches expected value
+		if currentNonce != expectedNonce {
+			success = false
+			return nil // Not an error, just a mismatch
+		}
+
+		// Increment and write back atomically within the same transaction
+		newNonce := currentNonce + 1
+		buf := make([]byte, 8)
+		binary.BigEndian.PutUint64(buf, newNonce)
+
+		err = txn.Set(key, buf)
+		if err != nil {
+			return err
+		}
+
+		success = true
+		return nil
+	})
+
+	return success, currentNonce, err
+}
+
+// GetNonce reads the current nonce (read-only, no increment)
+func (ss *StateStorage) GetNonce(address string) (uint64, error) {
+	key := []byte("nonce_" + address)
+
+	// Simple read operation
+	val, err := ss.storage.Get(key)
+	if err != nil {
+		// If key doesn't exist, return nonce 0 (this is expected for new accounts)
+		if err == badger.ErrKeyNotFound {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	// Parse and return the nonce
+	nonce := binary.BigEndian.Uint64(val)
+	return nonce, nil
 }
