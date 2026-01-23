@@ -159,13 +159,17 @@ type ConsensusConfig struct {
 	MaxTxDataSize      int           `json:"max_tx_data_size"`
 	StakeCacheTTL      time.Duration `json:"stake_cache_ttl"`
 
-	SlashingDoubleVote      int    `json:"slashing_double_vote"`
-	SlashingSurroundVote    int    `json:"slashing_surround_vote"`
-	SlashingInvalidProposal int    `json:"slashing_invalid_proposal"`
-	SlashingDowntime        int    `json:"slashing_downtime"`
-	SlashingInvalidSig      int    `json:"slashing_invalid_sig"`
-	MaxMissedAttestations   uint64 `json:"max_missed_attestations"`
-	JailDurationHours       int    `json:"jail_duration_hours"`
+	SlashingDoubleVote      int     `json:"slashing_double_vote"`
+	SlashingSurroundVote    int     `json:"slashing_surround_vote"`
+	SlashingInvalidProposal int     `json:"slashing_invalid_proposal"`
+	SlashingDowntime        int     `json:"slashing_downtime"`
+	SlashingInvalidSig      int     `json:"slashing_invalid_sig"`
+	MaxMissedAttestations   uint64  `json:"max_missed_attestations"`
+	JailDurationHours       int     `json:"jail_duration_hours"`
+	MaxReorgDepth           int     `json:"max_reorg_depth"`
+	FinalizationEpochs      int     `json:"finalization_epochs"`
+	MinStakeForReorg        float64 `json:"min_stake_for_reorg"`
+	CheckpointInterval      int     `json:"checkpoint_interval"`
 }
 
 type StakingConfig struct {

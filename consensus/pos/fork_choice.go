@@ -22,6 +22,10 @@ type ForkChoiceConfig struct {
 	StakeCacheTTL           time.Duration // How long to cache total stake (default: 30s)
 	EnableMetrics           bool          // Enable detailed metrics tracking
 	MaxAttestationsPerBlock int           // Max attestations to store per block (default: 1000)
+	MaxReorgDepth           int           `json:"max_reorg_depth"`     // Maximum reorg depth (default: 100)
+	FinalizationEpochs      int           `json:"finalization_epochs"` // Epochs before finalization (default: 2)
+	MinStakeForReorg        float64       `json:"min_stake_for_reorg"` // Minimum stake fraction (default: 0.66 = 66%)
+	CheckpointInterval      int           `json:"checkpoint_interval"`
 }
 
 // DefaultForkChoiceConfig returns sensible defaults
@@ -33,6 +37,10 @@ func DefaultForkChoiceConfig() *ForkChoiceConfig {
 		StakeCacheTTL:           30 * time.Second,
 		EnableMetrics:           true,
 		MaxAttestationsPerBlock: 1000,
+		MaxReorgDepth:           100,  // Can reorg up to 100 blocks
+		FinalizationEpochs:      2,    // Finalize after 2 epochs
+		MinStakeForReorg:        0.66, // Require 66% stake for reorg
+		CheckpointInterval:      10,   // Checkpoint every 10 epochs
 	}
 }
 

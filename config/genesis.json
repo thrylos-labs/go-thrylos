@@ -28,6 +28,16 @@
     "min_stake_retention": 0.5,
     "auto_remove_double_sign": true
   }
+},
+{
+  "consensus": {
+    "fork_choice": {
+      "max_reorg_depth": 100,
+      "finalization_epochs": 2,
+      "min_stake_for_reorg": 0.66,
+      "checkpoint_interval": 10
+    }
+  }
 }
   ]
 }
