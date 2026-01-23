@@ -11,7 +11,26 @@
 const MAX_GAS_LIMIT: u64 = 30_000_000;           // 30M gas (Ethereum block limit)
 const MAX_CALLDATA_SIZE: usize = 1_048_576;      // 1 MB max calldata
 const MAX_BYTECODE_SIZE: usize = 24_576;         // 24 KB (EIP-170 limit)
-const MIN_POINTER_ALIGNMENT: usize = 8;          // 64-bit alignment
+const EXECUTOR_MAGIC: u64 = 0xDEADBEEF_CAFEBABE;
+const EXECUTOR_FREED_MAGIC: u64 = 0xDEADDEAD_DEADBEEF;
+
+macro_rules! with_executor {
+    ($executor:expr, $body:expr) => {{
+        if let Err(msg) = validate_executor($executor) {
+            return create_error_result(msg);
+        }
+        
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let executor: &mut EVMExecutor = unsafe { &mut *$executor };
+            $body(executor)
+        }));
+        
+        match result {
+            Ok(r) => r,
+            Err(_) => create_error_result("Panic in executor operation"),
+        }
+    }};
+}
 
 use revm::{
     db::CacheDB,
@@ -88,12 +107,20 @@ fn create_error_result(msg: &str) -> CExecutionResult {
 /// Validate executor pointer for safety
 fn validate_executor(executor: *mut EVMExecutor) -> Result<(), &'static str> {
     if executor.is_null() {
-        return Err("Null executor pointer");
+        return Err("Executor pointer is null");
     }
     
-    // Check pointer alignment
-    if (executor as usize) % MIN_POINTER_ALIGNMENT != 0 {
-        return Err("Misaligned executor pointer");
+    unsafe {
+        // ✅ Check magic number
+        let magic = (*executor).magic;
+        
+        if magic == EXECUTOR_FREED_MAGIC {
+            return Err("Executor has been freed (use-after-free detected)");
+        }
+        
+        if magic != EXECUTOR_MAGIC {
+            return Err("Executor pointer is corrupted (invalid magic number)");
+        }
     }
     
     Ok(())
@@ -233,6 +260,7 @@ impl Database for EmptyDB {
 // ============================================================================
 
 pub struct EVMExecutor {
+    magic: u64,  
     db: ThrylosDB,
     chain_id: u64,
     account_locks: Arc<DashMap<Address, Arc<Mutex<()>>>>,  // ✅ NEW for C-01
@@ -243,23 +271,24 @@ impl EVMExecutor {
         chain_id: u64,
         get_balance_fn: extern "C" fn(CAddress) -> CU256,
         get_nonce_fn: extern "C" fn(CAddress) -> u64,
-        set_nonce_fn: extern "C" fn(CAddress, u64) -> bool,  // ✅ NEW
+        set_nonce_fn: extern "C" fn(CAddress, u64) -> bool,
         get_code_fn: extern "C" fn(CAddress) -> CByteSlice,
         get_storage_fn: extern "C" fn(CAddress, CU256) -> CU256,
     ) -> Self {
         let db = ThrylosDB {
             get_balance_fn,
             get_nonce_fn,
-            set_nonce_fn,  // ✅ NEW
+            set_nonce_fn,
             get_code_fn,
             get_storage_fn,
             cache: CacheDB::new(EmptyDB),
         };
 
         Self {
+            magic: EXECUTOR_MAGIC,  // ✅ Initialize magic here
             db,
             chain_id,
-            account_locks: Arc::new(DashMap::new()),  // ✅ NEW
+            account_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -530,7 +559,7 @@ pub extern "C" fn revm_executor_new(
     chain_id: u64,
     get_balance_fn: extern "C" fn(CAddress) -> CU256,
     get_nonce_fn: extern "C" fn(CAddress) -> u64,
-    set_nonce_fn: extern "C" fn(CAddress, u64) -> bool,  // ✅ NEW
+    set_nonce_fn: extern "C" fn(CAddress, u64) -> bool,
     get_code_fn: extern "C" fn(CAddress) -> CByteSlice,
     get_storage_fn: extern "C" fn(CAddress, CU256) -> CU256,
 ) -> *mut EVMExecutor {
@@ -538,7 +567,7 @@ pub extern "C" fn revm_executor_new(
         chain_id,
         get_balance_fn,
         get_nonce_fn,
-        set_nonce_fn,  // ✅ NEW
+        set_nonce_fn,
         get_code_fn,
         get_storage_fn,
     );
@@ -547,10 +576,14 @@ pub extern "C" fn revm_executor_new(
 
 #[no_mangle]
 pub extern "C" fn revm_executor_free(executor: *mut EVMExecutor) {
-    if !executor.is_null() {
-        unsafe {
-            let _ = Box::from_raw(executor);
-        }
+    if executor.is_null() {
+        return;
+    }
+    
+    unsafe {
+        // ✅ Mark as freed before dropping
+        (*executor).magic = EXECUTOR_FREED_MAGIC;
+        let _ = Box::from_raw(executor);
     }
 }
 
@@ -582,24 +615,19 @@ pub extern "C" fn revm_execute_call(
     data: CByteSlice,
     gas_limit: u64,
     value: CU256,
-    nonce: u64,  // ✅ NEW: Nonce is now required
+    nonce: u64,
 ) -> CExecutionResult {
-    // ✅ Step 1: Validate inputs
-    if let Err(msg) = validate_executor(executor) {
-        return create_error_result(msg);
-    }
-
+    // Validate other inputs first
     if let Err(msg) = validate_gas_limit(gas_limit) {
         return create_error_result(msg);
     }
-
+    
     if let Err(msg) = validate_data(data, MAX_CALLDATA_SIZE, "Calldata") {
         return create_error_result(&msg);
     }
-
-    // ✅ Step 2: Execute with nonce validation
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let executor = unsafe { &mut *executor };
+    
+    // ✅ Use the safe wrapper
+    with_executor!(executor, |exec: &mut EVMExecutor| {
         let caller_addr = Address::from_slice(&caller.bytes);
         let to_addr = Address::from_slice(&to.bytes);
         
@@ -610,32 +638,9 @@ pub extern "C" fn revm_execute_call(
         };
         
         let value_u256 = U256::from_be_bytes(value.bytes);
-
-        // ✅ Call with nonce - validation happens inside execute_call
-        executor.execute_call(
-            caller_addr, 
-            to_addr, 
-            data_bytes, 
-            gas_limit, 
-            value_u256,
-            nonce  // ✅ Pass nonce
-        )
-    }));
-
-    match result {
-        Ok(exec_result) => exec_result,
-        Err(e) => {
-            let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                format!("Execution error: {}", s)
-            } else if let Some(s) = e.downcast_ref::<String>() {
-                format!("Execution error: {}", s)
-            } else {
-                "Critical: Rust panic in execute_call".to_string()
-            };
-
-            create_error_result(&msg)
-        }
-    }
+        
+        exec.execute_call(caller_addr, to_addr, data_bytes, gas_limit, value_u256, nonce)
+    })
 }
 
 #[no_mangle]
@@ -645,13 +650,9 @@ pub extern "C" fn revm_deploy_contract(
     bytecode: CByteSlice,
     gas_limit: u64,
     value: CU256,
-    nonce: u64,  // ✅ NEW: Nonce is now required
+    nonce: u64,
 ) -> CExecutionResult {
-    // ✅ Validate ALL inputs
-    if let Err(msg) = validate_executor(executor) {
-        return create_error_result(msg);
-    }
-
+    // Validate inputs
     if let Err(msg) = validate_gas_limit(gas_limit) {
         return create_error_result(msg);
     }
@@ -660,9 +661,8 @@ pub extern "C" fn revm_deploy_contract(
         return create_error_result(&msg);
     }
 
-    // ✅ Execute with nonce validation
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let executor = unsafe { &mut *executor };
+    // ✅ Use the safe wrapper
+    with_executor!(executor, |exec: &mut EVMExecutor| {
         let deployer_addr = Address::from_slice(&deployer.bytes);
         
         let bytecode_bytes = if bytecode.len > 0 {
@@ -672,20 +672,14 @@ pub extern "C" fn revm_deploy_contract(
         };
         let value_u256 = U256::from_be_bytes(value.bytes);
 
-        // ✅ Call with nonce - validation happens inside deploy_contract
-        executor.deploy_contract(
+        exec.deploy_contract(
             deployer_addr, 
             bytecode_bytes, 
             gas_limit, 
             value_u256,
-            nonce  // ✅ Pass nonce
+            nonce
         )
-    }));
-
-    match result {
-        Ok(exec_result) => exec_result,
-        Err(_) => create_error_result("Critical: Rust panic in deploy_contract")
-    }
+    })
 }
 
 #[no_mangle]
