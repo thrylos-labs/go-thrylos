@@ -230,6 +230,9 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 // EstimateGas - Read-only, does NOT increment nonce
 // ============================================================================
 func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data []byte, value *big.Int) (uint64, error) {
+	const maxGasLimit = 30000000    // 30M - Ethereum block limit
+	const maxEstimateGas = 15000000 // 15M - Half of block limit for safety
+
 	cFrom := addressToC(from)
 	var cTo C.CAddress
 	if to != nil {
@@ -244,22 +247,33 @@ func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data
 
 	cValue := bigIntToC(value)
 
-	// ✅ Gas estimation is read-only - uses GetNonce (no increment)
-	// The Rust side handles this correctly already
-
 	// Call the Rust function
 	gas := C.revm_estimate_gas(e.executor, cFrom, cTo, cData, cValue)
 
-	// 🛡️ SECURITY FIX (CK-03): Check for Rust Panic Sentinel
+	// ✅ SECURITY CHECK 1: Check for Rust panic sentinel
 	if uint64(gas) == ^uint64(0) {
-		return 0, fmt.Errorf("CRITICAL: EVM execution panicked internally (handled safely)")
+		return 0, fmt.Errorf("gas estimation failed: internal error")
 	}
 
+	// ✅ SECURITY CHECK 2: Check for zero (execution failed)
 	if gas == 0 {
-		return 0, fmt.Errorf("gas estimation failed (execution reverted or halted)")
+		return 0, fmt.Errorf("gas estimation failed: execution reverted")
 	}
 
-	return uint64(gas), nil
+	estimatedGas := uint64(gas)
+
+	// ✅ SECURITY CHECK 3: Cap at reasonable maximum (NEW!)
+	if estimatedGas > maxEstimateGas {
+		return 0, fmt.Errorf("gas estimation %d exceeds maximum safe limit %d", estimatedGas, maxEstimateGas)
+	}
+
+	// ✅ SECURITY CHECK 4: Add 10% buffer for safety, but cap at max
+	gasWithBuffer := estimatedGas + (estimatedGas / 10)
+	if gasWithBuffer > maxEstimateGas {
+		gasWithBuffer = maxEstimateGas
+	}
+
+	return gasWithBuffer, nil
 }
 
 // Helpers
