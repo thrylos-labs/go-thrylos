@@ -103,6 +103,10 @@ func (v *Validator) CreateTransaction(from, to string, amount string, gas int64,
 		Timestamp: time.Now().Unix(),
 	}
 
+	if err := EnsureReplayProtection(tx, v.config); err != nil {
+		return nil, fmt.Errorf("failed to set replay protection: %v", err)
+	}
+
 	// ✅ Fix: Pass the 'privateKey' argument to SignTransaction
 	if err := v.SignTransaction(tx, privateKey); err != nil {
 		return nil, fmt.Errorf("failed to sign transaction: %v", err)
@@ -652,7 +656,7 @@ func (v *Validator) SetReplayProtectionConfig(config *ReplayProtectionConfig) {
 	v.replayConfig = config
 }
 
-func (v *Validator) ValidateTransaction(tx *core.Transaction, stateReader StateInterface) error {
+func (v *Validator) ValidateTransaction(tx *core.Transaction, currentHeight int64, stateReader StateInterface) error {
 	if tx == nil {
 		return fmt.Errorf("transaction cannot be nil")
 	}
@@ -682,6 +686,11 @@ func (v *Validator) ValidateTransaction(tx *core.Transaction, stateReader StateI
 	// Business logic validation
 	if err := v.validateBusinessLogic(tx, stateReader); err != nil {
 		return fmt.Errorf("business logic validation failed: %v", err)
+	}
+
+	// ✅ NEW: Validate replay protection
+	if err := v.ValidateReplayProtection(tx, currentHeight); err != nil {
+		return fmt.Errorf("replay protection validation failed: %w", err)
 	}
 
 	return nil
@@ -1261,6 +1270,7 @@ func (v *Validator) validateClaimRewards(tx *core.Transaction, sender *core.Acco
 // ValidateBatch validates multiple transactions as a batch
 func (v *Validator) ValidateBatch(transactions []*core.Transaction, stateReader StateInterface) error {
 	tempAccounts := make(map[string]*core.Account)
+	currentHeight := int64(0) // Placeholder for now
 
 	for i, tx := range transactions {
 		var sender *core.Account
@@ -1299,7 +1309,7 @@ func (v *Validator) ValidateBatch(transactions []*core.Transaction, stateReader 
 		}
 
 		// Validate transaction against temporary state
-		if err := v.ValidateTransaction(tx, stateReader); err != nil {
+		if err := v.ValidateTransaction(tx, currentHeight, stateReader); err != nil {
 			return fmt.Errorf("transaction %d validation failed: %v", i, err)
 		}
 
@@ -1482,6 +1492,45 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 	return nil
 }
 
+// ValidateReplayProtection validates transaction replay protection fields
+func (v *Validator) ValidateReplayProtection(tx *core.Transaction, currentHeight int64) error {
+	// Get replay protection config
+	config := v.replayConfig
+	if config == nil {
+		config = DefaultReplayProtectionConfig()
+	}
+
+	// VALIDATION 1: ChainID is required and must match
+	expectedChainID := v.config.Network.ChainID
+	if tx.ChainId == "" {
+		return fmt.Errorf("transaction missing chain_id (required for replay protection)")
+	}
+
+	if tx.ChainId != expectedChainID {
+		return fmt.Errorf("chain_id mismatch: transaction has %s, expected %s (prevents cross-chain replay)",
+			tx.ChainId, expectedChainID)
+	}
+
+	// VALIDATION 2: Check transaction expiration (if timestamp is set)
+	if tx.Timestamp > 0 && config.TransactionMaxAge > 0 {
+		txAge := time.Now().Unix() - tx.Timestamp
+		maxAgeSeconds := config.TransactionMaxAge * 2 // Assume 2s blocks
+
+		if txAge > maxAgeSeconds {
+			return fmt.Errorf("transaction expired: age %ds exceeds max %ds",
+				txAge, maxAgeSeconds)
+		}
+	}
+
+	// VALIDATION 3: Nonce must be present (prevents replay with missing nonce)
+	// This is already checked elsewhere, but belt-and-suspenders
+	if tx.Nonce == 0 {
+		return fmt.Errorf("transaction missing nonce (required for replay protection)")
+	}
+
+	return nil
+}
+
 // NormalizeAddress normalizes an address to lowercase for consistent storage
 func (v *Validator) NormalizeAddress(address string) (string, error) {
 	if err := account.ValidateAddress(address); err != nil {
@@ -1506,4 +1555,20 @@ func generateTransactionID() string {
 	hash := blake2b.Sum256(combined)
 
 	return fmt.Sprintf("tx-%x", hash[:16])
+}
+
+// EnsureReplayProtection ensures transaction has proper replay protection fields
+func EnsureReplayProtection(tx *core.Transaction, config *config.Config) error {
+	if tx.ChainId == "" {
+		if config == nil || config.Network.ChainID == "" {
+			return fmt.Errorf("cannot set chain_id: config not available")
+		}
+		tx.ChainId = config.Network.ChainID
+	}
+
+	if tx.Timestamp == 0 {
+		tx.Timestamp = time.Now().Unix()
+	}
+
+	return nil
 }

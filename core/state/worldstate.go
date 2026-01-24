@@ -457,12 +457,11 @@ func (ws *WorldState) GetTransactionsByAddress(address string, limit int) ([]*co
 
 // ValidateTransaction validates a transaction using the transaction validator
 func (ws *WorldState) ValidateTransaction(tx *core.Transaction) error {
-	// FIX: Remove manual locking here to avoid deadlock.
-	// ws.GetAccount (called by validator) handles its own locking.
-	// Pass 'ws' instead of 'ws.accountManager' so it satisfies the StateReader interface
-	// (which now requires GetContractCode).
+	// Get current height
+	currentHeight := ws.GetHeight()
 
-	return ws.txValidator.ValidateTransaction(tx, ws)
+	// Pass transaction, height, and state reader
+	return ws.txValidator.ValidateTransaction(tx, currentHeight, ws)
 }
 
 // ExecuteTransaction executes a single transaction (helper method)
