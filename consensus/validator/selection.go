@@ -917,3 +917,28 @@ func (vs *Set) CleanupInactiveValidators(maxInactiveTime time.Duration) []string
 
 	return removed
 }
+
+// GenerateSeedFromBlocks creates randomness seed from recent block hashes
+// At the end of the file, add:
+
+// GenerateSeedFromBlocks creates randomness seed from recent block hashes
+func GenerateSeedFromBlocks(blockHashes [][]byte, slot uint64) []byte {
+	if len(blockHashes) == 0 {
+		slotBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(slotBytes, slot)
+		hash := blake2b.Sum256(slotBytes)
+		return hash[:]
+	}
+
+	combined := make([]byte, 0)
+	for _, hash := range blockHashes {
+		combined = append(combined, hash...)
+	}
+
+	slotBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(slotBytes, slot)
+	combined = append(combined, slotBytes...)
+
+	seed := blake2b.Sum256(combined)
+	return seed[:]
+}

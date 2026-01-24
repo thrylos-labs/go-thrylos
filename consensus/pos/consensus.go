@@ -592,10 +592,42 @@ func (ce *ConsensusEngine) selectValidatorByStake(validators []*core.Validator, 
 	return validators[len(validators)-1], nil
 }
 
+// getRecentBlockHashes returns the last N block hashes
+func (ce *ConsensusEngine) getRecentBlockHashes(n int) [][]byte {
+	currentHeight := ce.worldState.GetHeight()
+	if currentHeight < 1 {
+		return nil
+	}
+
+	if int64(n) > currentHeight {
+		n = int(currentHeight)
+	}
+
+	blockHashes := make([][]byte, 0, n)
+	for i := 0; i < n; i++ {
+		height := currentHeight - int64(i)
+		block, err := ce.worldState.GetBlock(height)
+		if err != nil || block == nil {
+			continue
+		}
+		blockHashes = append(blockHashes, []byte(block.Hash))
+	}
+
+	return blockHashes
+}
+
 // getRandomnessSeed generates deterministic randomness for validator selection.
 // TESTNET IMPLEMENTATION: Uses block hash history.
 // MAINNET TODO: Replace with VDF (Verifiable Delay Function) or RANDAO to prevent stake grinding.
 func (ce *ConsensusEngine) getRandomnessSeed(slot uint64) []byte {
+	// ✅ NEW: Use last 10 blocks for unpredictable seed
+	recentBlockHashes := ce.getRecentBlockHashes(10)
+
+	if len(recentBlockHashes) > 0 {
+		return validator.GenerateSeedFromBlocks(recentBlockHashes, slot)
+	}
+
+	// Fallback for genesis/early blocks
 	const slotsPerEpoch = 32
 	currentEpoch := slot / slotsPerEpoch
 
