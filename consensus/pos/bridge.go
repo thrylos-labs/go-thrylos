@@ -100,7 +100,6 @@ func (cb *ConsensusBridge) forwardNetworkToConsensus() {
 				Signature: block.Signature, // ✅ FIX: Was nil, should copy from block
 			}
 			cb.consensus.receiveChan <- blockProposal
-			log.Printf("📦 Forwarded block %s to consensus", block.Hash[:min(8, len(block.Hash))])
 
 		// Forward attestations
 		case attestation := <-cb.network.GetAttestationChannel():

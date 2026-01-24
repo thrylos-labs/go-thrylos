@@ -539,13 +539,6 @@ func (ce *ConsensusEngine) verifyVRFProof(
 	if err := validatorPubKey.Verify(vrfOutput, &sig); err != nil {
 		return fmt.Errorf("VRF proof verification failed: %v", err)
 	}
-
-	// Phase 1: We can't verify the output was derived correctly from input
-	// without the private key. This is acceptable because:
-	// 1. We trust that 2/3+ validators are honest
-	// 2. Signature proves this specific validator generated this output
-	// 3. Phase 2 will add true VRF verification
-
 	return nil
 }
 
