@@ -1152,6 +1152,13 @@ func (bv *BlockValidator) ValidateBlock(block *core.Block) error {
 		return fmt.Errorf("proposer validation failed: %v", err)
 	}
 
+	// Validate state root
+	calculatedRoot := bv.consensusEngine.worldState.GetStateRoot()
+	if block.Header.StateRoot != calculatedRoot {
+		return fmt.Errorf("state root mismatch: block=%s, calculated=%s",
+			block.Header.StateRoot, calculatedRoot)
+	}
+
 	return nil
 }
 
