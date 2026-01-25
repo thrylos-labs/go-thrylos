@@ -116,32 +116,10 @@ func NewConsensusEngine(
 	return engine
 }
 
-type VRFProof struct {
-	Output []byte // Random output
-	Proof  []byte // Cryptographic proof
-}
-
 // generateVRFProof generates VRF-style proof using validator's private key
 func (ce *ConsensusEngine) generateVRFProof(input []byte) (*VRFProof, error) {
-	// 1. Generate deterministic output from validator's key + input
-	keyMaterial := ce.nodePrivateKey.Bytes()
-
-	combined := make([]byte, 0, len(keyMaterial)+len(input))
-	combined = append(combined, keyMaterial...)
-	combined = append(combined, input...)
-
-	output := sha3.Sum256(combined)
-
-	// 2. Sign the output to prove we generated it
-	signature, err := ce.nodePrivateKey.Sign(output[:])
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate VRF proof signature: %w", err)
-	}
-
-	return &VRFProof{
-		Output: output[:],
-		Proof:  signature.Bytes(),
-	}, nil
+	// Use ECVRF instead of custom implementation
+	return GenerateVRFProof(ce.nodePrivateKey, input)
 }
 
 // Start begins the consensus process
@@ -517,32 +495,23 @@ func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 	return selectedValidator.Address, nil
 }
 
-// verifyVRFProof verifies a VRF proof from a validator (Phase 1 implementation)
-func (ce *ConsensusEngine) verifyVRFProof(
-	validatorPubKey crypto.PublicKey,
-	input []byte,
-	vrfOutput []byte,
-	vrfProof []byte,
-) error {
-	// Validate inputs
-	if len(vrfOutput) == 0 {
-		return fmt.Errorf("VRF output is empty")
-	}
-	if len(vrfProof) == 0 {
-		return fmt.Errorf("VRF proof is empty")
-	}
-
-	// Parse signature from proof
-	sig, err := crypto.SignatureFromBytes(vrfProof)
+// verifyVRFProof verifies a VRF proof from another validator
+func (ce *ConsensusEngine) verifyVRFProof(validatorPubKey crypto.PublicKey, input []byte, proof *VRFProof) (bool, error) {
+	valid, output, err := VerifyVRFProof(validatorPubKey, input, proof)
 	if err != nil {
-		return fmt.Errorf("invalid VRF proof format: %v", err)
+		return false, fmt.Errorf("VRF verification failed: %w", err)
 	}
 
-	// Verify the signature over the VRF output
-	if err := validatorPubKey.Verify(vrfOutput, sig); err != nil {
-		return fmt.Errorf("VRF proof verification failed: %v", err)
+	if !valid {
+		return false, fmt.Errorf("VRF proof is invalid")
 	}
-	return nil
+
+	// Optionally check that output matches
+	if len(output) != len(proof.Output) {
+		return false, fmt.Errorf("VRF output length mismatch")
+	}
+
+	return true, nil
 }
 
 // selectValidatorByStake selects a validator based on stake weight and randomness
@@ -1240,15 +1209,24 @@ func (bv *BlockValidator) validateVRFProof(block *core.Block) error {
 	epochBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(epochBytes, block.Header.Epoch)
 
-	// Verify VRF proof
-	err = bv.consensusEngine.verifyVRFProof(
+	// Create VRFProof from block header data
+	vrfProof := &VRFProof{
+		Output: block.Header.VrfOutput,
+		Proof:  block.Header.VrfProof,
+	}
+
+	// Verify VRF proof - returns (bool, error)
+	valid, err := bv.consensusEngine.verifyVRFProof(
 		pubKey,
 		epochBytes,
-		block.Header.VrfOutput,
-		block.Header.VrfProof,
+		vrfProof,
 	)
 	if err != nil {
 		return fmt.Errorf("VRF verification failed: %v", err)
+	}
+
+	if !valid {
+		return fmt.Errorf("VRF proof is invalid")
 	}
 
 	return nil
