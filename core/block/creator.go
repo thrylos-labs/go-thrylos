@@ -314,6 +314,7 @@ func (bc *Creator) calculateBlockHash(block *core.Block) (string, error) {
 }
 
 // SignBlock signs a block with the validator's private key
+// SignBlock signs a block with the validator's private key
 func (bc *Creator) SignBlock(block *core.Block, privateKey crypto.PrivateKey) error {
 	if block == nil {
 		return fmt.Errorf("block cannot be nil")
@@ -328,10 +329,10 @@ func (bc *Creator) SignBlock(block *core.Block, privateKey crypto.PrivateKey) er
 		return fmt.Errorf("failed to hash block: %w", err)
 	}
 
-	// Sign
-	signature := privateKey.Sign(hashToSign)
-	if signature == nil {
-		return fmt.Errorf("failed to sign block")
+	// Sign - Sign now returns (Signature, error)
+	signature, err := privateKey.Sign(hashToSign)
+	if err != nil {
+		return fmt.Errorf("failed to sign block: %w", err)
 	}
 
 	block.Signature = signature.Bytes()

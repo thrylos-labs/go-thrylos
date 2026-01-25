@@ -21,8 +21,8 @@ import (
 
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/math"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
-	"golang.org/x/crypto/blake2b"
 )
 
 // Set represents a set of validators with selection capabilities
@@ -167,10 +167,10 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 	binary.BigEndian.PutUint64(slotBytes, slot)
 
 	combined := append(seed, slotBytes...)
-	hash := blake2b.Sum256(combined)
+	hashBytes := hash.Keccak256(combined)
 
 	// Convert hash to big integer for modular arithmetic
-	hashInt := new(big.Int).SetBytes(hash[:])
+	hashInt := new(big.Int).SetBytes(hashBytes)
 
 	// Apply anti-concentration adjustment
 	adjustedStakes := vs.calculateAdjustedStakes()
@@ -198,7 +198,7 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 
 			return &SelectionResult{
 				SelectedValidator: validator,
-				SelectionSeed:     hash[:],
+				SelectionSeed:     hashBytes, // ✅ Changed from hash[:]
 				TotalStake:        totalStakeBig.Int64(),
 				SelectionWeight:   adjustedStake,
 				Timestamp:         time.Now().Unix(),
@@ -212,7 +212,7 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 
 	return &SelectionResult{
 		SelectedValidator: lastValidator,
-		SelectionSeed:     hash[:],
+		SelectionSeed:     hashBytes, // ✅ Changed from hash[:]
 		TotalStake:        totalStakeBig.Int64(),
 		SelectionWeight:   adjustedStakes[lastValidator.Address],
 		Timestamp:         time.Now().Unix(),
@@ -273,14 +273,14 @@ func (vs *Set) shuffleValidators(validators []*core.Validator, seed []byte) []*c
 	shuffled := make([]*core.Validator, len(validators))
 	copy(shuffled, validators)
 
-	// Use seed to create deterministic randomness
-	hash := blake2b.Sum256(seed)
+	// Use seed to create deterministic randomness with Keccak256
+	hashBytes := hash.Keccak256(seed)
 
 	// Fisher-Yates shuffle with deterministic randomness
 	for i := len(shuffled) - 1; i > 0; i-- {
 		// Generate deterministic random number for this position
-		positionSeed := append(hash[:], byte(i))
-		positionHash := blake2b.Sum256(positionSeed)
+		positionSeed := append(hashBytes, byte(i))
+		positionHash := hash.Keccak256(positionSeed)
 		randomInt := new(big.Int).SetBytes(positionHash[:8])
 
 		j := new(big.Int).Mod(randomInt, big.NewInt(int64(i+1))).Int64()
@@ -926,19 +926,17 @@ func GenerateSeedFromBlocks(blockHashes [][]byte, slot uint64) []byte {
 	if len(blockHashes) == 0 {
 		slotBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(slotBytes, slot)
-		hash := blake2b.Sum256(slotBytes)
-		return hash[:]
+		return hash.Keccak256(slotBytes)
 	}
 
 	combined := make([]byte, 0)
-	for _, hash := range blockHashes {
-		combined = append(combined, hash...)
+	for _, hashBytes := range blockHashes {
+		combined = append(combined, hashBytes...)
 	}
 
 	slotBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(slotBytes, slot)
 	combined = append(combined, slotBytes...)
 
-	seed := blake2b.Sum256(combined)
-	return seed[:]
+	return hash.Keccak256(combined)
 }

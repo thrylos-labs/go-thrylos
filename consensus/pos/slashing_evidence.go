@@ -4,12 +4,12 @@
 package pos
 
 import (
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/types"
 )
 
@@ -166,17 +166,23 @@ func (se *SlashingEvidence) hashAttestation(att *types.Attestation) []byte {
 	return hash[:]
 }
 
-// verifySignature verifies an Ed25519 signature
+// verifySignature verifies an Secp256k1 signature
 func (se *SlashingEvidence) verifySignature(publicKeyBytes []byte, message []byte, signature []byte) bool {
-	// Verify public key length (32 bytes for Ed25519)
-	if len(publicKeyBytes) != ed25519.PublicKeySize {
+	// Parse public key (accepts both 33-byte compressed and 65-byte uncompressed)
+	publicKey, err := crypto.NewPublicKeyFromBytes(publicKeyBytes)
+	if err != nil {
 		return false
 	}
 
-	publicKey := ed25519.PublicKey(publicKeyBytes)
+	// Parse signature (65 bytes for Secp256k1: R || S || V)
+	sig, err := crypto.SignatureFromBytes(signature)
+	if err != nil {
+		return false
+	}
 
-	// Verify signature
-	return ed25519.Verify(publicKey, message, signature)
+	// Verify signature - returns error on failure
+	err = publicKey.Verify(message, sig)
+	return err == nil
 }
 
 // generateID creates a unique ID for the evidence

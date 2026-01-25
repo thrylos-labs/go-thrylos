@@ -11,8 +11,8 @@ import (
 
 	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/crypto"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	"github.com/thrylos-labs/go-thrylos/types"
-	"golang.org/x/crypto/blake2b"
 )
 
 // EvidenceTracker tracks processed slashing evidence to prevent duplicates
@@ -339,12 +339,13 @@ func (ce *ConsensusEngine) signEvidence(evidence *SlashingEvidence) error {
 		evidence.ValidatorAddress,
 		evidence.Timestamp)
 
-	hash := blake2b.Sum256([]byte(data))
+	// Use Keccak256 instead of Blake2b
+	hashBytes := hash.Keccak256([]byte(data))
 
-	// Sign with private key
-	signature := ce.nodePrivateKey.Sign(hash[:])
-	if signature == nil {
-		return fmt.Errorf("failed to sign evidence")
+	// Sign with private key - Sign now returns (Signature, error)
+	signature, err := ce.nodePrivateKey.Sign(hashBytes)
+	if err != nil {
+		return fmt.Errorf("failed to sign evidence: %w", err)
 	}
 
 	evidence.ReporterSignature = signature.Bytes()
@@ -383,7 +384,7 @@ func (ce *ConsensusEngine) verifyEvidenceSignature(evidence *SlashingEvidence) e
 		return fmt.Errorf("reporter %s has no registered public key", evidence.ReporterAddress)
 	}
 
-	// 5. Parse reporter’s public key
+	// 5. Parse reporter's public key
 	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
 	if err != nil {
 		return fmt.Errorf("failed to parse reporter public key: %w", err)
@@ -403,10 +404,11 @@ func (ce *ConsensusEngine) verifyEvidenceSignature(evidence *SlashingEvidence) e
 		evidence.Timestamp,
 	)
 
-	hash := blake2b.Sum256([]byte(data))
+	// Use Keccak256 instead of Blake2b (matches signEvidence)
+	hashBytes := hash.Keccak256([]byte(data))
 
-	// 8. Verify (secp256k1 via crypto.Signature/crypto.PublicKey)
-	if err := sig.Verify(&pubKey, hash[:]); err != nil {
+	// 8. Verify - pass interface values directly (not pointers)
+	if err := sig.Verify(pubKey, hashBytes); err != nil {
 		return fmt.Errorf("invalid evidence signature: %w", err)
 	}
 

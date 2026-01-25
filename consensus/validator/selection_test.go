@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
-	"golang.org/x/crypto/blake2b"
 )
 
 // TestGenerateSeedFromBlocks tests the block hash accumulator
@@ -168,8 +168,8 @@ func BenchmarkGenerateSeedFromBlocks(b *testing.B) {
 	blocks := make([][]byte, 10)
 	for i := 0; i < 10; i++ {
 		blocks[i] = make([]byte, 32)
-		hash := blake2b.Sum256([]byte{byte(i)})
-		copy(blocks[i], hash[:])
+		hashBytes := hash.Keccak256([]byte{byte(i)})
+		copy(blocks[i], hashBytes)
 	}
 
 	slot := uint64(100)

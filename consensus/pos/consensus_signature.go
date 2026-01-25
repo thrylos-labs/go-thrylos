@@ -6,9 +6,10 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
+
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/types"
-	"golang.org/x/crypto/blake2b"
 )
 
 // Domain Separation Tags prevent signature reuse across different message types
@@ -49,8 +50,8 @@ func (ce *ConsensusEngine) computeAttestationHash(attestation *types.Attestation
 		return nil, err
 	}
 
-	hash := blake2b.Sum256(buf.Bytes())
-	return hash[:], nil
+	// Use your crypto/hash package - Keccak256 wrapper
+	return hash.Keccak256(buf.Bytes()), nil
 }
 
 // verifyAttestationSignature verifies an attestation signature
@@ -84,7 +85,7 @@ func (ce *ConsensusEngine) verifyAttestationSignature(attestation *types.Attesta
 	}
 
 	// [FIX L-02] Use VerifyHash to avoid double-hashing (Keccak(Blake2b))
-	if err := pubKey.VerifyHash(hash, &sig); err != nil {
+	if err := pubKey.VerifyHash(hash, sig); err != nil {
 		return fmt.Errorf("invalid signature from %s: %v", attestation.ValidatorAddress, err)
 	}
 
@@ -127,8 +128,8 @@ func (ce *ConsensusEngine) computeProposalHash(proposal *BlockProposal) ([]byte,
 		return nil, err
 	}
 
-	hash := blake2b.Sum256(buf.Bytes())
-	return hash[:], nil
+	return hash.Keccak256(buf.Bytes()), nil
+
 }
 
 func (ce *ConsensusEngine) verifyProposalSignature(proposal *BlockProposal) error {
@@ -157,7 +158,7 @@ func (ce *ConsensusEngine) verifyProposalSignature(proposal *BlockProposal) erro
 	}
 
 	// [FIX L-02] Use VerifyHash
-	if err := pubKey.VerifyHash(hash, &sig); err != nil {
+	if err := pubKey.VerifyHash(hash, sig); err != nil {
 		return fmt.Errorf("proposal signature verification failed: %v", err)
 	}
 
@@ -200,8 +201,8 @@ func (ce *ConsensusEngine) computeVoteHash(vote *Vote) ([]byte, error) {
 		return nil, err
 	}
 
-	hash := blake2b.Sum256(buf.Bytes())
-	return hash[:], nil
+	return hash.Keccak256(buf.Bytes()), nil
+
 }
 
 func (ce *ConsensusEngine) verifyVoteSignature(vote *Vote) error {
@@ -230,7 +231,7 @@ func (ce *ConsensusEngine) verifyVoteSignature(vote *Vote) error {
 	}
 
 	// [FIX L-02] Use VerifyHash
-	if err := pubKey.VerifyHash(hash, &sig); err != nil {
+	if err := pubKey.VerifyHash(hash, sig); err != nil {
 		return fmt.Errorf("vote signature verification failed: %v", err)
 	}
 

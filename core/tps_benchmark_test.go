@@ -114,8 +114,11 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 	// --- FIX START: Generate Real Genesis Credentials ---
 	genesisPrivKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
-	genesisAddrObj, err := genesisPrivKey.PublicKey().Address()
-	require.NoError(t, err)
+
+	genesisAddrObj := genesisPrivKey.PublicKey().Address()
+	require.NotNil(t, genesisAddrObj, "Genesis address should not be nil")
+	require.False(t, genesisAddrObj.IsZero(), "Genesis address should not be zero")
+
 	genesisAddress := genesisAddrObj.String()
 
 	// Import "math/big"
@@ -195,10 +198,11 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 		var blockTransactions []*core.Transaction
 
 		// Create transactions for this block
+		// Create transactions for this block
 		for i := 0; i < cfg.TransactionsPerBlock; i++ {
 			// Generate valid keys/addresses for transactions
 			privKey, _ := crypto.NewPrivateKey()
-			recipientAddr, _ := privKey.PublicKey().Address()
+			recipientAddr := privKey.PublicKey().Address() // Only returns *address.Address
 			recipient := recipientAddr.String()
 
 			txID := fmt.Sprintf("tx-%d-%d", blockNum, i)
@@ -733,8 +737,11 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 		for i := 0; i < cfg.TransactionsPerBlock; i++ {
 			privKey, err := crypto.NewPrivateKey()
 			require.NoError(t, err)
-			recipientAddr, err := privKey.PublicKey().Address()
-			require.NoError(t, err)
+
+			recipientAddr := privKey.PublicKey().Address()
+			require.NotNil(t, recipientAddr, "Address should not be nil")
+			require.False(t, recipientAddr.IsZero(), "Address should not be zero")
+
 			recipient := recipientAddr.String()
 
 			txID := fmt.Sprintf("tx-%d-%d", blockNum, i)

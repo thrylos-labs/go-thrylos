@@ -5,14 +5,15 @@ import (
 	"fmt"
 
 	"github.com/thrylos-labs/go-thrylos/crypto"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
-	"golang.org/x/crypto/blake2b"
 )
 
 // Package-level utility functions shared between creator and validator
 
 // VerifyBlock verifies a block's integrity and signature (package-level function)
-func VerifyBlock(block *core.Block, publicKey *crypto.PublicKey) error {
+// VerifyBlock verifies a block's integrity and signature (package-level function)
+func VerifyBlock(block *core.Block, publicKey crypto.PublicKey) error {
 	if block == nil {
 		return fmt.Errorf("block cannot be nil")
 	}
@@ -87,7 +88,7 @@ func verifyTransactionRoot(block *core.Block) error {
 }
 
 // verifyBlockSignature verifies a block's signature
-func verifyBlockSignature(block *core.Block, publicKey *crypto.PublicKey) error {
+func verifyBlockSignature(block *core.Block, publicKey crypto.PublicKey) error {
 	if publicKey == nil {
 		return fmt.Errorf("public key cannot be nil")
 	}
@@ -96,14 +97,8 @@ func verifyBlockSignature(block *core.Block, publicKey *crypto.PublicKey) error 
 		return fmt.Errorf("block signature is empty")
 	}
 
-	// Recreate the hash that was signed
-	hashBytes, err := blake2b.New256(nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Blake2b hasher: %v", err)
-	}
-
-	hashBytes.Write([]byte(block.Hash))
-	hashToVerify := hashBytes.Sum(nil)
+	// Recreate the hash that was signed using Keccak256
+	hashToVerify := hash.Keccak256([]byte(block.Hash))
 
 	// Create signature object from bytes
 	signature, err := crypto.SignatureFromBytes(block.Signature)
@@ -111,8 +106,8 @@ func verifyBlockSignature(block *core.Block, publicKey *crypto.PublicKey) error 
 		return fmt.Errorf("failed to parse signature: %v", err)
 	}
 
-	// Dereference the pointer to get the interface value, then call Verify
-	err = (*publicKey).Verify(hashToVerify, &signature)
+	// Verify - pass interface values directly (not pointers)
+	err = publicKey.Verify(hashToVerify, signature)
 	if err != nil {
 		return fmt.Errorf("signature verification failed: %v", err)
 	}
@@ -143,7 +138,7 @@ func calculateMerkleRoot(hashes []string) string {
 		level = append(level, hashBytes)
 	}
 
-	// Build Merkle tree
+	// Build Merkle tree using Keccak256
 	for len(level) > 1 {
 		var nextLevel [][]byte
 
@@ -158,9 +153,9 @@ func calculateMerkleRoot(hashes []string) string {
 				combined = append(combined, level[i]...)
 			}
 
-			// Hash the combined bytes
-			hash := blake2b.Sum256(combined)
-			nextLevel = append(nextLevel, hash[:])
+			// Hash the combined bytes with Keccak256
+			hash := hash.Keccak256(combined)
+			nextLevel = append(nextLevel, hash)
 		}
 
 		level = nextLevel
@@ -171,7 +166,7 @@ func calculateMerkleRoot(hashes []string) string {
 
 // calculateEmptyRoot returns the hash for an empty transaction set
 func calculateEmptyRoot() string {
-	empty := blake2b.Sum256([]byte{})
+	empty := hash.Keccak256([]byte{})
 	return fmt.Sprintf("%x", empty)
 }
 
@@ -184,19 +179,13 @@ func SignBlock(block *core.Block, privateKey crypto.PrivateKey) error {
 		return fmt.Errorf("private key cannot be nil")
 	}
 
-	// Create hash to sign
-	hashBytes, err := blake2b.New256(nil)
+	// Create hash to sign using Keccak256
+	hashToSign := hash.Keccak256([]byte(block.Hash))
+
+	// Sign - Sign now returns (Signature, error)
+	signature, err := privateKey.Sign(hashToSign)
 	if err != nil {
-		return fmt.Errorf("failed to create Blake2b hasher: %v", err)
-	}
-
-	hashBytes.Write([]byte(block.Hash))
-	hashToSign := hashBytes.Sum(nil)
-
-	// Sign
-	signature := privateKey.Sign(hashToSign)
-	if signature == nil {
-		return fmt.Errorf("failed to sign block")
+		return fmt.Errorf("failed to sign block: %w", err)
 	}
 
 	block.Signature = signature.Bytes()

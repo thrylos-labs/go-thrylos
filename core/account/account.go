@@ -18,8 +18,8 @@ import (
 
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/crypto/address"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
-	"golang.org/x/crypto/blake2b"
 )
 
 // ShardID represents a shard identifier
@@ -67,11 +67,11 @@ func CalculateShardID(addr string, totalShards int) ShardID {
 		return 0
 	}
 
-	// Use Blake2b to hash the address for consistent shard assignment
-	hash := blake2b.Sum256([]byte(addr))
+	// Use Keccak256 to hash the address for consistent shard assignment
+	hashBytes := hash.Keccak256([]byte(addr))
 
 	// Use the first 8 bytes as uint64 for modulo operation
-	shardIndex := binary.BigEndian.Uint64(hash[:8]) % uint64(totalShards)
+	shardIndex := binary.BigEndian.Uint64(hashBytes[:8]) % uint64(totalShards)
 
 	return ShardID(shardIndex)
 }
@@ -812,9 +812,9 @@ func max(a, b int64) int64 {
 
 // Wrappers for crypto address functions
 func GenerateAddress(pubKey crypto.PublicKey) (string, error) {
-	addr, err := pubKey.Address()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate address: %v", err)
+	addr := pubKey.Address()
+	if addr == nil || addr.IsZero() {
+		return "", fmt.Errorf("failed to generate address: address is nil or zero")
 	}
 	return addr.String(), nil
 }

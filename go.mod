@@ -14,7 +14,7 @@ require (
 	github.com/multiformats/go-multiaddr v0.16.0
 	github.com/onsi/gomega v1.38.0 // indirect
 	github.com/stretchr/testify v1.10.0
-	golang.org/x/crypto v0.40.0
+	golang.org/x/crypto v0.40.0 // indirect
 	golang.org/x/time v0.12.0
 	google.golang.org/protobuf v1.36.6
 )
@@ -59,7 +59,7 @@ require (
 	github.com/google/flatbuffers v1.12.1 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/google/pprof v0.0.0-20250607225305-033d6d78b36a // indirect
-	github.com/google/uuid v1.6.0 // indirect
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7

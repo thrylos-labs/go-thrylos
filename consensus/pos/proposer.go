@@ -15,8 +15,8 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/math"
 	coremath "github.com/thrylos-labs/go-thrylos/core/math" // Safe BigInt math
 	"github.com/thrylos-labs/go-thrylos/core/state"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
-	"golang.org/x/crypto/blake2b"
 )
 
 // BlockProposer handles block creation and proposal optimization
@@ -525,19 +525,20 @@ func (bp *BlockProposer) calculateOptimizationScore(transactions []*core.Transac
 	return score
 }
 
-// calculateMerkleRoot calculates the Merkle root of transactions
 func (bp *BlockProposer) calculateMerkleRoot(transactions []*core.Transaction) string {
 	if len(transactions) == 0 {
 		return ""
 	}
 
-	var combined []byte
-	for _, tx := range transactions {
-		combined = append(combined, []byte(tx.Hash)...)
+	// Create hash array for proper Merkle tree
+	hashes := make([]hash.Hash, len(transactions))
+	for i, tx := range transactions {
+		hashes[i] = hash.NewHash([]byte(tx.Hash))
 	}
 
-	hash := blake2b.Sum256(combined)
-	return fmt.Sprintf("%x", hash)
+	// Use proper Merkle root calculation
+	root := hash.MerkleRoot(hashes)
+	return root.String()
 }
 
 // calculateBlockHash calculates the hash of a block

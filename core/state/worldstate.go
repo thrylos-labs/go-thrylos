@@ -23,9 +23,9 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/evm"
 	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/transaction"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
-	"golang.org/x/crypto/blake2b"
 )
 
 const BaseUnit = int64(1000000000) // 1 THRYLOS
@@ -980,8 +980,8 @@ func (ws *WorldState) updateStateRoot() error {
 	}
 
 	// Calculate Blake2b hash
-	hash := blake2b.Sum256(stateData)
-	ws.stateRoot = fmt.Sprintf("%x", hash)
+	hashBytes := hash.Keccak256(stateData)
+	ws.stateRoot = fmt.Sprintf("%x", hashBytes)
 
 	return nil
 }
@@ -1162,8 +1162,8 @@ func (csm *CrossShardManager) InitiateTransfer(from, to string, amount string, n
 	binary.BigEndian.PutUint64(timestampBytes, uint64(transfer.Timestamp))
 	buf = append(buf, timestampBytes...)
 
-	hash := blake2b.Sum256(buf)
-	transfer.Hash = fmt.Sprintf("%x", hash)
+	hashBytes := hash.Keccak256(buf)
+	transfer.Hash = fmt.Sprintf("%x", hashBytes)
 
 	// 5. Debit sender account
 	// NewBalance = Balance - Amount

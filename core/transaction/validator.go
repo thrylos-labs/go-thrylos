@@ -33,7 +33,6 @@ import (
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
-	"golang.org/x/crypto/blake2b"
 )
 
 // Validator handles transaction validation and creation
@@ -289,9 +288,10 @@ func (v *Validator) SignTransactionWithReplayProtection(tx *core.Transaction, pr
 		return fmt.Errorf("failed to calculate signable hash with replay protection: %v", err)
 	}
 
-	signature := privateKey.Sign(hashToSign)
-	if signature == nil {
-		return fmt.Errorf("failed to sign transaction")
+	// Sign - Sign now returns (Signature, error)
+	signature, err := privateKey.Sign(hashToSign)
+	if err != nil {
+		return fmt.Errorf("failed to sign transaction: %w", err)
 	}
 
 	tx.Signature = signature.Bytes()
@@ -585,7 +585,7 @@ func (v *Validator) VerifyTransactionSignature(tx *core.Transaction, publicKey c
 	}
 
 	// [FIX L-02] Use VerifyHash
-	err = publicKey.VerifyHash(hashToVerify, &signature)
+	err = publicKey.VerifyHash(hashToVerify, signature)
 	if err != nil {
 		return fmt.Errorf("signature verification failed: %v", err)
 	}
@@ -636,7 +636,7 @@ func (v *Validator) VerifyTransactionSignatureWithReplayProtection(tx *core.Tran
 	}
 
 	// 4. Verify the signature against the calculated hash
-	err = publicKey.Verify(hashToVerify, &signature)
+	err = publicKey.Verify(hashToVerify, signature)
 	if err != nil {
 		// This could be a replay attempt - record it
 		v.metrics.RecordReplayAttempt()
@@ -1552,9 +1552,9 @@ func generateTransactionID() string {
 
 	// Combine and hash
 	combined := append(randomBytes, timestampBytes...)
-	hash := blake2b.Sum256(combined)
+	hashBytes := hash.Keccak256(combined)
 
-	return fmt.Sprintf("tx-%x", hash[:16])
+	return fmt.Sprintf("tx-%x", hashBytes[:16])
 }
 
 // EnsureReplayProtection ensures transaction has proper replay protection fields

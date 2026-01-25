@@ -228,8 +228,9 @@ func (v *Validator) validateCryptographic(block *core.Block, publicKey *crypto.P
 	}
 
 	// Verify signature if present and public key provided
-	if len(block.Signature) > 0 && publicKey != nil {
-		if err := v.verifyBlockSignature(block, publicKey); err != nil {
+	if len(block.Signature) > 0 && publicKey != nil && *publicKey != nil {
+		// Dereference the pointer to get the interface value
+		if err := v.verifyBlockSignature(block, *publicKey); err != nil {
 			return fmt.Errorf("block signature verification failed: %v", err)
 		}
 	}
@@ -282,7 +283,7 @@ func (v *Validator) verifyTransactionRoot(block *core.Block) error {
 }
 
 // verifyBlockSignature verifies a block's signature
-func (v *Validator) verifyBlockSignature(block *core.Block, publicKey *crypto.PublicKey) error {
+func (v *Validator) verifyBlockSignature(block *core.Block, publicKey crypto.PublicKey) error {
 	if publicKey == nil {
 		return fmt.Errorf("public key cannot be nil")
 	}
@@ -291,7 +292,7 @@ func (v *Validator) verifyBlockSignature(block *core.Block, publicKey *crypto.Pu
 		return fmt.Errorf("block signature is empty")
 	}
 
-	// Use the package-level verification function
+	// Pass interface value directly
 	return verifyBlockSignature(block, publicKey)
 }
 

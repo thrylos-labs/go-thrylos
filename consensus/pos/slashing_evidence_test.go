@@ -4,13 +4,12 @@
 package pos
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/types"
 )
@@ -42,12 +41,12 @@ func (m *MockValidatorRegistry) AddValidator(address string, publicKey []byte) {
 	}
 }
 
-// Helper to create properly signed attestation
+// Helper to create properly signed attestation using Secp256k1
 func createSignedAttestation(
 	validatorAddr string,
 	slot uint64,
 	blockHash string,
-	privateKey ed25519.PrivateKey,
+	privateKey crypto.PrivateKey,
 ) *types.Attestation {
 	// Create attestation
 	att := &types.Attestation{
@@ -57,32 +56,39 @@ func createSignedAttestation(
 		Timestamp:        time.Now().Unix(),
 	}
 
-	// Create signature
+	// Create signature using Secp256k1
 	evidence := &SlashingEvidence{}
 	message := evidence.hashAttestation(att)
-	signature := ed25519.Sign(privateKey, message)
 
-	att.Signature = signature
+	signature, err := privateKey.Sign(message)
+	if err != nil {
+		panic("failed to sign attestation: " + err.Error())
+	}
+
+	att.Signature = signature.Bytes()
 
 	return att
 }
 
 // Test 1: Reject evidence with fake signatures
 func TestSlashingEvidence_RejectFakeSignatures(t *testing.T) {
-	// Generate real keypair for validator
-	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	// Generate Secp256k1 keypair for validator
+	privateKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
+
+	publicKey := privateKey.PublicKey()
+	publicKeyBytes := publicKey.Bytes() // Compressed format (33 bytes)
 
 	// Create registry
 	registry := NewMockValidatorRegistry()
-	registry.AddValidator("validator1", publicKey)
+	registry.AddValidator("validator1", publicKeyBytes)
 
 	// Create evidence with FAKE signatures (not signed by validator)
 	att1 := &types.Attestation{
 		ValidatorAddress: "validator1",
 		Slot:             100,
 		BlockHash:        "block_a",
-		Signature:        []byte("fake_signature_1"), // INVALID!
+		Signature:        []byte("fake_signature_1_fake_signature_1_fake_signature_1_fake_signature_1_"), // INVALID! (but 65 bytes)
 		Timestamp:        time.Now().Unix(),
 	}
 
@@ -90,7 +96,7 @@ func TestSlashingEvidence_RejectFakeSignatures(t *testing.T) {
 		ValidatorAddress: "validator1",
 		Slot:             100,
 		BlockHash:        "block_b",
-		Signature:        []byte("fake_signature_2"), // INVALID!
+		Signature:        []byte("fake_signature_2_fake_signature_2_fake_signature_2_fake_signature_2_"), // INVALID! (but 65 bytes)
 		Timestamp:        time.Now().Unix(),
 	}
 
@@ -112,13 +118,16 @@ func TestSlashingEvidence_RejectFakeSignatures(t *testing.T) {
 
 // Test 2: Accept evidence with valid signatures
 func TestSlashingEvidence_AcceptValidSignatures(t *testing.T) {
-	// Generate keypair
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	// Generate Secp256k1 keypair
+	privateKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
+
+	publicKey := privateKey.PublicKey()
+	publicKeyBytes := publicKey.Bytes()
 
 	// Create registry
 	registry := NewMockValidatorRegistry()
-	registry.AddValidator("validator1", publicKey)
+	registry.AddValidator("validator1", publicKeyBytes)
 
 	// Create PROPERLY SIGNED attestations
 	att1 := createSignedAttestation("validator1", 100, "block_a", privateKey)
@@ -145,7 +154,7 @@ func TestSlashingEvidence_RejectNonExistentValidator(t *testing.T) {
 	registry := NewMockValidatorRegistry()
 
 	// Generate keypair (but don't add to registry)
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	privateKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
 
 	// Create signed attestations
@@ -170,16 +179,17 @@ func TestSlashingEvidence_RejectNonExistentValidator(t *testing.T) {
 
 // Test 4: Reject evidence with mismatched signatures
 func TestSlashingEvidence_RejectMismatchedSignatures(t *testing.T) {
-	// Generate TWO different keypairs
-	publicKey1, privateKey1, err := ed25519.GenerateKey(rand.Reader)
+	// Generate TWO different Secp256k1 keypairs
+	privateKey1, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
+	publicKey1 := privateKey1.PublicKey()
 
-	_, privateKey2, err := ed25519.GenerateKey(rand.Reader)
+	privateKey2, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
 
 	// Register validator with publicKey1
 	registry := NewMockValidatorRegistry()
-	registry.AddValidator("validator1", publicKey1)
+	registry.AddValidator("validator1", publicKey1.Bytes())
 
 	// Sign att1 with privateKey1 (correct)
 	att1 := createSignedAttestation("validator1", 100, "block_a", privateKey1)
@@ -205,11 +215,12 @@ func TestSlashingEvidence_RejectMismatchedSignatures(t *testing.T) {
 
 // Test 5: Reject evidence with same block hash (not conflicting)
 func TestSlashingEvidence_RejectSameBlockHash(t *testing.T) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	privateKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
+	publicKey := privateKey.PublicKey()
 
 	registry := NewMockValidatorRegistry()
-	registry.AddValidator("validator1", publicKey)
+	registry.AddValidator("validator1", publicKey.Bytes())
 
 	// Both attestations for SAME block (not double voting!)
 	att1 := createSignedAttestation("validator1", 100, "block_a", privateKey)
@@ -233,11 +244,12 @@ func TestSlashingEvidence_RejectSameBlockHash(t *testing.T) {
 
 // Test 6: Reject evidence with different slots
 func TestSlashingEvidence_RejectDifferentSlots(t *testing.T) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	privateKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
+	publicKey := privateKey.PublicKey()
 
 	registry := NewMockValidatorRegistry()
-	registry.AddValidator("validator1", publicKey)
+	registry.AddValidator("validator1", publicKey.Bytes())
 
 	// Different slots
 	att1 := createSignedAttestation("validator1", 100, "block_a", privateKey)
@@ -261,11 +273,12 @@ func TestSlashingEvidence_RejectDifferentSlots(t *testing.T) {
 
 // Test 7: Reject old evidence (stale)
 func TestSlashingEvidence_RejectStaleEvidence(t *testing.T) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	privateKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
+	publicKey := privateKey.PublicKey()
 
 	registry := NewMockValidatorRegistry()
-	registry.AddValidator("validator1", publicKey)
+	registry.AddValidator("validator1", publicKey.Bytes())
 
 	att1 := createSignedAttestation("validator1", 100, "block_a", privateKey)
 	att2 := createSignedAttestation("validator1", 100, "block_b", privateKey)
@@ -291,11 +304,12 @@ func TestSlashingEvidence_RejectStaleEvidence(t *testing.T) {
 
 // Test 8: Test surround voting evidence
 func TestSlashingEvidence_SurroundVoting(t *testing.T) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	privateKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
+	publicKey := privateKey.PublicKey()
 
 	registry := NewMockValidatorRegistry()
-	registry.AddValidator("validator1", publicKey)
+	registry.AddValidator("validator1", publicKey.Bytes())
 
 	// Create inner and outer attestations
 	innerAtt := createSignedAttestation("validator1", 100, "inner_block", privateKey)
@@ -318,18 +332,19 @@ func TestSlashingEvidence_SurroundVoting(t *testing.T) {
 
 // Test 9: Reject surround voting with fake signatures
 func TestSlashingEvidence_SurroundVoting_FakeSignatures(t *testing.T) {
-	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	privateKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
+	publicKey := privateKey.PublicKey()
 
 	registry := NewMockValidatorRegistry()
-	registry.AddValidator("validator1", publicKey)
+	registry.AddValidator("validator1", publicKey.Bytes())
 
-	// Create attestations with fake signatures
+	// Create attestations with fake signatures (65 bytes but invalid)
 	innerAtt := &types.Attestation{
 		ValidatorAddress: "validator1",
 		Slot:             100,
 		BlockHash:        "inner_block",
-		Signature:        []byte("fake_inner"), // INVALID!
+		Signature:        make([]byte, 65), // INVALID! (zeros)
 		Timestamp:        time.Now().Unix(),
 	}
 
@@ -337,7 +352,7 @@ func TestSlashingEvidence_SurroundVoting_FakeSignatures(t *testing.T) {
 		ValidatorAddress: "validator1",
 		Slot:             105,
 		BlockHash:        "outer_block",
-		Signature:        []byte("fake_outer"), // INVALID!
+		Signature:        make([]byte, 65), // INVALID! (zeros)
 		Timestamp:        time.Now().Unix(),
 	}
 
@@ -359,11 +374,12 @@ func TestSlashingEvidence_SurroundVoting_FakeSignatures(t *testing.T) {
 
 // Test 10: Verify evidence ID is deterministic
 func TestSlashingEvidence_DeterministicID(t *testing.T) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	privateKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
+	publicKey := privateKey.PublicKey()
 
 	registry := NewMockValidatorRegistry()
-	registry.AddValidator("validator1", publicKey)
+	registry.AddValidator("validator1", publicKey.Bytes())
 
 	// Create two identical pieces of evidence
 	att1a := createSignedAttestation("validator1", 100, "block_a", privateKey)
@@ -398,7 +414,7 @@ func TestSlashingEvidence_DeterministicID(t *testing.T) {
 
 // Test 11: Test that validation requires registry
 func TestSlashingEvidence_RequiresRegistry(t *testing.T) {
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	privateKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
 
 	att1 := createSignedAttestation("validator1", 100, "block_a", privateKey)
@@ -420,12 +436,60 @@ func TestSlashingEvidence_RequiresRegistry(t *testing.T) {
 	assert.Contains(t, err.Error(), "registry required")
 }
 
-// Benchmark signature verification
-func BenchmarkSignatureVerification(b *testing.B) {
-	publicKey, privateKey, _ := ed25519.GenerateKey(rand.Reader)
+// Test 12: Test compressed vs uncompressed public key formats
+func TestSlashingEvidence_PublicKeyFormats(t *testing.T) {
+	privateKey, err := crypto.NewPrivateKey()
+	require.NoError(t, err)
+	publicKey := privateKey.PublicKey()
 
 	registry := NewMockValidatorRegistry()
-	registry.AddValidator("validator1", publicKey)
+
+	// Test with compressed format (33 bytes)
+	registry.AddValidator("validator_compressed", publicKey.Bytes())
+
+	att1 := createSignedAttestation("validator_compressed", 100, "block_a", privateKey)
+	att2 := createSignedAttestation("validator_compressed", 100, "block_b", privateKey)
+
+	evidence := NewSlashingEvidence(
+		EvidenceDoubleVoting,
+		"validator_compressed",
+		&DoubleVoteEvidence{
+			Attestation1: att1,
+			Attestation2: att2,
+		},
+		"reporter1",
+	)
+
+	err = evidence.Validate(registry)
+	assert.NoError(t, err, "Should accept compressed public key")
+
+	// Test with uncompressed format (65 bytes)
+	registry.AddValidator("validator_uncompressed", publicKey.BytesUncompressed())
+
+	att3 := createSignedAttestation("validator_uncompressed", 100, "block_c", privateKey)
+	att4 := createSignedAttestation("validator_uncompressed", 100, "block_d", privateKey)
+
+	evidence2 := NewSlashingEvidence(
+		EvidenceDoubleVoting,
+		"validator_uncompressed",
+		&DoubleVoteEvidence{
+			Attestation1: att3,
+			Attestation2: att4,
+		},
+		"reporter1",
+	)
+
+	err = evidence2.Validate(registry)
+	assert.NoError(t, err, "Should accept uncompressed public key")
+}
+
+// Benchmark signature verification with Secp256k1
+func BenchmarkSignatureVerification(b *testing.B) {
+	privateKey, _ := crypto.NewPrivateKey()
+	publicKey := privateKey.PublicKey()
+
+	registry := NewMockValidatorRegistry()
+	registry.AddValidator("validator1", publicKey.Bytes())
 
 	att1 := createSignedAttestation("validator1", 100, "block_a", privateKey)
 	att2 := createSignedAttestation("validator1", 100, "block_b", privateKey)

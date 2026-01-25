@@ -20,10 +20,10 @@ import (
 	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
+	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 	"github.com/thrylos-labs/go-thrylos/types"
-	"golang.org/x/crypto/blake2b"
 )
 
 // NewConsensusEngine creates a new PoS consensus engine
@@ -133,7 +133,10 @@ func (ce *ConsensusEngine) generateVRFProof(input []byte) (*VRFProof, error) {
 	output := sha3.Sum256(combined)
 
 	// 2. Sign the output to prove we generated it
-	signature := ce.nodePrivateKey.Sign(output[:]) // ✅ Single return value
+	signature, err := ce.nodePrivateKey.Sign(output[:])
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate VRF proof signature: %w", err)
+	}
 
 	return &VRFProof{
 		Output: output[:],
@@ -536,7 +539,7 @@ func (ce *ConsensusEngine) verifyVRFProof(
 	}
 
 	// Verify the signature over the VRF output
-	if err := validatorPubKey.Verify(vrfOutput, &sig); err != nil {
+	if err := validatorPubKey.Verify(vrfOutput, sig); err != nil {
 		return fmt.Errorf("VRF proof verification failed: %v", err)
 	}
 	return nil
@@ -692,9 +695,8 @@ func (ce *ConsensusEngine) getEpochRandomness(epoch uint64) []byte {
 			entropyPool = make([]byte, 32)
 		}
 	}
+	return hash.Keccak256(entropyPool)
 
-	hash := blake2b.Sum256(entropyPool)
-	return hash[:]
 }
 
 // IsValidator implements the chain.ConsensusEngine interface
@@ -789,8 +791,8 @@ func (ce *ConsensusEngine) computeBlockSigningHash(block *core.Block) ([]byte, e
 		block.Header.Index,
 	)
 
-	h := blake2b.Sum256([]byte(data))
-	return h[:], nil
+	// Use your crypto/hash package
+	return hash.Keccak256([]byte(data)), nil
 }
 
 // signBlock signs the block with this node's validator key.
@@ -817,9 +819,9 @@ func (ce *ConsensusEngine) signBlock(block *core.Block) error {
 		return err
 	}
 
-	sig := ce.nodePrivateKey.Sign(msg)
-	if sig == nil {
-		return fmt.Errorf("failed to sign block: signature is nil")
+	sig, err := ce.nodePrivateKey.Sign(msg)
+	if err != nil {
+		return fmt.Errorf("failed to sign block: %w", err)
 	}
 
 	// Assumes core.Block has `Signature []byte`
@@ -1213,7 +1215,7 @@ func (bv *BlockValidator) validateBlockSignature(block *core.Block) error {
 		return fmt.Errorf("failed to parse block signature: %v", err)
 	}
 
-	if err := pubKey.Verify(msg, &sig); err != nil {
+	if err := pubKey.Verify(msg, sig); err != nil {
 		return fmt.Errorf("block signature verification failed: %v", err)
 	}
 

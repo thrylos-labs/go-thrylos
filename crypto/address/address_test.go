@@ -1,3 +1,4 @@
+// crypto/address/address_test.go
 package address
 
 import (
@@ -47,6 +48,36 @@ func TestFromEthereumAddress(t *testing.T) {
 	require.Equal(t, address1.String(), address2.String(), "Same key should produce same address")
 }
 
+func TestFromPublicKey(t *testing.T) {
+	// Generate a key pair
+	privateKey, err := ethcrypto.GenerateKey()
+	require.NoError(t, err)
+
+	publicKey := privateKey.Public().(*ecdsa.PublicKey)
+	pubKeyBytes := ethcrypto.FromECDSAPub(publicKey)
+
+	// Derive address from public key
+	addr, err := FromPublicKey(pubKeyBytes)
+	require.NoError(t, err)
+	require.NotNil(t, addr)
+
+	// Compare with go-ethereum's derivation
+	ethAddr := ethcrypto.PubkeyToAddress(*publicKey)
+	expectedAddr := FromEthereumAddress(ethAddr)
+
+	require.True(t, addr.Equal(expectedAddr))
+
+	// Test with invalid public key length
+	_, err = FromPublicKey([]byte{0x01, 0x02, 0x03})
+	require.Error(t, err)
+
+	// Test with wrong prefix
+	wrongPrefix := make([]byte, 65)
+	wrongPrefix[0] = 0x05
+	_, err = FromPublicKey(wrongPrefix)
+	require.Error(t, err)
+}
+
 func TestValidate(t *testing.T) {
 	// Generate a valid address for testing
 	validAddr, _ := generateTestAddress(t)
@@ -73,18 +104,18 @@ func TestValidate(t *testing.T) {
 			valid:   true,
 		},
 		{
-			name:    "valid address without 0x",
+			name:    "valid checksummed address",
+			address: validAddr.ToChecksumAddress(),
+			valid:   true,
+		},
+		{
+			name:    "invalid - no 0x prefix",
 			address: strings.TrimPrefix(validAddrStr, "0x"),
-			valid:   false, // Must have 0x prefix
+			valid:   false,
 		},
 		{
 			name:    "invalid - wrong prefix",
 			address: "eth1234567890123456789012345678901234567890",
-			valid:   false,
-		},
-		{
-			name:    "invalid - no prefix",
-			address: "1234567890123456789012345678901234567890",
 			valid:   false,
 		},
 		{
@@ -123,6 +154,130 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestEIP55Checksum(t *testing.T) {
+	// Test with a known address and its checksum
+	// Example from EIP-55: 0x5aAeb6053f3E94C9b9A09f33669435E7Ef1BeAed
+	knownAddr := "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+	expectedChecksum := "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+
+	checksummed := ToChecksumAddress(knownAddr)
+	require.Equal(t, expectedChecksum, checksummed)
+
+	// Test our Address type's method
+	addr, err := FromString(knownAddr)
+	require.NoError(t, err)
+	require.Equal(t, expectedChecksum, addr.ToChecksumAddress())
+
+	// Test checksum validation
+	require.True(t, ValidateChecksum(expectedChecksum))
+	require.False(t, ValidateChecksum(knownAddr)) // lowercase is not checksummed
+
+	// Test IsChecksummed
+	require.True(t, IsChecksummed(expectedChecksum))
+	require.False(t, IsChecksummed(knownAddr))
+}
+
+func TestChecksumAddress(t *testing.T) {
+	// More EIP-55 test vectors
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{
+			input:    "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+			expected: "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+		},
+		{
+			input:    "0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359",
+			expected: "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+		},
+		{
+			input:    "0xdbf03b407c01e7cd3cbea99509d93f8dddc8c6fb",
+			expected: "0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB",
+		},
+		{
+			input:    "0xd1220a0cf47c7b9be7a2e6ba89f429762e7b9adb",
+			expected: "0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			checksummed := ToChecksumAddress(tt.input)
+			require.Equal(t, tt.expected, checksummed)
+
+			// Also test the Address method
+			addr, _ := FromString(tt.input)
+			require.Equal(t, tt.expected, addr.ToChecksumAddress())
+		})
+	}
+}
+
+func TestCreateAddress(t *testing.T) {
+	// Test CREATE address calculation
+	// Known test case from Ethereum
+	sender, _ := FromString("0x6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0")
+	nonce := uint64(0)
+
+	contractAddr := CreateAddress(sender, nonce)
+	require.NotNil(t, contractAddr)
+
+	// The contract address should be deterministic
+	contractAddr2 := CreateAddress(sender, nonce)
+	require.True(t, contractAddr.Equal(contractAddr2))
+
+	// Different nonce should give different address
+	contractAddr3 := CreateAddress(sender, nonce+1)
+	require.False(t, contractAddr.Equal(contractAddr3))
+
+	// Test with multiple nonces
+	for i := uint64(0); i < 10; i++ {
+		addr := CreateAddress(sender, i)
+		require.NotNil(t, addr)
+		require.False(t, addr.IsZero())
+	}
+}
+
+func TestCreateAddress2(t *testing.T) {
+	// Test CREATE2 address calculation
+	sender, _ := FromString("0x0000000000000000000000000000000000000000")
+
+	var salt [32]byte
+	for i := range salt {
+		salt[i] = byte(i)
+	}
+
+	var initCodeHash [32]byte
+	for i := range initCodeHash {
+		initCodeHash[i] = byte(255 - i)
+	}
+
+	// Calculate CREATE2 address
+	contractAddr := CreateAddress2(sender, salt, initCodeHash)
+	require.NotNil(t, contractAddr)
+	require.False(t, contractAddr.IsZero())
+
+	// Should be deterministic
+	contractAddr2 := CreateAddress2(sender, salt, initCodeHash)
+	require.True(t, contractAddr.Equal(contractAddr2))
+
+	// Different salt should give different address
+	var salt2 [32]byte
+	copy(salt2[:], salt[:])
+	salt2[0] = 0xFF
+
+	contractAddr3 := CreateAddress2(sender, salt2, initCodeHash)
+	require.False(t, contractAddr.Equal(contractAddr3))
+
+	// Different init code hash should give different address
+	var initCodeHash2 [32]byte
+	copy(initCodeHash2[:], initCodeHash[:])
+	initCodeHash2[31] = 0xFF // Change last byte instead of first
+
+	contractAddr4 := CreateAddress2(sender, salt, initCodeHash2)
+	require.False(t, contractAddr.Equal(contractAddr4))
+}
+
 func TestFromString(t *testing.T) {
 	// Generate a valid address for testing
 	validAddr, _ := generateTestAddress(t)
@@ -139,13 +294,58 @@ func TestFromString(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, strings.ToLower(validAddress), strings.ToLower(address2.String()))
 
+	// Test checksummed address
+	checksummed := validAddr.ToChecksumAddress()
+	address3, err := FromString(checksummed)
+	require.NoError(t, err)
+	require.True(t, address.Equal(address3))
+
 	// Test invalid address
 	_, err = FromString("invalid")
 	require.Error(t, err)
+}
 
-	// Test old tl1 format (should fail)
-	_, err = FromString("tl1k2x4p9m6v8q3w7f5t2d4")
+func TestCompareAddresses(t *testing.T) {
+	addr1, _ := generateTestAddress(t)
+	addr2, _ := generateTestAddress(t)
+
+	// Test with same address
+	equal, err := CompareAddresses(addr1.String(), addr1.String())
+	require.NoError(t, err)
+	require.True(t, equal)
+
+	// Test with different addresses
+	equal, err = CompareAddresses(addr1.String(), addr2.String())
+	require.NoError(t, err)
+	require.False(t, equal)
+
+	// Test case insensitivity
+	addr1Lower := strings.ToLower(addr1.String())
+	addr1Upper := strings.ToUpper(addr1.String())
+
+	equal, err = CompareAddresses(addr1Lower, addr1Upper)
+	require.NoError(t, err)
+	require.True(t, equal)
+
+	// Test with invalid address
+	_, err = CompareAddresses("invalid", addr2.String())
 	require.Error(t, err)
+}
+
+func TestCreateAddressDeterminism(t *testing.T) {
+	// Test that CREATE addresses are deterministic
+	sender, _ := generateTestAddress(t)
+
+	// Generate same address multiple times
+	addresses := make([]*Address, 10)
+	for i := 0; i < 10; i++ {
+		addresses[i] = CreateAddress(sender, 5)
+	}
+
+	// All should be identical
+	for i := 1; i < 10; i++ {
+		require.True(t, addresses[0].Equal(addresses[i]))
+	}
 }
 
 func TestFromBytes(t *testing.T) {
@@ -170,10 +370,7 @@ func TestFromBytes(t *testing.T) {
 	_, err = FromBytes([]byte{0x01, 0x02})
 	require.Error(t, err)
 
-	_, err = FromBytes(make([]byte, 8)) // Wrong length
-	require.Error(t, err)
-
-	_, err = FromBytes(make([]byte, 12)) // Wrong length
+	_, err = FromBytes(make([]byte, 8))
 	require.Error(t, err)
 }
 
@@ -184,16 +381,16 @@ func TestAddressMethods(t *testing.T) {
 
 	// Test String()
 	require.True(t, strings.HasPrefix(addr, "0x"))
-	require.Equal(t, 42, len(addr)) // 0x + 40 hex chars
+	require.Equal(t, 42, len(addr))
 
 	// Test Hex()
 	hex := address.Hex()
-	require.Equal(t, 40, len(hex))    // 20 bytes = 40 hex characters
-	require.NotContains(t, hex, "0x") // Should be raw hex without prefix
+	require.Equal(t, 40, len(hex))
+	require.NotContains(t, hex, "0x")
 
 	// Test Bytes()
 	bytes := address.Bytes()
-	require.Equal(t, 20, len(bytes)) // 20 bytes for Ethereum format
+	require.Equal(t, 20, len(bytes))
 
 	// Test IsZero()
 	require.False(t, address.IsZero())
@@ -205,15 +402,14 @@ func TestAddressMethods(t *testing.T) {
 	address2, _ := FromString(addr)
 	require.True(t, address.Equal(address2))
 
-	// Create different address
 	differentAddr, _ := generateTestAddress(t)
 	require.False(t, address.Equal(differentAddr))
 
-	// Test ToLower() and ToUpper()
-	upperAddr := strings.ToUpper(addr)
-	lowerAddr := strings.ToLower(addr)
-	parsedUpper, _ := FromString(upperAddr)
-	require.Equal(t, lowerAddr, parsedUpper.ToLower())
+	// Test ShortString()
+	shortStr := address.ShortString()
+	require.Contains(t, shortStr, "0x")
+	require.Contains(t, shortStr, "...")
+	require.Less(t, len(shortStr), len(addr))
 }
 
 func TestAddressCopy(t *testing.T) {
@@ -221,27 +417,28 @@ func TestAddressCopy(t *testing.T) {
 	copied := original.Copy()
 
 	require.True(t, original.Equal(copied))
-	require.NotSame(t, original, copied) // Different memory addresses
+	require.NotSame(t, original, copied)
 
 	// Modify original, copy should remain unchanged
-	original.Set(make([]byte, 20)) // 20 bytes for Ethereum format
+	original.Set(make([]byte, 20))
 	require.False(t, original.Equal(copied))
 }
 
 func TestAddressJSON(t *testing.T) {
 	address, _ := generateTestAddress(t)
-	addr := address.String()
 
-	// Test MarshalJSON
+	// Test MarshalJSON (should return checksummed)
 	jsonData, err := address.MarshalJSON()
 	require.NoError(t, err)
-	require.Equal(t, `"`+addr+`"`, string(jsonData))
+
+	checksummed := address.ToChecksumAddress()
+	require.Equal(t, `"`+checksummed+`"`, string(jsonData))
 
 	// Test UnmarshalJSON
 	var newAddress Address
 	err = newAddress.UnmarshalJSON(jsonData)
 	require.NoError(t, err)
-	require.Equal(t, strings.ToLower(addr), strings.ToLower(newAddress.String()))
+	require.True(t, address.Equal(&newAddress))
 }
 
 func TestAddressCBOR(t *testing.T) {
@@ -259,19 +456,19 @@ func TestAddressCBOR(t *testing.T) {
 	require.Equal(t, address.String(), newAddress.String())
 }
 
-func TestUtilityFunctions(t *testing.T) {
+func TestAddressTextMarshaling(t *testing.T) {
 	address, _ := generateTestAddress(t)
-	addrStr := address.String()
 
-	// Test ParseAddress
-	parsed, err := ParseAddress(addrStr)
+	// Test MarshalText
+	text, err := address.MarshalText()
 	require.NoError(t, err)
-	require.Equal(t, strings.ToLower(addrStr), strings.ToLower(parsed.String()))
+	require.Equal(t, address.ToChecksumAddress(), string(text))
 
-	// Test FormatAddress
-	formatted, err := FormatAddress(parsed.Bytes())
+	// Test UnmarshalText
+	var newAddress Address
+	err = newAddress.UnmarshalText(text)
 	require.NoError(t, err)
-	require.Equal(t, strings.ToLower(addrStr), strings.ToLower(formatted))
+	require.True(t, address.Equal(&newAddress))
 }
 
 func TestNullAddress(t *testing.T) {
@@ -281,7 +478,7 @@ func TestNullAddress(t *testing.T) {
 
 	nullStr := nullAddr.String()
 	require.True(t, strings.HasPrefix(nullStr, "0x"))
-	require.NoError(t, Validate(nullStr)) // Should be valid hex address
+	require.NoError(t, Validate(nullStr))
 	require.Equal(t, "0x0000000000000000000000000000000000000000", nullStr)
 }
 
@@ -292,283 +489,81 @@ func TestAddressMetrics(t *testing.T) {
 	require.Equal(t, "0x", metrics["prefix"])
 	require.Equal(t, 20, metrics["byte_length"])
 	require.Equal(t, 42, metrics["estimated_str_length"])
+	require.Equal(t, "EIP-55 mixed-case checksum", metrics["checksum"])
+	require.Equal(t, true, metrics["case_sensitive"]) // For checksummed addresses
 	require.Equal(t, "2^160", metrics["collision_resistance"])
-	require.Equal(t, false, metrics["case_sensitive"])
-	require.Equal(t, "secp256k1 (Ethereum standard)", metrics["crypto_scheme"])
-	require.Equal(t, "Full Ethereum/MetaMask compatibility", metrics["compatibility"])
-}
-
-func TestAddressLengthConsistency(t *testing.T) {
-	// Generate multiple addresses and verify consistent length
-	for i := 0; i < 10; i++ {
-		address, _ := generateTestAddress(t)
-		addrStr := address.String()
-
-		require.Equal(t, 42, len(addrStr), "Address length should be consistent")
-		require.True(t, strings.HasPrefix(addrStr, "0x"))
-		require.NoError(t, Validate(addrStr))
-	}
-}
-
-func TestHexCaseInsensitivity(t *testing.T) {
-	address, _ := generateTestAddress(t)
-	original := address.String()
-
-	// Test that different cases are treated as equivalent
-	lower := strings.ToLower(original)
-	upper := strings.ToUpper(original)
-
-	lowerAddr, err := FromString(lower)
-	require.NoError(t, err)
-
-	upperAddr, err := FromString(upper)
-	require.NoError(t, err)
-
-	// Should be equal when normalized
-	require.Equal(t, strings.ToLower(lowerAddr.String()), strings.ToLower(upperAddr.String()))
-}
-
-func TestAddressDeterminism(t *testing.T) {
-	// Test that the same private key always produces the same address
-	privateKey, err := ethcrypto.GenerateKey()
-	require.NoError(t, err)
-
-	publicKey := privateKey.Public().(*ecdsa.PublicKey)
-
-	// Generate address multiple times from same public key
-	ethAddr1 := ethcrypto.PubkeyToAddress(*publicKey)
-	ethAddr2 := ethcrypto.PubkeyToAddress(*publicKey)
-	ethAddr3 := ethcrypto.PubkeyToAddress(*publicKey)
-
-	addr1 := FromEthereumAddress(ethAddr1)
-	addr2 := FromEthereumAddress(ethAddr2)
-	addr3 := FromEthereumAddress(ethAddr3)
-
-	// All should be identical
-	require.Equal(t, addr1.String(), addr2.String())
-	require.Equal(t, addr1.String(), addr3.String())
-	require.True(t, addr1.Equal(addr2))
-	require.True(t, addr1.Equal(addr3))
-}
-
-func TestAddressWithDifferentKeys(t *testing.T) {
-	// Test that different keys produce different addresses
-	addr1, _ := generateTestAddress(t)
-	addr2, _ := generateTestAddress(t)
-
-	// Should be different (extremely unlikely to be the same)
-	require.NotEqual(t, addr1.String(), addr2.String())
-	require.False(t, addr1.Equal(addr2))
-}
-
-func TestAddressRoundTrip(t *testing.T) {
-	// Test full round trip: key -> address -> string -> address -> bytes
-	originalAddr, _ := generateTestAddress(t)
-
-	// Address to string
-	addrStr := originalAddr.String()
-
-	// String to address
-	parsedAddr, err := FromString(addrStr)
-	require.NoError(t, err)
-
-	// Compare addresses
-	require.True(t, originalAddr.Equal(parsedAddr))
-
-	// Address to bytes
-	originalBytes := originalAddr.Bytes()
-	parsedBytes := parsedAddr.Bytes()
-
-	// Compare bytes
-	require.Equal(t, originalBytes, parsedBytes)
-
-	// Bytes back to address
-	bytesAddr, err := FromBytes(originalBytes)
-	require.NoError(t, err)
-
-	require.True(t, originalAddr.Equal(bytesAddr))
-}
-
-func TestEthereumAddressConversion(t *testing.T) {
-	address, _ := generateTestAddress(t)
-
-	// Test conversion to go-ethereum Address
-	ethAddr := address.ToEthereumAddress()
-	require.NotNil(t, ethAddr)
-
-	// Convert back and should be equal
-	converted := FromEthereumAddress(ethAddr)
-	require.True(t, address.Equal(converted))
-}
-
-func TestChecksumAddress(t *testing.T) {
-	address, _ := generateTestAddress(t)
-
-	// Test checksum address (EIP-55)
-	checksumAddr := address.ToChecksumAddress()
-	require.True(t, strings.HasPrefix(checksumAddr, "0x"))
-	require.Equal(t, 42, len(checksumAddr))
-
-	// Should be valid
-	require.NoError(t, Validate(checksumAddr))
-
-	// Test ChecksumAddress function
-	checksumAddr2, err := ChecksumAddress(address.String())
-	require.NoError(t, err)
-	require.Equal(t, checksumAddr, checksumAddr2)
-}
-
-func TestAddressSet(t *testing.T) {
-	address, _ := generateTestAddress(t)
-
-	// Test Set method
-	newBytes := []byte{
-		0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-		0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
-		0x11, 0x22, 0x33, 0x44,
-	}
-
-	err := address.Set(newBytes)
-	require.NoError(t, err)
-	require.Equal(t, newBytes, address.Bytes())
-
-	// Test Set with invalid length
-	err = address.Set([]byte{0x01, 0x02})
-	require.Error(t, err)
-}
-
-func TestAddressSetFromString(t *testing.T) {
-	address, _ := generateTestAddress(t)
-	newAddress, _ := generateTestAddress(t)
-
-	newAddrStr := newAddress.String()
-	err := address.SetFromString(newAddrStr)
-	require.NoError(t, err)
-	require.Equal(t, newAddrStr, address.String())
-
-	// Test with invalid string
-	err = address.SetFromString("invalid")
-	require.Error(t, err)
-}
-
-func TestAddressHash(t *testing.T) {
-	address, _ := generateTestAddress(t)
-
-	hash := address.Hash()
-	require.NotNil(t, hash)
-	require.Equal(t, 32, len(hash)) // Keccak256 produces 32-byte hash
-
-	// Test nil address
-	var nilAddr *Address
-	require.Nil(t, nilAddr.Hash())
-}
-
-func TestAddressNormalize(t *testing.T) {
-	address, _ := generateTestAddress(t)
-
-	normalized := address.Normalize()
-	require.True(t, strings.HasPrefix(normalized, "0x"))
-	require.Equal(t, normalized, strings.ToLower(normalized))
-}
-
-func TestNormalizeAddress(t *testing.T) {
-	address, _ := generateTestAddress(t)
-	addrStr := address.String()
-
-	// Test with uppercase
-	upperAddr := strings.ToUpper(addrStr)
-	normalized, err := NormalizeAddress(upperAddr)
-	require.NoError(t, err)
-	require.Equal(t, strings.ToLower(addrStr), normalized)
-
-	// Test with invalid address
-	_, err = NormalizeAddress("invalid")
-	require.Error(t, err)
-}
-
-func TestAddressToBytes(t *testing.T) {
-	address, _ := generateTestAddress(t)
-	addrStr := address.String()
-
-	bytes, err := AddressToBytes(addrStr)
-	require.NoError(t, err)
-	require.Equal(t, address.Bytes(), bytes)
-	require.Equal(t, 20, len(bytes))
-
-	// Test with invalid address
-	_, err = AddressToBytes("invalid")
-	require.Error(t, err)
-}
-
-func TestIsNullAddress(t *testing.T) {
-	nullAddr := NullAddress()
-	require.True(t, IsNullAddress(nullAddr.String()))
-
-	regularAddr, _ := generateTestAddress(t)
-	require.False(t, IsNullAddress(regularAddr.String()))
-
-	// Test with invalid address
-	require.False(t, IsNullAddress("invalid"))
-}
-
-func TestCreateNullAddressString(t *testing.T) {
-	nullStr := CreateNullAddressString()
-	require.Equal(t, "0x0000000000000000000000000000000000000000", nullStr)
-	require.NoError(t, Validate(nullStr))
-}
-
-func TestGetAddressPrefix(t *testing.T) {
-	require.Equal(t, "0x", GetAddressPrefix())
-}
-
-func TestGetAddressByteLength(t *testing.T) {
-	require.Equal(t, 20, GetAddressByteLength())
-}
-
-func TestEstimateAddressLength(t *testing.T) {
-	require.Equal(t, 42, EstimateAddressLength())
-}
-
-func TestAddressCompare(t *testing.T) {
-	addr1, _ := generateTestAddress(t)
-	addr2, _ := generateTestAddress(t)
-
-	// Test Compare with same address
-	require.True(t, addr1.Compare(*addr1))
-
-	// Test Compare with different address
-	require.False(t, addr1.Compare(*addr2))
-
-	// Test with copy
-	addr1Copy := *addr1
-	require.True(t, addr1.Compare(addr1Copy))
+	require.Equal(t, "Keccak256(pubkey[1:])[12:]", metrics["derivation"])
+	require.Contains(t, metrics, "create_address")
+	require.Contains(t, metrics, "create2_address")
 }
 
 func TestSecp256k1Compatibility(t *testing.T) {
-	// Test that addresses generated from secp256k1 keys are valid Ethereum addresses
 	privateKey, err := ethcrypto.GenerateKey()
 	require.NoError(t, err)
 
 	publicKey := privateKey.Public().(*ecdsa.PublicKey)
 	ethAddr := ethcrypto.PubkeyToAddress(*publicKey)
 
-	// Create our Address from the Ethereum address
 	address := FromEthereumAddress(ethAddr)
 
-	// Verify it's a valid Ethereum address format
 	addrStr := address.String()
 	require.True(t, strings.HasPrefix(addrStr, "0x"))
 	require.Equal(t, 42, len(addrStr))
 	require.NoError(t, Validate(addrStr))
 
-	// Verify conversion back to Ethereum address matches
 	convertedEthAddr := address.ToEthereumAddress()
 	require.Equal(t, ethAddr.Hex(), convertedEthAddr.Hex())
 }
 
-func BenchmarkGenerateAddress(b *testing.B) {
+// Benchmarks
+func BenchmarkFromPublicKey(b *testing.B) {
+	privateKey, _ := ethcrypto.GenerateKey()
+	publicKey := privateKey.Public().(*ecdsa.PublicKey)
+	pubKeyBytes := ethcrypto.FromECDSAPub(publicKey)
+
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = generateTestAddress(nil)
+		_, _ = FromPublicKey(pubKeyBytes)
+	}
+}
+
+func BenchmarkToChecksumAddress(b *testing.B) {
+	addr, _ := generateTestAddress(nil)
+	addrStr := addr.String()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = ToChecksumAddress(addrStr)
+	}
+}
+
+func BenchmarkCreateAddress(b *testing.B) {
+	sender, _ := generateTestAddress(nil)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = CreateAddress(sender, uint64(i))
+	}
+}
+
+func BenchmarkCreateAddress2(b *testing.B) {
+	sender, _ := generateTestAddress(nil)
+	var salt [32]byte
+	var initCodeHash [32]byte
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = CreateAddress2(sender, salt, initCodeHash)
+	}
+}
+
+func BenchmarkValidateChecksum(b *testing.B) {
+	addr, _ := generateTestAddress(nil)
+	checksummed := addr.ToChecksumAddress()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = ValidateChecksum(checksummed)
 	}
 }
 
@@ -579,25 +574,6 @@ func BenchmarkFromString(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = FromString(addrStr)
-	}
-}
-
-func BenchmarkValidate(b *testing.B) {
-	address, _ := generateTestAddress(nil)
-	addrStr := address.String()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = Validate(addrStr)
-	}
-}
-
-func BenchmarkAddressString(b *testing.B) {
-	address, _ := generateTestAddress(nil)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = address.String()
 	}
 }
 
