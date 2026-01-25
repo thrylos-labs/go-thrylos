@@ -1,4 +1,6 @@
 // thrylos-revm/src/lib.rs
+mod ffi_safety;
+
 // Ultra-fast EVM implementation using revm (Rust)
 // 5-10x faster than go-ethereum
 
@@ -14,24 +16,25 @@ const MAX_BYTECODE_SIZE: usize = 24_576;         // 24 KB (EIP-170 limit)
 const EXECUTOR_MAGIC: u64 = 0xDEADBEEF_CAFEBABE;
 const EXECUTOR_FREED_MAGIC: u64 = 0xDEADDEAD_DEADBEEF;
 
-macro_rules! with_executor {
-    ($executor:expr, $body:expr) => {{
-        if let Err(msg) = validate_executor($executor) {
-            return create_error_result(msg);
-        }
+// macro_rules! with_executor {
+//     ($executor:expr, $body:expr) => {{
+//         if let Err(msg) = validate_executor($executor) {
+//             return create_error_result(msg);
+//         }
         
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let executor: &mut EVMExecutor = unsafe { &mut *$executor };
-            $body(executor)
-        }));
+//         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+//             let executor: &mut EVMExecutor = unsafe { &mut *$executor };
+//             $body(executor)
+//         }));
         
-        match result {
-            Ok(r) => r,
-            Err(_) => create_error_result("Panic in executor operation"),
-        }
-    }};
-}
+//         match result {
+//             Ok(r) => r,
+//             Err(_) => create_error_result("Panic in executor operation"),
+//         }
+//     }};
+// }
 
+// Remove the duplicate imports and keep only these:
 use revm::{
     db::CacheDB,
     primitives::{
@@ -39,8 +42,7 @@ use revm::{
     },
     Database, Evm,
 };
-use std::ffi::CString;
-use std::os::raw::c_char;
+use std::ffi::{CString, CStr, c_char};  // ✅ All in one line
 use std::slice;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
@@ -49,6 +51,7 @@ use std::ptr;
 use dashmap::DashMap;
 use std::sync::Arc;
 use parking_lot::Mutex;
+use ffi_safety::{ffi_safe_exec, FFIResult, FFIErrorCode};
 
 // ============================================================================
 // C FFI Types for Go interop
@@ -75,10 +78,27 @@ pub struct CByteSlice {
 
 #[repr(C)]
 pub struct CExecutionResult {
-    success: bool,
-    gas_used: u64,
-    return_data: CByteSlice,
-    error_message: *const c_char,
+    pub success: u8,
+    pub gas_used: u64,
+    pub return_data: CByteSlice,
+    pub error_message: *const c_char,
+    pub error_code: i32,  // NEW: FFI error code
+}
+
+// ✅ Add Default implementation
+impl Default for CExecutionResult {
+    fn default() -> Self {
+        CExecutionResult {
+            success: 0,
+            gas_used: 0,
+            return_data: CByteSlice {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            error_message: std::ptr::null(),
+            error_code: FFIErrorCode::Success as i32,
+        }
+    }
 }
 
 // ============================================================================
@@ -88,7 +108,7 @@ pub struct CExecutionResult {
 /// Helper function for creating error results
 fn create_error_result(msg: &str) -> CExecutionResult {
     CExecutionResult {
-        success: false,
+        success: 0,  // ✅ Changed from false to 0
         gas_used: 0,
         return_data: CByteSlice { 
             data: ptr::null(), 
@@ -97,6 +117,7 @@ fn create_error_result(msg: &str) -> CExecutionResult {
         error_message: CString::new(msg)
             .unwrap_or_else(|_| CString::new("Validation error").unwrap())
             .into_raw(),
+        error_code: FFIErrorCode::ExecutionFailed as i32,  // ✅ Added error_code
     }
 }
 
@@ -320,39 +341,42 @@ impl EVMExecutor {
         };
         let state_nonce = (self.db.get_nonce_fn)(c_addr);
         
-        if nonce != state_nonce {
-            return CExecutionResult {
-                success: false,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(format!(
-                    "Nonce mismatch: expected {}, got {}",
-                    state_nonce, nonce
-                ))
-                .unwrap()
-                .into_raw(),
-            };
-        }
+       if nonce != state_nonce {
+    return CExecutionResult {
+        success: 0,  // ✅ Changed from false
+        gas_used: 0,
+        return_data: CByteSlice {
+            data: std::ptr::null(),
+            len: 0,
+        },
+        error_message: CString::new(format!(
+            "Nonce mismatch: expected {}, got {}",
+            state_nonce, nonce
+        ))
+        .unwrap()
+        .into_raw(),
+        error_code: FFIErrorCode::InvalidInput as i32,  // ✅ Added
+    };
+}
 
-        // 🔒 STEP 3: Immediately increment nonce BEFORE execution
-        let nonce_updated = (self.db.set_nonce_fn)(c_addr, state_nonce + 1);
-        
-        if !nonce_updated {
-            return CExecutionResult {
-                success: false,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new("Failed to increment nonce".to_string())
-                    .unwrap()
-                    .into_raw(),
-            };
-        }
+let nonce_updated = (self.db.set_nonce_fn)(c_addr, state_nonce + 1);
+
+// In execute_call method - nonce update failed:
+if !nonce_updated {
+    return CExecutionResult {
+        success: 0,  // ✅ Changed from false
+        gas_used: 0,
+        return_data: CByteSlice {
+            data: std::ptr::null(),
+            len: 0,
+        },
+        error_message: CString::new("Failed to increment nonce".to_string())
+            .unwrap()
+            .into_raw(),
+        error_code: FFIErrorCode::ExecutionFailed as i32,  // ✅ Added
+    };
+}
+
 
         // STEP 4: Configure transaction
         let mut tx_env = TxEnv::default();
@@ -374,15 +398,16 @@ impl EVMExecutor {
         let result = match evm.transact() {
             Ok(result) => Self::convert_result(result.result),
             Err(e) => CExecutionResult {
-                success: false,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(format!("{:?}", e))
-                    .unwrap()
-                    .into_raw(),
+             success: 0,  // ✅ Changed from false
+           gas_used: 0,
+           return_data: CByteSlice {
+            data: std::ptr::null(),
+               len: 0,
+           },
+               error_message: CString::new(format!("{:?}", e))
+                .unwrap()
+               .into_raw(),
+          error_code: FFIErrorCode::ExecutionFailed as i32,  // ✅ Added
             },
         };
 
@@ -410,38 +435,40 @@ impl EVMExecutor {
         let state_nonce = (self.db.get_nonce_fn)(c_addr);
         
         if nonce != state_nonce {
-            return CExecutionResult {
-                success: false,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(format!(
-                    "Nonce mismatch: expected {}, got {}",
-                    state_nonce, nonce
-                ))
-                .unwrap()
-                .into_raw(),
-            };
-        }
+    return CExecutionResult {
+        success: 0,
+        gas_used: 0,
+        return_data: CByteSlice {
+            data: std::ptr::null(),
+            len: 0,
+        },
+        error_message: CString::new(format!(
+            "Nonce mismatch: expected {}, got {}",
+            state_nonce, nonce
+        ))
+        .unwrap()
+        .into_raw(),
+        error_code: FFIErrorCode::InvalidInput as i32,
+    };
+}
 
-        // 🔒 STEP 3: Immediately increment nonce BEFORE deployment
-        let nonce_updated = (self.db.set_nonce_fn)(c_addr, state_nonce + 1);
-        
-        if !nonce_updated {
-            return CExecutionResult {
-                success: false,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new("Failed to increment nonce".to_string())
-                    .unwrap()
-                    .into_raw(),
-            };
-        }
+let nonce_updated = (self.db.set_nonce_fn)(c_addr, state_nonce + 1);
+
+// In deploy_contract - nonce update failed
+if !nonce_updated {
+    return CExecutionResult {
+        success: 0,
+        gas_used: 0,
+        return_data: CByteSlice {
+            data: std::ptr::null(),
+            len: 0,
+        },
+        error_message: CString::new("Failed to increment nonce".to_string())
+            .unwrap()
+            .into_raw(),
+        error_code: FFIErrorCode::ExecutionFailed as i32,
+    };
+}
 
         // STEP 4: Configure transaction
         let mut tx_env = TxEnv::default();
@@ -463,16 +490,17 @@ impl EVMExecutor {
         let result = match evm.transact() {
             Ok(result) => Self::convert_result(result.result),
             Err(e) => CExecutionResult {
-                success: false,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(format!("{:?}", e))
-                    .unwrap()
-                    .into_raw(),
-            },
+    success: 0,
+    gas_used: 0,
+    return_data: CByteSlice {
+        data: std::ptr::null(),
+        len: 0,
+    },
+    error_message: CString::new(format!("{:?}", e))
+        .unwrap()
+        .into_raw(),
+    error_code: FFIErrorCode::ExecutionFailed as i32,
+},
         };
 
         // 🔓 Lock automatically released when _guard goes out of scope
@@ -480,60 +508,63 @@ impl EVMExecutor {
     }
 
     /// Convert REVM execution result to C-compatible result
-    fn convert_result(result: ExecutionResult) -> CExecutionResult {
-        match result {
-            ExecutionResult::Success {
-                gas_used,
-                output,
-                ..
-            } => {
-                let return_data = match output {
-                    Output::Call(data) => data,
-                    Output::Create(data, _) => data,
-                };
+fn convert_result(result: ExecutionResult) -> CExecutionResult {
+    match result {
+        ExecutionResult::Success {
+            gas_used,
+            output,
+            ..
+        } => {
+            let return_data = match output {
+                Output::Call(data) => data,
+                Output::Create(data, _) => data,
+            };
 
-                let data_len = return_data.len();
-                let leaked = Box::leak(return_data.to_vec().into_boxed_slice());
+            let data_len = return_data.len();
+            let leaked = Box::leak(return_data.to_vec().into_boxed_slice());
 
-                CExecutionResult {
-                    success: true,
-                    gas_used,
-                    return_data: CByteSlice {
-                        data: leaked.as_ptr(),
-                        len: data_len,
-                    },
-                    error_message: std::ptr::null(),
-                }
-            }
-            ExecutionResult::Revert { gas_used, output } => {
-                let data_len = output.len();
-                let leaked = Box::leak(output.to_vec().into_boxed_slice());
-                
-                CExecutionResult {
-                    success: false,
-                    gas_used,
-                    return_data: CByteSlice {
-                        data: leaked.as_ptr(),
-                        len: data_len,
-                    },
-                    error_message: CString::new("execution reverted")
-                        .unwrap()
-                        .into_raw(),
-                }
-            }
-            ExecutionResult::Halt { reason, gas_used } => CExecutionResult {
-                success: false,
+            CExecutionResult {
+                success: 1,  // ✅ Use 1 instead of true
                 gas_used,
                 return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
+                    data: leaked.as_ptr(),
+                    len: data_len,
                 },
-                error_message: CString::new(format!("execution halted: {:?}", reason))
+                error_message: std::ptr::null(),
+                error_code: FFIErrorCode::Success as i32,  // ✅ Added
+            }
+        }
+        ExecutionResult::Revert { gas_used, output } => {
+            let data_len = output.len();
+            let leaked = Box::leak(output.to_vec().into_boxed_slice());
+            
+            CExecutionResult {
+                success: 0,  // ✅ Use 0 instead of false
+                gas_used,
+                return_data: CByteSlice {
+                    data: leaked.as_ptr(),
+                    len: data_len,
+                },
+                error_message: CString::new("execution reverted")
                     .unwrap()
                     .into_raw(),
-            },
+                error_code: FFIErrorCode::Revert as i32,  // ✅ Added
+            }
         }
+        ExecutionResult::Halt { reason, gas_used } => CExecutionResult {
+            success: 0,  // ✅ Use 0 instead of false
+            gas_used,
+            return_data: CByteSlice {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            error_message: CString::new(format!("execution halted: {:?}", reason))
+                .unwrap()
+                .into_raw(),
+            error_code: FFIErrorCode::ExecutionFailed as i32,  // ✅ Added
+        },
     }
+}
 
     /// ✅ NEW: Helper method for checking if an account is currently locked
     pub fn is_account_locked(&self, addr: &Address) -> bool {
@@ -617,69 +648,175 @@ pub extern "C" fn revm_execute_call(
     value: CU256,
     nonce: u64,
 ) -> CExecutionResult {
-    // Validate other inputs first
-    if let Err(msg) = validate_gas_limit(gas_limit) {
-        return create_error_result(msg);
+    // Wrap in AssertUnwindSafe
+    let ffi_result = ffi_safe_exec(AssertUnwindSafe(|| {
+        execute_call_impl(executor, caller, to, data, gas_limit, value, nonce)
+    }));
+
+    match ffi_result.error_code {
+        FFIErrorCode::Success => ffi_result.value,
+        FFIErrorCode::PanicCaught => {
+            eprintln!("🚨 Panic caught in revm_execute_call");
+            create_error_result_with_code("Rust panic in execute_call", FFIErrorCode::PanicCaught)
+        }
+        _ => {
+            create_error_result_with_code(
+                &get_error_message(&ffi_result),
+                ffi_result.error_code
+            )
+        }
     }
+}
+
+// Separate implementation function (your existing logic)
+fn execute_call_impl(
+    executor: *mut EVMExecutor,
+    caller: CAddress,
+    to: CAddress,
+    data: CByteSlice,
+    gas_limit: u64,
+    value: CU256,
+    nonce: u64,
+) -> Result<CExecutionResult, String> {
+    // Validate inputs first
+    validate_gas_limit(gas_limit)
+        .map_err(|e| e.to_string())?;
     
-    if let Err(msg) = validate_data(data, MAX_CALLDATA_SIZE, "Calldata") {
-        return create_error_result(&msg);
-    }
+    validate_data(data, MAX_CALLDATA_SIZE, "Calldata")?;
     
-    // ✅ Use the safe wrapper
-    with_executor!(executor, |exec: &mut EVMExecutor| {
-        let caller_addr = Address::from_slice(&caller.bytes);
-        let to_addr = Address::from_slice(&to.bytes);
-        
-        let data_bytes = if data.len > 0 {
-            unsafe { Bytes::copy_from_slice(slice::from_raw_parts(data.data, data.len)) }
+    // Validate executor
+    validate_executor(executor)
+        .map_err(|e| e.to_string())?;
+    
+    // Execute with executor (without with_executor! macro)
+    let executor = unsafe { &mut *executor };
+    let caller_addr = Address::from_slice(&caller.bytes);
+    let to_addr = Address::from_slice(&to.bytes);
+    
+    let data_bytes = if data.len > 0 {
+        unsafe { Bytes::copy_from_slice(slice::from_raw_parts(data.data, data.len)) }
+    } else {
+        Bytes::default()
+    };
+    
+    let value_u256 = U256::from_be_bytes(value.bytes);
+    
+    // execute_call returns CExecutionResult directly
+    let result = executor.execute_call(caller_addr, to_addr, data_bytes, gas_limit, value_u256, nonce);
+    
+    // Check if execution failed
+    if result.success == 0 {
+        let msg = if !result.error_message.is_null() {
+            unsafe { CStr::from_ptr(result.error_message).to_string_lossy().to_string() }
         } else {
-            Bytes::default()
+            "Execution failed".to_string()
         };
-        
-        let value_u256 = U256::from_be_bytes(value.bytes);
-        
-        exec.execute_call(caller_addr, to_addr, data_bytes, gas_limit, value_u256, nonce)
-    })
+        return Err(msg);
+    }
+    
+    Ok(result)
+}
+
+fn deploy_contract_impl(
+    executor: *mut EVMExecutor,
+    deployer: CAddress,
+    code: CByteSlice,
+    gas_limit: u64,
+    value: CU256,
+    nonce: u64,
+) -> Result<CExecutionResult, String> {
+    // Validate inputs
+    validate_gas_limit(gas_limit)
+        .map_err(|e| e.to_string())?;
+    
+    validate_data(code, MAX_BYTECODE_SIZE, "Bytecode")?;
+    
+    // Validate executor
+    validate_executor(executor)
+        .map_err(|e| e.to_string())?;
+    
+    // Execute deployment
+    let executor = unsafe { &mut *executor };
+    let deployer_addr = Address::from_slice(&deployer.bytes);
+    
+    let code_bytes = if code.len > 0 {
+        unsafe { Bytes::copy_from_slice(slice::from_raw_parts(code.data, code.len)) }
+    } else {
+        Bytes::default()
+    };
+    
+    let value_u256 = U256::from_be_bytes(value.bytes);
+    
+    // deploy_contract returns CExecutionResult directly
+    let result = executor.deploy_contract(deployer_addr, code_bytes, gas_limit, value_u256, nonce);
+    
+    // Check if deployment failed
+    if result.success == 0 {
+        let msg = if !result.error_message.is_null() {
+            unsafe { CStr::from_ptr(result.error_message).to_string_lossy().to_string() }
+        } else {
+            "Deployment failed".to_string()
+        };
+        return Err(msg);
+    }
+    
+    Ok(result)
+}
+
+// Helper to create error result with specific error code
+fn create_error_result_with_code(msg: &str, code: FFIErrorCode) -> CExecutionResult {
+    let c_msg = CString::new(msg)
+        .unwrap_or_else(|_| CString::new("Error creating message").unwrap());
+    
+    CExecutionResult {
+        success: 0,
+        gas_used: 0,
+        return_data: CByteSlice { data: std::ptr::null(), len: 0 },
+        error_message: c_msg.into_raw(),
+        error_code: code as i32,
+    }
+}
+
+// Helper to extract error message from FFIResult
+fn get_error_message(result: &FFIResult<CExecutionResult>) -> String {
+    if result.error_message.is_null() {
+        "Unknown error".to_string()
+    } else {
+        unsafe {
+            CStr::from_ptr(result.error_message)
+                .to_string_lossy()
+                .to_string()
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn revm_deploy_contract(
     executor: *mut EVMExecutor,
     deployer: CAddress,
-    bytecode: CByteSlice,
+    code: CByteSlice,
     gas_limit: u64,
     value: CU256,
     nonce: u64,
 ) -> CExecutionResult {
-    // Validate inputs
-    if let Err(msg) = validate_gas_limit(gas_limit) {
-        return create_error_result(msg);
+    // Wrap in AssertUnwindSafe
+    let ffi_result = ffi_safe_exec(AssertUnwindSafe(|| {
+        deploy_contract_impl(executor, deployer, code, gas_limit, value, nonce)
+    }));
+
+    match ffi_result.error_code {
+        FFIErrorCode::Success => ffi_result.value,
+        FFIErrorCode::PanicCaught => {
+            eprintln!("🚨 Panic caught in revm_deploy_contract");
+            create_error_result_with_code("Rust panic in deploy_contract", FFIErrorCode::PanicCaught)
+        }
+        _ => {
+            create_error_result_with_code(
+                &get_error_message(&ffi_result),
+                ffi_result.error_code
+            )
+        }
     }
-
-    if let Err(msg) = validate_data(bytecode, MAX_BYTECODE_SIZE, "Bytecode") {
-        return create_error_result(&msg);
-    }
-
-    // ✅ Use the safe wrapper
-    with_executor!(executor, |exec: &mut EVMExecutor| {
-        let deployer_addr = Address::from_slice(&deployer.bytes);
-        
-        let bytecode_bytes = if bytecode.len > 0 {
-            unsafe { Bytes::copy_from_slice(slice::from_raw_parts(bytecode.data, bytecode.len)) }
-        } else {
-            Bytes::default()
-        };
-        let value_u256 = U256::from_be_bytes(value.bytes);
-
-        exec.deploy_contract(
-            deployer_addr, 
-            bytecode_bytes, 
-            gas_limit, 
-            value_u256,
-            nonce
-        )
-    })
 }
 
 #[no_mangle]

@@ -1,16 +1,32 @@
-// core/evm/revm_executor.go
-package evm
+package evm //
 
 /*
 #cgo LDFLAGS: -L${SRCDIR}/../../lib -lthrylos_revm
 #include <stdlib.h>
 #include <stdint.h>
 
-// Types
+// 1. Use #define for constants to ensure CGO exports them reliably
+#define FFI_SUCCESS 0
+#define FFI_PANIC_CAUGHT 1
+#define FFI_INVALID_INPUT 2
+#define FFI_EXECUTION_FAILED 3
+#define FFI_OUT_OF_GAS 4
+#define FFI_REVERT 5
+#define FFI_MEMORY_ERROR 6
+
+// Existing types
 typedef struct { uint8_t bytes[20]; } CAddress;
 typedef struct { uint8_t bytes[32]; } CU256;
 typedef struct { const uint8_t* data; size_t len; } CByteSlice;
-typedef struct { uint8_t success; uint64_t gas_used; CByteSlice return_data; const char* error_message; } CExecutionResult;
+
+// 2. Explicitly name the struct tag to avoid anonymous struct issues
+typedef struct CExecutionResult {
+    uint8_t success;
+    uint64_t gas_used;
+    CByteSlice return_data;
+    const char* error_message;
+    int32_t error_code;  // Changed to int32_t to match Rust i32 exactly
+} CExecutionResult;
 
 // Callback Typedefs
 typedef CU256 (*BalanceCallback)(CAddress);
@@ -34,15 +50,13 @@ static StorageCallback get_storage_cb() { return &getStorageCallback; }
 void* revm_executor_new(uint64_t chain_id, BalanceCallback b, NonceCallback n, CodeCallback c, StorageCallback s);
 void revm_executor_free(void* executor);
 void revm_free_result(CExecutionResult result);
-
-// 👇 UPDATED SIGNATURE: Added uint64_t nonce at the end
 CExecutionResult revm_execute_call(void* executor, CAddress caller, CAddress to, CByteSlice data, uint64_t gas, CU256 value, uint64_t nonce);
-
 CExecutionResult revm_deploy_contract(void* executor, CAddress deployer, CByteSlice code, uint64_t gas, CU256 value, uint64_t nonce);
 CAddress revm_calculate_create_address(CAddress deployer, uint64_t nonce);
 uint64_t revm_estimate_gas(void* executor, CAddress caller, CAddress to, CByteSlice data, CU256 value);
 void revm_free_string(char* s);
 void revm_free_bytes(uint8_t* data, size_t len);
+extern void revm_free_error_message(char* ptr);
 */
 import "C"
 import (
@@ -278,6 +292,23 @@ func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data
 
 // Helpers
 func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, error) {
+	// ✅ FIX: Cast to standard int for comparison
+	if int(res.error_code) == int(C.FFI_PANIC_CAUGHT) {
+		msg := "Rust panic detected"
+		if res.error_message != nil {
+			msg = C.GoString(res.error_message)
+		}
+		return nil, 0, fmt.Errorf("CRITICAL: REVM panic - %s", msg)
+	}
+
+	if int(res.error_code) != int(C.FFI_SUCCESS) {
+		msg := "Unknown FFI error"
+		if res.error_message != nil {
+			msg = C.GoString(res.error_message)
+		}
+		return nil, 0, fmt.Errorf("REVM FFI error (code %d): %s", int(res.error_code), msg)
+	}
+
 	gasUsed := uint64(res.gas_used)
 
 	// SECURITY: Validate gas used is reasonable
@@ -293,6 +324,7 @@ func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, er
 		data = C.GoBytes(unsafe.Pointer(res.return_data.data), C.int(res.return_data.len))
 	}
 
+	// Check execution success (EVM-level failure, not FFI failure)
 	if res.success == 0 {
 		var msg string
 		if res.error_message != nil {
@@ -302,6 +334,7 @@ func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, er
 		}
 		return data, gasUsed, fmt.Errorf("%s", msg)
 	}
+
 	return data, gasUsed, nil
 }
 
