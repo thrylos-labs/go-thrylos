@@ -18,7 +18,6 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	stdmath "math"
 	"math/big"
 	"strings"
 	"time"
@@ -965,86 +964,11 @@ func (v *Validator) validateBusinessLogic(tx *core.Transaction, stateReader Stat
 	}
 }
 
-// Helper functions for safe arithmetic operations and input validation
-
-// validateAmountNonNegative checks if an amount is non-negative
-func validateAmountNonNegative(amount int64, fieldName string) error {
-	if amount < 0 {
-		return fmt.Errorf("%s cannot be negative: %d", fieldName, amount)
-	}
-	return nil
-}
-
-// safeMultiply performs multiplication with overflow check
-func safeMultiply(a, b int64, operation string) (int64, error) {
-	if a == 0 || b == 0 {
-		return 0, nil
-	}
-
-	// Use stdmath.MaxInt64 instead of math.MaxInt64
-	if a > 0 && b > 0 && a > stdmath.MaxInt64/b {
-		return 0, fmt.Errorf("%s would overflow", operation)
-	}
-	if a < 0 && b < 0 && a < stdmath.MaxInt64/b {
-		return 0, fmt.Errorf("%s would overflow", operation)
-	}
-	if (a > 0 && b < 0 && b < stdmath.MinInt64/a) || (a < 0 && b > 0 && a < stdmath.MinInt64/b) {
-		return 0, fmt.Errorf("%s would underflow", operation)
-	}
-
-	return a * b, nil
-}
-
 // Define constants locally to avoid conflict with your custom 'math' package
 const (
 	MaxInt64 = 1<<63 - 1
 	MinInt64 = -1 << 63
 )
-
-// safeAdd performs addition with overflow check
-func safeAdd(a, b int64, operation string) (int64, error) {
-	// Check for positive overflow
-	if a > 0 && b > 0 && a > MaxInt64-b {
-		return 0, fmt.Errorf("%s would overflow (tried to add %d + %d)", operation, a, b)
-	}
-	// Check for negative overflow (underflow)
-	if a < 0 && b < 0 && a < MinInt64-b {
-		return 0, fmt.Errorf("%s would underflow (tried to add %d + %d)", operation, a, b)
-	}
-
-	return a + b, nil
-}
-
-// calculateGasCost safely calculates gas cost with overflow protection
-func (v *Validator) calculateGasCost(gas, gasPrice int64) (int64, error) {
-	// Validate both inputs are non-negative
-	if err := validateAmountNonNegative(gas, "gas"); err != nil {
-		return 0, err
-	}
-	if err := validateAmountNonNegative(gasPrice, "gas price"); err != nil {
-		return 0, err
-	}
-
-	// Calculate with overflow protection
-	return safeMultiply(gas, gasPrice, "gas cost calculation")
-}
-
-// calculateTotalCost safely calculates total transaction cost with overflow protection
-func (v *Validator) calculateTotalCost(amount, gas, gasPrice int64) (int64, error) {
-	// Validate amount is non-negative
-	if err := validateAmountNonNegative(amount, "amount"); err != nil {
-		return 0, err
-	}
-
-	// Calculate gas cost
-	gasCost, err := v.calculateGasCost(gas, gasPrice)
-	if err != nil {
-		return 0, err
-	}
-
-	// Calculate total with overflow protection
-	return safeAdd(amount, gasCost, "total cost calculation")
-}
 
 // validateTransfer validates transfer transaction logic
 func (v *Validator) validateTransfer(tx *core.Transaction, sender *core.Account) error {
