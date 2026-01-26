@@ -1,5 +1,5 @@
-// ffi_safety.rs
-use std::panic::{self, UnwindSafe}; // ✅ IMPORT UnwindSafe TRAIT
+// thrylos-revm/src/ffi_safety.rs
+use std::panic::{self, UnwindSafe};
 use std::ffi::CString;
 use std::os::raw::c_char;
 
@@ -11,8 +11,10 @@ pub enum FFIErrorCode {
     PanicCaught = 1,
     InvalidInput = 2,
     ExecutionFailed = 3,
+    #[allow(dead_code)]  // ✅ Reserved for future use
     OutOfGas = 4,
     Revert = 5,
+    #[allow(dead_code)]  // ✅ Reserved for future use
     MemoryError = 6,
 }
 
@@ -48,9 +50,6 @@ impl<T: Default> FFIResult<T> {
 /// Safely execute Rust code and catch panics for FFI
 pub fn ffi_safe_exec<F, T>(f: F) -> FFIResult<T>
 where
-    // ✅ CRITICAL FIX: You must add "+ UnwindSafe" here.
-    // Since lib.rs passes 'AssertUnwindSafe<Closure>', that TYPE implements UnwindSafe.
-    // This bound allows that type to be passed through to panic::catch_unwind.
     F: FnOnce() -> Result<T, String> + UnwindSafe, 
     T: Default,
 {
