@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
+	core "github.com/thrylos-labs/go-thrylos/proto/core"
 
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/types"
@@ -233,6 +235,50 @@ func (ce *ConsensusEngine) verifyVoteSignature(vote *Vote) error {
 	// [FIX L-02] Use VerifyHash
 	if err := pubKey.VerifyHash(hash, sig); err != nil {
 		return fmt.Errorf("vote signature verification failed: %v", err)
+	}
+
+	return nil
+}
+
+func (ce *ConsensusEngine) VerifyBlockWithSignatures(block *core.Block) error {
+	// Skip genesis block
+	if block.Header.Index == 0 {
+		return nil
+	}
+
+	// 1. Verify block has a signature
+	if len(block.Signature) == 0 {
+		return fmt.Errorf("CRITICAL: block %s has no signature", block.Hash)
+	}
+
+	// 2. Verify proposer exists and is active
+	validator, err := ce.worldState.GetValidator(block.Header.Validator)
+	if err != nil {
+		return fmt.Errorf("CRITICAL: proposer not found: %v", err)
+	}
+
+	if !validator.Active || validator.JailUntil > time.Now().Unix() {
+		return fmt.Errorf("CRITICAL: proposer is inactive or jailed")
+	}
+
+	// 3. Verify public key and signature
+	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
+	if err != nil {
+		return fmt.Errorf("CRITICAL: invalid public key: %v", err)
+	}
+
+	msg, err := ce.computeBlockSigningHash(block)
+	if err != nil {
+		return fmt.Errorf("CRITICAL: failed to compute signing hash: %v", err)
+	}
+
+	sig, err := crypto.SignatureFromBytes(block.Signature)
+	if err != nil {
+		return fmt.Errorf("CRITICAL: invalid signature format: %v", err)
+	}
+
+	if err := pubKey.Verify(msg, sig); err != nil {
+		return fmt.Errorf("CRITICAL: signature verification failed: %v", err)
 	}
 
 	return nil

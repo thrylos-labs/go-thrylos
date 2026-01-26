@@ -400,6 +400,11 @@ func (ce *ConsensusEngine) proposeBlock() error {
 		return fmt.Errorf("block validation failed: %v", err)
 	}
 
+	// 🔒 CRITICAL FIX: Verify signature before adding block
+	if err := ce.VerifyBlockWithSignatures(result.Block); err != nil {
+		return fmt.Errorf("block signature verification failed: %v", err)
+	}
+
 	// Add block to world state
 	if err := ce.worldState.AddBlock(result.Block); err != nil {
 		return fmt.Errorf("failed to add block to world state: %v", err)
@@ -836,6 +841,18 @@ func (ce *ConsensusEngine) handleBlockProposal(proposal *BlockProposal) {
 	// [SEC-FIX] Verify signature is now backed by robust ChainID logic
 	if err := ce.verifyProposalSignature(proposal); err != nil {
 		fmt.Printf("❌ Invalid proposal signature: %v\n", err)
+		return
+	}
+
+	// Add block signature verification
+	if err := ce.VerifyBlockWithSignatures(proposal.Block); err != nil {
+		fmt.Printf("❌ Invalid block signature: %v\n", err)
+		return
+	}
+
+	// Then validate the block
+	if err := ce.blockValidator.ValidateBlock(proposal.Block); err != nil {
+		fmt.Printf("Invalid block proposal: %v\n", err)
 		return
 	}
 
