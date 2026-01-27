@@ -1996,26 +1996,61 @@ func (ws *WorldState) ExportValidators() map[string]*core.Validator {
 	return validators
 }
 
-// ExportStakes returns staking information for state sync
-func (ws *WorldState) ExportStakes() map[string]map[string]string {
-	// Accounts are from DB, so safe to iterate
+// StakeExport represents a single delegation record.
+// We use a flat structure or nested structure, but it MUST be in a slice.
+type StakeExport struct {
+	DelegatorAddr string `json:"delegator_addr"`
+	ValidatorAddr string `json:"validator_addr"`
+	Amount        string `json:"amount"`
+}
+
+// ExportStakes returns a deterministically sorted list of all stakes.
+// CHANGED: Return type is now []*StakeExport instead of map.
+func (ws *WorldState) ExportStakes() ([]*StakeExport, error) {
+	// 1. Get all accounts
 	accounts := ws.accountManager.GetAllAccounts()
 
-	// ✅ CHANGED: Map initialization
-	stakes := make(map[string]map[string]string)
+	// 2. Sort Account Keys (Determinism Step A)
+	// Go map iteration is random, so we must collect keys and sort them.
+	var accountKeys []string
+	for addr := range accounts {
+		accountKeys = append(accountKeys, addr)
+	}
+	sort.Strings(accountKeys)
 
-	for addr, account := range accounts {
-		if account.DelegatedTo != nil && len(account.DelegatedTo) > 0 {
-			// ✅ CHANGED: Inner map initialization
-			stakes[addr] = make(map[string]string)
-			for validator, amount := range account.DelegatedTo {
-				// Direct assignment (string -> string)
-				stakes[addr][validator] = amount
-			}
+	// Initialize the slice
+	var exportData []*StakeExport
+
+	// 3. Iterate Sorted Accounts
+	for _, delegatorAddr := range accountKeys {
+		account := accounts[delegatorAddr]
+
+		// Skip if no delegations
+		if account.DelegatedTo == nil || len(account.DelegatedTo) == 0 {
+			continue
+		}
+
+		// 4. Sort Delegation Keys (Determinism Step B)
+		// We must also sort the inner map (Validators)
+		var validatorKeys []string
+		for valAddr := range account.DelegatedTo {
+			validatorKeys = append(validatorKeys, valAddr)
+		}
+		sort.Strings(validatorKeys)
+
+		// 5. Build Ordered List
+		for _, valAddr := range validatorKeys {
+			amount := account.DelegatedTo[valAddr]
+
+			exportData = append(exportData, &StakeExport{
+				DelegatorAddr: delegatorAddr,
+				ValidatorAddr: valAddr,
+				Amount:        amount,
+			})
 		}
 	}
 
-	return stakes
+	return exportData, nil
 }
 
 // Clear clears the world state (for restoring from snapshot)
