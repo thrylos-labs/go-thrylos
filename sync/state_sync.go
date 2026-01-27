@@ -334,6 +334,7 @@ func (ss *StateSyncer) SyncWorldState() error {
 }
 
 // CreateSnapshot creates a snapshot of the current world state
+// CreateSnapshot creates a snapshot of the current world state
 func (ss *StateSyncer) CreateSnapshot() (*p2p.StateSnapshot, error) {
 	currentHeight := ss.worldState.GetCurrentHeight()
 	stateRoot := ss.worldState.GetStateRoot()
@@ -362,24 +363,33 @@ func (ss *StateSyncer) CreateSnapshot() (*p2p.StateSnapshot, error) {
 	}
 
 	// Export staking data
-	// ✅ FIX: Convert map[string]map[string]string -> map[string]map[string]int64
-	rawStakes := ss.worldState.ExportStakes()
+	// ✅ FIX: Handle the new return values (slice, error) from ExportStakes
+	rawStakesList, err := ss.worldState.ExportStakes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to export stakes: %v", err)
+	}
+
 	stakesInt := make(map[string]map[string]int64)
 
-	for delegatorAddr, delegations := range rawStakes {
-		if len(delegations) > 0 {
-			stakesInt[delegatorAddr] = make(map[string]int64)
-			for validatorAddr, amountStr := range delegations {
-				// Parse string to int64
-				amount, err := strconv.ParseInt(amountStr, 10, 64)
-				if err != nil {
-					// Log error or default to 0 to prevent crash, depending on your error handling policy
-					fmt.Printf("Error parsing stake amount for export: %v\n", err)
-					amount = 0
-				}
-				stakesInt[delegatorAddr][validatorAddr] = amount
-			}
+	// ✅ FIX: Iterate over the Slice, not a Map
+	for _, stakeItem := range rawStakesList {
+		delegator := stakeItem.DelegatorAddr
+		validator := stakeItem.ValidatorAddr
+		amountStr := stakeItem.Amount
+
+		// Parse string to int64
+		amount, err := strconv.ParseInt(amountStr, 10, 64)
+		if err != nil {
+			fmt.Printf("Error parsing stake amount for export: %v\n", err)
+			continue
 		}
+
+		// Initialize inner map if it doesn't exist
+		if _, exists := stakesInt[delegator]; !exists {
+			stakesInt[delegator] = make(map[string]int64)
+		}
+
+		stakesInt[delegator][validator] = amount
 	}
 	snapshot.Stakes = stakesInt
 
