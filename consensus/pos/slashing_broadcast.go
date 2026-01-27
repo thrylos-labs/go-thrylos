@@ -70,28 +70,22 @@ func (et *EvidenceTracker) cleanup() {
 	}
 }
 
-// Add to ConsensusEngine struct (in consensus.go)
-// Add this field to the ConsensusEngine struct:
-// evidenceTracker *EvidenceTracker
-
-// Initialize in NewConsensusEngine:
-// engine.evidenceTracker = NewEvidenceTracker()
-
 // ============================================================================
-// MAIN IMPLEMENTATION: Add these methods to consensus.go
+// MAIN IMPLEMENTATION: Add these methods to ConsensusEngine (usually in consensus.go, but placed here for context)
 // ============================================================================
 
-// handleSlashingEvidence handles detected slashing evidence
-func (ce *ConsensusEngine) handleSlashingEvidence(evidence *SlashingEvidence) error {
-	// 1. Validate evidence structure
-	if err := evidence.Validate(ce.worldState); err != nil {
-		return fmt.Errorf("invalid slashing evidence: %v", err)
-	}
-
-	// 2. Check if already processed (prevent duplicates)
+// HandleSlashingEvidence handles detected slashing evidence
+// Note: Changed receiver to ConsensusEngine to match your provided code snippet's intent
+func (ce *ConsensusEngine) HandleSlashingEvidence(evidence *SlashingEvidence) error {
+	// 1. Check if already processed (prevent duplicates) - FAIL FAST
 	if ce.evidenceTracker.IsProcessed(evidence.ID) {
 		log.Printf("📝 Evidence %s already processed, skipping", evidence.ID)
 		return nil
+	}
+
+	// 2. Validate evidence structure
+	if err := evidence.Validate(ce.worldState); err != nil {
+		return fmt.Errorf("invalid slashing evidence: %v", err)
 	}
 
 	// 3. Verify reporter signature
@@ -126,7 +120,6 @@ func (ce *ConsensusEngine) handleSlashingEvidence(evidence *SlashingEvidence) er
 }
 
 // applySlashing applies the slashing penalty locally using existing SlashingManager
-// applySlashing applies the slashing penalty locally using existing SlashingManager
 func (ce *ConsensusEngine) applySlashing(evidence *SlashingEvidence) error {
 	// Skip if slashing manager not initialized (e.g., in tests)
 	if ce.slashingManager == nil {
@@ -148,8 +141,6 @@ func (ce *ConsensusEngine) applySlashing(evidence *SlashingEvidence) error {
 			return fmt.Errorf("failed to apply double-vote slashing: %w", err)
 		}
 
-		// If no error, we assume slashing manager handled it, but double voting usually returns an error context
-		// in existing code. If success, we just return nil.
 		return nil
 
 	case EvidenceSurroundVoting:
@@ -169,7 +160,6 @@ func (ce *ConsensusEngine) applySlashing(evidence *SlashingEvidence) error {
 			return nil
 		}
 
-		// If logic reaches here without slashing, it might be an issue, but standard flow returns nil
 		return nil
 
 	case EvidenceInvalidProposal:
@@ -213,14 +203,13 @@ func (ce *ConsensusEngine) applySlashing(evidence *SlashingEvidence) error {
 			return fmt.Errorf("invalid evidence type for invalid signature")
 		}
 
-		// 1. Get validator's current balance (Returns *big.Int)
+		// 1. Get validator's current balance
 		balance, err := ce.worldState.GetBalance(evidence.ValidatorAddress)
 		if err != nil {
 			return fmt.Errorf("failed to get validator balance: %v", err)
 		}
 
-		// 2. Calculate Penalty (BigInt)
-		// Convert int config to int64 for the helper
+		// 2. Calculate Penalty
 		penaltyPercent := int64(ce.config.Consensus.SlashingInvalidSig)
 
 		// Use SafePercentageBig helper
@@ -229,7 +218,7 @@ func (ce *ConsensusEngine) applySlashing(evidence *SlashingEvidence) error {
 			return fmt.Errorf("failed to calculate penalty: %v", err)
 		}
 
-		// 3. Subtract Penalty (BigInt)
+		// 3. Subtract Penalty
 		newBalance := coremath.Sub(balance, penaltyAmount)
 
 		// 4. Ensure non-negative
@@ -237,7 +226,7 @@ func (ce *ConsensusEngine) applySlashing(evidence *SlashingEvidence) error {
 			newBalance = big.NewInt(0)
 		}
 
-		// 5. Update Balance (Pass *big.Int)
+		// 5. Update Balance
 		err = ce.worldState.UpdateBalance(evidence.ValidatorAddress, newBalance)
 		if err != nil {
 			return fmt.Errorf("failed to update balance: %v", err)
@@ -281,15 +270,13 @@ func (ce *ConsensusEngine) persistSlashingEvidence(evidence *SlashingEvidence) e
 	}
 
 	// Store via slashing manager's storage
-	// The storage interface would need a SaveEvidence method
 	// For now, we log it
 	log.Printf("💾 Persisting slashing evidence %s (storage method TBD)", evidence.ID)
 
 	return nil
 }
 
-// In processReceivedSlashingEvidence, change the error handling:
-
+// processReceivedSlashingEvidence handles evidence received from peers
 func (ce *ConsensusEngine) processReceivedSlashingEvidence(evidence *SlashingEvidence) error {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
@@ -297,7 +284,7 @@ func (ce *ConsensusEngine) processReceivedSlashingEvidence(evidence *SlashingEvi
 	log.Printf("📨 Received slashing evidence %s for validator %s from reporter %s",
 		evidence.ID, evidence.ValidatorAddress, evidence.ReporterAddress)
 
-	// Check if already processed
+	// Check if already processed (Fail Fast)
 	if ce.evidenceTracker.IsProcessed(evidence.ID) {
 		log.Printf("⚠️  Evidence %s already processed, skipping", evidence.ID)
 		return nil
@@ -310,14 +297,14 @@ func (ce *ConsensusEngine) processReceivedSlashingEvidence(evidence *SlashingEvi
 
 	// Verify signature
 	if err := ce.verifyEvidenceSignature(evidence); err != nil {
-		// ✅ CHANGE: Don't fail on signature error in tests - just log it
+		// Log warning but don't crash in tests
 		log.Printf("⚠️  Signature verification failed: %v", err)
-		// Still mark as processed to avoid re-processing
+		// Still mark as processed to avoid re-processing invalid data repeatedly
 		ce.evidenceTracker.MarkProcessed(evidence)
 		return fmt.Errorf("invalid evidence signature: %v", err)
 	}
 
-	// Mark as processed BEFORE applying (to prevent duplicates even if apply fails)
+	// Mark as processed BEFORE applying
 	ce.evidenceTracker.MarkProcessed(evidence)
 
 	// Apply slashing locally
@@ -339,10 +326,10 @@ func (ce *ConsensusEngine) signEvidence(evidence *SlashingEvidence) error {
 		evidence.ValidatorAddress,
 		evidence.Timestamp)
 
-	// Use Keccak256 instead of Blake2b
+	// Use Keccak256
 	hashBytes := hash.Keccak256([]byte(data))
 
-	// Sign with private key - Sign now returns (Signature, error)
+	// Sign with private key
 	signature, err := ce.nodePrivateKey.Sign(hashBytes)
 	if err != nil {
 		return fmt.Errorf("failed to sign evidence: %w", err)
@@ -354,6 +341,7 @@ func (ce *ConsensusEngine) signEvidence(evidence *SlashingEvidence) error {
 	return nil
 }
 
+// verifyEvidenceSignature verifies the reporter's signature
 func (ce *ConsensusEngine) verifyEvidenceSignature(evidence *SlashingEvidence) error {
 	// 1. Signature must exist
 	if len(evidence.ReporterSignature) == 0 {
@@ -362,12 +350,11 @@ func (ce *ConsensusEngine) verifyEvidenceSignature(evidence *SlashingEvidence) e
 
 	// 2. In tests, we might not have worldState
 	if ce.worldState == nil {
-		// OPTIONAL: Add a panic here if THRYLOS_ENVIRONMENT is "production"
 		log.Println("⚠️ CRITICAL WARNING: Skipping evidence verification because worldState is nil. This should ONLY happen in unit tests.")
 		return nil
 	}
 
-	// 3. Signature length must match our secp256k1 format (R||S||V = 65 bytes)
+	// 3. Signature length check
 	if len(evidence.ReporterSignature) != crypto.SignatureSize {
 		return fmt.Errorf("invalid signature length: got %d, want %d",
 			len(evidence.ReporterSignature), crypto.SignatureSize)
@@ -396,7 +383,7 @@ func (ce *ConsensusEngine) verifyEvidenceSignature(evidence *SlashingEvidence) e
 		return fmt.Errorf("failed to parse reporter signature: %w", err)
 	}
 
-	// 7. Reconstruct the exact message hash used in signEvidence
+	// 7. Reconstruct the message hash
 	data := fmt.Sprintf("%s%s%s%d",
 		evidence.ID,
 		evidence.Type.String(),
@@ -404,10 +391,9 @@ func (ce *ConsensusEngine) verifyEvidenceSignature(evidence *SlashingEvidence) e
 		evidence.Timestamp,
 	)
 
-	// Use Keccak256 instead of Blake2b (matches signEvidence)
 	hashBytes := hash.Keccak256([]byte(data))
 
-	// 8. Verify - pass interface values directly (not pointers)
+	// 8. Verify
 	if err := sig.Verify(pubKey, hashBytes); err != nil {
 		return fmt.Errorf("invalid evidence signature: %w", err)
 	}
@@ -416,17 +402,12 @@ func (ce *ConsensusEngine) verifyEvidenceSignature(evidence *SlashingEvidence) e
 	return nil
 }
 
-// createSlashingEvidenceFromAttestation creates slashing evidence from an
-// attestation violation detected by the SlashingManager.
-//
-// It expects violation to be a *DoubleSigningError containing a
-// storage.AttestationRecord with the conflicting attestation.
+// createSlashingEvidenceFromAttestation creates evidence from a DoubleSigningError
 func (ce *ConsensusEngine) createSlashingEvidenceFromAttestation(
 	attestation *types.Attestation,
 	violation error,
 ) *SlashingEvidence {
 
-	// Must be a DoubleSigningError with conflicting data
 	dsErr, ok := violation.(*DoubleSigningError)
 	if !ok || dsErr.ConflictingRecord == nil {
 		fmt.Printf("⚠️ Cannot create evidence: violation does not contain conflicting data: %v\n", violation)
@@ -435,12 +416,12 @@ func (ce *ConsensusEngine) createSlashingEvidenceFromAttestation(
 
 	rec := dsErr.ConflictingRecord
 
-	// Rebuild the conflicting attestation from storage record
+	// Rebuild the conflicting attestation
 	conflicting := &types.Attestation{
 		ValidatorAddress: rec.ValidatorAddress,
 		BlockHash:        rec.BlockHash,
 		Epoch:            rec.Epoch,
-		Slot:             rec.Slot, // ✅ use real slot from record
+		Slot:             rec.Slot,
 		Signature:        rec.Signature,
 		Timestamp:        rec.Timestamp.Unix(),
 	}

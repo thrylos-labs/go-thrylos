@@ -700,10 +700,11 @@ func (ce *ConsensusEngine) processAttestations() {
 			fmt.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n",
 				attestation.ValidatorAddress, err)
 
-			// ✅ NEW: Create and broadcast slashing evidence
+			// Create and broadcast slashing evidence
 			evidence := ce.createSlashingEvidenceFromAttestation(attestation, err)
 			if evidence != nil {
-				if err := ce.handleSlashingEvidence(evidence); err != nil {
+				// ✅ FIX: Use Capital 'H' to match the defined method
+				if err := ce.HandleSlashingEvidence(evidence); err != nil {
 					log.Printf("❌ Failed to handle slashing evidence: %v", err)
 				}
 			}
