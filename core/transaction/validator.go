@@ -915,11 +915,11 @@ func (v *Validator) validateSufficientBalanceForNonce(tx *core.Transaction, send
 	txGasPrice := math.ParseBigInt(tx.GasPrice)
 	txGas := big.NewInt(tx.Gas)
 
-	// 2. Calculate Fee (Gas * GasPrice)
-	fee := new(big.Int).Mul(txGas, txGasPrice)
+	// 2. Calculate Fee (Gas * GasPrice) with overflow protection
+	fee := math.MulBig(txGas, txGasPrice)
 
-	// 3. Total Cost (Amount + Fee)
-	totalCost := new(big.Int).Add(txAmount, fee)
+	// 3. Total Cost (Amount + Fee) with overflow protection
+	totalCost := math.AddBig(txAmount, fee)
 
 	// 4. Get Sender Balance
 	senderBalance := math.ParseBigInt(sender.Balance)

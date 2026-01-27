@@ -290,16 +290,17 @@ func (p *Pool) validateTotalPendingBalance(address string, newTx *core.Transacti
 	totalRequired := big.NewInt(0)
 
 	// Helper function to calculate cost for a single tx and add to total
-	addCost := func(tx *core.Transaction) {
+	addCost := func(tx *core.Transaction) error {
 		amountBig := math.ParseBigInt(tx.Amount)
 		gasPriceBig := math.ParseBigInt(tx.GasPrice)
 		gasLimitBig := big.NewInt(tx.Gas)
 
-		// Cost = Amount + (Gas * GasPrice)
-		gasCost := new(big.Int).Mul(gasLimitBig, gasPriceBig)
-		txTotal := new(big.Int).Add(amountBig, gasCost)
+		// Cost = Amount + (Gas * GasPrice) with SafeMath
+		gasCost := math.MulBig(gasLimitBig, gasPriceBig)
+		txTotal := math.AddBig(amountBig, gasCost)
 
-		totalRequired.Add(totalRequired, txTotal)
+		totalRequired = math.AddBig(totalRequired, txTotal)
+		return nil
 	}
 
 	// 2. Sum up existing pending transactions
@@ -309,12 +310,16 @@ func (p *Pool) validateTotalPendingBalance(address string, newTx *core.Transacti
 			if tx.Nonce == newTx.Nonce {
 				continue
 			}
-			addCost(tx)
+			if err := addCost(tx); err != nil {
+				return fmt.Errorf("failed to calculate cost for pending tx: %w", err)
+			}
 		}
 	}
 
 	// 3. Add new transaction cost
-	addCost(newTx)
+	if err := addCost(newTx); err != nil {
+		return fmt.Errorf("failed to calculate cost for new tx: %w", err)
+	}
 
 	// 4. Check Balance
 	balanceBig := math.ParseBigInt(account.Balance)

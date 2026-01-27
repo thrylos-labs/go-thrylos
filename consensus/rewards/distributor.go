@@ -455,6 +455,14 @@ func (rd *Distributor) distributeValidatorRewards(validator *core.Validator, tot
 	totalStakeBig := coremath.ParseBigInt(totalStake)
 	validatorStakeBig := coremath.ParseBigInt(validator.Stake)
 
+	// Validate inputs
+	if totalStakeBig.Sign() <= 0 {
+		return nil, fmt.Errorf("invalid total stake: %s", totalStake)
+	}
+	if poolBig.Sign() < 0 {
+		return nil, fmt.Errorf("invalid reward pool: %s", totalRewardPool)
+	}
+
 	// Stake Share = ValStake / TotalStake
 	valStakeF := new(big.Float).SetInt(validatorStakeBig)
 	totalStakeF := new(big.Float).SetInt(totalStakeBig)
@@ -482,11 +490,12 @@ func (rd *Distributor) distributeValidatorRewards(validator *core.Validator, tot
 	// Proposer Bonus
 	proposerBonusBig := rd.calculateProposerBonus(validator, epoch)
 
-	// Total = Base + Perf + Prop - Conc
-	totalValidatorRewardBig := coremath.Add(baseRewardBig, performanceBonusBig)
-	totalValidatorRewardBig = coremath.Add(totalValidatorRewardBig, proposerBonusBig)
-	totalValidatorRewardBig = coremath.Sub(totalValidatorRewardBig, concentrationPenaltyBig)
+	// Total = Base + Perf + Prop - Conc (using SafeMath)
+	totalValidatorRewardBig := coremath.AddBig(baseRewardBig, performanceBonusBig)
+	totalValidatorRewardBig = coremath.AddBig(totalValidatorRewardBig, proposerBonusBig)
+	totalValidatorRewardBig = coremath.SubBig(totalValidatorRewardBig, concentrationPenaltyBig)
 
+	// Ensure non-negative reward
 	if totalValidatorRewardBig.Sign() < 0 {
 		totalValidatorRewardBig = big.NewInt(0)
 	}
@@ -494,14 +503,15 @@ func (rd *Distributor) distributeValidatorRewards(validator *core.Validator, tot
 	// Commission
 	commissionBig := mulBigIntFloat(totalValidatorRewardBig, validator.Commission)
 
-	// Delegator = Total - Commission
-	delegatorRewardBig := coremath.Sub(totalValidatorRewardBig, commissionBig)
+	// Delegator = Total - Commission (using SafeMath)
+	delegatorRewardBig := coremath.SubBig(totalValidatorRewardBig, commissionBig)
 
-	// NOTE: Assuming AccountManager accepts int64. If it supports BigInt, pass that.
+	// Add validator commission rewards
 	if err := rd.worldState.GetAccountManager().AddRewards(validator.Address, commissionBig.Int64()); err != nil {
 		return nil, fmt.Errorf("failed to add validator commission: %v", err)
 	}
 
+	// Distribute delegator rewards
 	delegatorDistribution := make(map[string]string)
 	if delegatorRewardBig.Sign() > 0 {
 		var err error
@@ -511,6 +521,7 @@ func (rd *Distributor) distributeValidatorRewards(validator *core.Validator, tot
 		}
 	}
 
+	// Record epoch rewards
 	rd.recordValidatorEpochReward(validator.Address, epoch, &EpochRewards{
 		Epoch:                epoch,
 		BlockReward:          baseRewardBig.String(),
