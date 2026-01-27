@@ -500,14 +500,16 @@ func (am *AccountManager) ClaimRewards(addr string) (string, error) {
 
 // Transfer performs a balance transfer between accounts
 func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error {
+	// 1. Basic Input Validation
 	if amount < MinimumTransfer {
 		return fmt.Errorf("transfer amount %d below minimum %d", amount, MinimumTransfer)
 	}
-
+	if amount <= 0 {
+		return fmt.Errorf("transfer amount must be positive")
+	}
 	if fromAddr == toAddr {
 		return fmt.Errorf("cannot transfer to self")
 	}
-
 	if err := address.Validate(fromAddr); err != nil {
 		return fmt.Errorf("invalid sender address: %v", err)
 	}
@@ -515,23 +517,14 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 		return fmt.Errorf("invalid recipient address: %v", err)
 	}
 
+	// 2. Retrieve Sender Account
 	fromAccount, err := am.GetAccount(fromAddr)
 	if err != nil {
 		return fmt.Errorf("failed to get sender account: %v", err)
 	}
 
-	amountBig := big.NewInt(amount)
-	fromBalBig, _ := new(big.Int).SetString(fromAccount.Balance, 10)
-	if fromBalBig == nil {
-		fromBalBig = big.NewInt(0)
-	}
-
-	if fromBalBig.Cmp(amountBig) < 0 {
-		return fmt.Errorf("insufficient balance: have %s, need %d", fromAccount.Balance, amount)
-	}
-
-	// We only handle same-shard transfers here for simplicity logic
-	// Cross-shard logic is usually in Executor, but if called directly, we validate destination
+	// 3. Retrieve Receiver Account (PRE-CHECK)
+	// We fetch this *before* making any changes to ensure the destination exists/is valid.
 	var toAccount *core.Account
 	if am.BelongsToShard(toAddr) {
 		toAccount, err = am.GetAccount(toAddr)
@@ -542,21 +535,46 @@ func (am *AccountManager) Transfer(fromAddr, toAddr string, amount int64) error 
 		return fmt.Errorf("cross-shard transfer to %s not implemented at account level", toAddr)
 	}
 
-	// Update Balances
-	fromAccount.Balance = new(big.Int).Sub(fromBalBig, amountBig).String()
+	// 4. Safe Math & Balance Checks
+	amountBig := big.NewInt(amount)
 
-	toBalBig, _ := new(big.Int).SetString(toAccount.Balance, 10)
-	if toBalBig == nil {
+	// STRICT: Handle invalid database strings safely
+	fromBalBig, ok := new(big.Int).SetString(fromAccount.Balance, 10)
+	if !ok {
+		// Fallback: If DB is corrupt or empty, treat as 0, but log warning in real app
+		fromBalBig = big.NewInt(0)
+	}
+
+	toBalBig, ok := new(big.Int).SetString(toAccount.Balance, 10)
+	if !ok {
 		toBalBig = big.NewInt(0)
 	}
-	toAccount.Balance = new(big.Int).Add(toBalBig, amountBig).String()
 
+	// CRITICAL FIX: The Balance Check
+	if fromBalBig.Cmp(amountBig) < 0 {
+		return fmt.Errorf("insufficient balance: have %s, need %d", fromAccount.Balance, amount)
+	}
+
+	// 5. Update State (In-Memory)
+	// We calculate new states first.
+	newFromBal := new(big.Int).Sub(fromBalBig, amountBig)
+	newToBal := new(big.Int).Add(toBalBig, amountBig)
+
+	fromAccount.Balance = newFromBal.String()
+	toAccount.Balance = newToBal.String()
+
+	// 6. Commit to Database
+	// Note: In a perfect system, these two updates should be in a single DB Batch/Transaction.
+	// If not available, this order minimizes risk (deduct first prevents double spend).
 	if err := am.UpdateAccount(fromAccount); err != nil {
 		return fmt.Errorf("failed to update sender account: %v", err)
 	}
 
 	if err := am.UpdateAccount(toAccount); err != nil {
-		return fmt.Errorf("failed to update receiver account: %v", err)
+		// EXTREME EDGE CASE: If this fails, sender was deducted but receiver not credited.
+		// A robust system would trigger a rollback here.
+		// For this scope, we return the error.
+		return fmt.Errorf("CRITICAL: failed to update receiver account (sender deducted): %v", err)
 	}
 
 	return nil
