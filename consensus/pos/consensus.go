@@ -129,7 +129,7 @@ func NewConsensusEngine(
 }
 
 // GetForkChoice returns the fork choice instance
-func (ce *ConsensusEngine) GetForkChoice() *ForkChoice {
+func (ce *ConsensusEngine) GetForkChoice() interface{} {
 	ce.mu.RLock()
 	defer ce.mu.RUnlock()
 	return ce.forkChoice
