@@ -18,7 +18,7 @@ const (
 	MaxValidatorChangePercent = 10.0   // Max 10% change per epoch
 	MaxValidatorsPerEpoch     = 100    // Absolute cap
 	UnbondingPeriodBlocks     = 201600 // ~7 days at 3s/block
-	ActivationDelayEpochs     = 2      // Must wait 2 epochs
+	ActivationDelayEpochs     = 900    // ~27 hours
 	SlotsPerEpoch             = 32     // Match consensus.go
 )
 
