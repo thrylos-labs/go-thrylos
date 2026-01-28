@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dgraph-io/badger/v3"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/consensus/validator"
 	"github.com/thrylos-labs/go-thrylos/core/chain" // Import chain package
@@ -15,6 +16,12 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/types"
 )
+
+// DatabaseStore provides persistence for checkpoints
+type DatabaseStore interface {
+	Put(key []byte, value []byte) error
+	Get(key []byte) ([]byte, error)
+}
 
 // Vote represents a validator's vote in fork choice
 type Vote struct {
@@ -152,5 +159,33 @@ type ForkChoice struct {
 	// Metrics
 	metrics *ForkChoiceMetrics
 
+	database DatabaseStore // ✅ NEW: For checkpoint persistence
+
 	mu sync.RWMutex
+}
+
+// BadgerDatabaseWrapper wraps badger.DB to implement DatabaseStore
+type BadgerDatabaseWrapper struct {
+	db *badger.DB
+}
+
+// Put implements DatabaseStore
+func (w *BadgerDatabaseWrapper) Put(key []byte, value []byte) error {
+	return w.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(key, value)
+	})
+}
+
+// Get implements DatabaseStore
+func (w *BadgerDatabaseWrapper) Get(key []byte) ([]byte, error) {
+	var result []byte
+	err := w.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(key)
+		if err != nil {
+			return err
+		}
+		result, err = item.ValueCopy(nil)
+		return err
+	})
+	return result, err
 }

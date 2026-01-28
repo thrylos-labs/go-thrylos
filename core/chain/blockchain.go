@@ -66,6 +66,8 @@ type ConsensusEngine interface {
 	GetCurrentSlot() uint64
 	IsValidator(address string) bool
 	GetStats() map[string]interface{}
+	GetForkChoice() interface{} // Returns fork choice as interface{} to avoid import cycle
+
 }
 
 // ChainValidator represents a block validator
@@ -443,6 +445,7 @@ const (
 // ReorganizeChain switches the canonical chain to a new fork.
 // newBlocks must be sorted from oldest (common ancestor + 1) to newest (new head).
 // ReorganizeChain switches the canonical chain to a new fork.
+// ReorganizeChain switches the canonical chain to a new fork.
 func (bc *Blockchain) ReorganizeChain(newBlocks []*core.Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -475,8 +478,49 @@ func (bc *Blockchain) ReorganizeChain(newBlocks []*core.Block) error {
 	fmt.Printf("🔀 Executing Reorg: Switching from height %d to fork starting at %d (depth: %d)\n",
 		bc.worldState.GetHeight(), firstNewBlock.Header.Index, reorgDepth)
 
+	// ============================================================
+	// ✅ NEW: Validate reorganization safety (stake + finality)
+	// ============================================================
+	if bc.consensusEngine != nil {
+		fc := bc.consensusEngine.GetForkChoice()
+
+		// Type assert to the ForkChoice interface we need
+		type ForkChoiceValidator interface {
+			ValidateReorganization(depth int, epoch uint64, newStake, totalStake string) error
+			GetAttestingStake(blockHash string) string
+			GetTotalActiveStake() string
+		}
+
+		if fcValidator, ok := fc.(ForkChoiceValidator); ok && fcValidator != nil {
+			// Calculate epoch of fork point (using 32 blocks per epoch)
+			blocksPerEpoch := 32
+			forkEpoch := uint64(commonAncestor.Header.Index) / uint64(blocksPerEpoch)
+
+			// Get stake backing the new chain (from last block)
+			lastBlock := newBlocks[len(newBlocks)-1]
+			newChainStake := fcValidator.GetAttestingStake(lastBlock.Hash)
+
+			// Get total network stake
+			totalStake := fcValidator.GetTotalActiveStake()
+
+			// Validate (checks finality + stake requirements)
+			if err := fcValidator.ValidateReorganization(
+				int(reorgDepth),
+				forkEpoch,
+				newChainStake,
+				totalStake,
+			); err != nil {
+				return fmt.Errorf("reorg security check failed: %w", err)
+			}
+
+			fmt.Printf("✅ Reorg security validated: depth=%d, stake=%s/%s\n",
+				reorgDepth, newChainStake, totalStake)
+		}
+	}
+	// ============================================================
+	// ============================================================
+
 	// 🔒 SAFETY CHECK 3: Validate ALL blocks BEFORE applying any
-	// This prevents partial application that would corrupt state
 	for i, block := range newBlocks {
 		// Verify block links correctly
 		if i == 0 {
@@ -502,14 +546,10 @@ func (bc *Blockchain) ReorganizeChain(newBlocks []*core.Block) error {
 		}
 	}
 
-	// 2. Apply new blocks (now we know they're ALL valid)
-	// If AddBlock fails here, it's a critical error (validation passed but execution failed)
+	// 2. Apply new blocks
 	for i, block := range newBlocks {
 		if err := bc.worldState.AddBlock(block); err != nil {
-			// 🚨 CRITICAL: Validation passed but application failed
-			// This indicates a serious bug or state corruption
-			fmt.Printf("❌ CRITICAL: Reorg failed during block application at block %d after validation passed\n", i)
-			fmt.Printf("   This may indicate state corruption. Manual recovery may be needed.\n")
+			fmt.Printf("❌ CRITICAL: Reorg failed during block application at block %d\n", i)
 			return fmt.Errorf("reorg failed: could not add block %d: %v", block.Header.Index, err)
 		}
 

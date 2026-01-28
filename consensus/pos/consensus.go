@@ -27,7 +27,6 @@ import (
 )
 
 // NewConsensusEngine creates a new PoS consensus engine
-// NewConsensusEngine creates a new PoS consensus engine
 func NewConsensusEngine(
 	cfg *config.Config,
 	blockchain *chain.Blockchain,
@@ -84,9 +83,7 @@ func NewConsensusEngine(
 		MaxMissedAttestations:   cfg.Consensus.MaxMissedAttestations,
 		AttestationWindow:       24 * time.Hour,
 		JailDurationHours:       cfg.Consensus.JailDurationHours,
-
-		// ✅ This line is now valid because we updated the struct to string
-		MinimumStake: cfg.Staking.MinValidatorStake,
+		MinimumStake:            cfg.Staking.MinValidatorStake,
 	}
 
 	// Create slashing storage
@@ -101,11 +98,26 @@ func NewConsensusEngine(
 		log.Println("⚠️ Slashing persistence disabled")
 	}
 
-	// ✅ This is valid because we updated the WorldStateBalancer interface
 	engine.slashingManager = NewSlashingManager(slashingConfig, worldState, slashingStorage, worldState)
 
 	// Update fork choice with real slashing manager
 	engine.forkChoice.slashingManager = engine.slashingManager
+
+	// ============================================================
+	// ✅ NEW: Attach database and load checkpoint
+	// ============================================================
+	if badgerDB != nil {
+		// Wrap badger.DB to implement DatabaseStore interface
+		dbWrapper := &BadgerDatabaseWrapper{db: badgerDB}
+		engine.forkChoice.SetDatabase(dbWrapper)
+
+		if err := engine.forkChoice.LoadFinalizedCheckpoint(); err != nil {
+			fmt.Printf("⚠️ Failed to load checkpoint: %v\n", err)
+		} else {
+			log.Println("✅ Checkpoint persistence enabled")
+		}
+	}
+	// ============================================================
 
 	// Initialize evidence tracker
 	engine.evidenceTracker = NewEvidenceTracker()
@@ -114,6 +126,13 @@ func NewConsensusEngine(
 	engine.timeValidator = NewTimeValidator()
 
 	return engine
+}
+
+// GetForkChoice returns the fork choice instance
+func (ce *ConsensusEngine) GetForkChoice() *ForkChoice {
+	ce.mu.RLock()
+	defer ce.mu.RUnlock()
+	return ce.forkChoice
 }
 
 // generateVRFProof generates VRF-style proof using validator's private key
@@ -1067,11 +1086,6 @@ func (ce *ConsensusEngine) GetCurrentSlot() uint64 {
 // GetValidatorSet returns the current validator set
 func (ce *ConsensusEngine) GetValidatorSet() *validator.Set {
 	return ce.validatorSet
-}
-
-// GetForkChoice returns the fork choice instance
-func (ce *ConsensusEngine) GetForkChoice() *ForkChoice {
-	return ce.forkChoice
 }
 
 // BlockValidator handles block validation

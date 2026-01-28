@@ -4,6 +4,7 @@
 package pos
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"time"
@@ -572,4 +573,44 @@ func addBigIntStrings(a, b string) string {
 	biA := coremath.ParseBigInt(a)
 	biB := coremath.ParseBigInt(b)
 	return new(big.Int).Add(biA, biB).String()
+}
+
+// SetDatabase attaches a database for checkpoint persistence
+func (fc *ForkChoice) SetDatabase(db DatabaseStore) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.database = db
+}
+
+// LoadFinalizedCheckpoint loads checkpoint from disk on startup
+func (fc *ForkChoice) LoadFinalizedCheckpoint() error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	if fc.database == nil {
+		return nil // No database attached
+	}
+
+	data, err := fc.database.Get([]byte("finalized_checkpoint"))
+	if err != nil {
+		return nil // Not found is OK (first run)
+	}
+
+	var checkpoint Checkpoint
+	if err := json.Unmarshal(data, &checkpoint); err != nil {
+		return fmt.Errorf("failed to load checkpoint: %w", err)
+	}
+
+	fc.finalizedCheckpoint = &checkpoint
+	fmt.Printf("📂 Loaded finalized checkpoint: epoch %d, block %s\n",
+		checkpoint.Epoch, checkpoint.BlockHash[:8])
+
+	return nil
+}
+
+// GetTotalActiveStake returns total active stake (public wrapper)
+func (fc *ForkChoice) GetTotalActiveStake() string {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.getTotalActiveStake()
 }

@@ -4,6 +4,7 @@
 package pos
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"time"
@@ -189,6 +190,22 @@ func (fc *ForkChoice) UpdateFinalizedCheckpoint(epoch uint64, blockHash string) 
 
 	fmt.Printf("🔒 Finalized checkpoint updated: epoch %d, block %s, stake %s/%s (%.1f%%)\n",
 		epoch, blockHashShort, attestingStake, totalStake, percentage)
+
+	// ============================================================
+	// ✅ NEW: Save checkpoint to disk
+	// ============================================================
+	if fc.database != nil {
+		data, err := json.Marshal(fc.finalizedCheckpoint)
+		if err == nil {
+			err = fc.database.Put([]byte("finalized_checkpoint"), data)
+			if err != nil {
+				fmt.Printf("⚠️ Failed to save checkpoint: %v\n", err)
+			} else {
+				fmt.Printf("💾 Checkpoint saved to disk\n")
+			}
+		}
+	}
+	// ============================================================
 }
 
 // GetJustifiedCheckpoint returns the current justified checkpoint

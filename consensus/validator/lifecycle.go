@@ -13,7 +13,7 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
-// 🔴 H-05: Rate limiting and unbonding constants
+// Rate limiting and unbonding constants
 const (
 	MaxValidatorChangePercent = 10.0   // Max 10% change per epoch
 	MaxValidatorsPerEpoch     = 100    // Absolute cap
