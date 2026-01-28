@@ -106,6 +106,8 @@ func (e *RevmExecutor) GetCode(address common.Address) []byte {
 	return code
 }
 
+const FFISentinelError = ^uint64(0)
+
 // ============================================================================
 // Nonce Management Functions
 // ============================================================================
@@ -115,15 +117,15 @@ func (e *RevmExecutor) ReserveNonce(address common.Address) (uint64, error) {
 	cAddr := addressToC(address)
 	nonce := C.revm_reserve_nonce(e.executor, cAddr)
 
-	goNonce := uint64(nonce)
-	if goNonce == ^uint64(0) {
-		return 0, fmt.Errorf("failed to reserve nonce for %s", address.Hex())
+	// [FIX H-01] Strict validation against sentinel
+	if uint64(nonce) == FFISentinelError {
+		return 0, fmt.Errorf("CRITICAL: Rust FFI panic during ReserveNonce for %s", address.Hex())
 	}
 
-	return goNonce, nil
+	return uint64(nonce), nil
 }
 
-// ReleaseNonce releases a reserved nonce (if transaction fails before execution)
+// ReleaseNonce releases a reserved nonce
 func (e *RevmExecutor) ReleaseNonce(address common.Address, nonce uint64) {
 	cAddr := addressToC(address)
 	C.revm_release_nonce(e.executor, cAddr, C.uint64_t(nonce))
@@ -134,12 +136,12 @@ func (e *RevmExecutor) GetNextNonce(address common.Address) (uint64, error) {
 	cAddr := addressToC(address)
 	nonce := C.revm_get_next_nonce(e.executor, cAddr)
 
-	goNonce := uint64(nonce)
-	if goNonce == ^uint64(0) {
-		return 0, fmt.Errorf("failed to get next nonce for %s", address.Hex())
+	// [FIX H-01] Strict validation against sentinel
+	if uint64(nonce) == FFISentinelError {
+		return 0, fmt.Errorf("CRITICAL: Rust FFI panic during GetNextNonce for %s", address.Hex())
 	}
 
-	return goNonce, nil
+	return uint64(nonce), nil
 }
 
 func (e *RevmExecutor) GetNonce(address common.Address) uint64 {
@@ -256,8 +258,8 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 
 // EstimateGas estimates gas for a transaction (read-only, does NOT increment nonce)
 func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data []byte, value *big.Int) (uint64, error) {
-	const maxGasLimit = 30000000    // 30M - Ethereum block limit
-	const maxEstimateGas = 15000000 // 15M - Half of block limit for safety
+	const maxGasLimit = 30000000
+	const maxEstimateGas = 15000000
 
 	cFrom := addressToC(from)
 	var cTo C.CAddress
@@ -273,30 +275,30 @@ func (e *RevmExecutor) EstimateGas(from common.Address, to *common.Address, data
 
 	cValue := bigIntToC(value)
 
-	// Call the Rust function
 	gas := C.revm_estimate_gas(e.executor, cFrom, cTo, cData, cValue)
 
-	// SECURITY CHECK 1: Check for Rust panic sentinel BEFORE conversion
-	if gas == C.uint64_t(^uint64(0)) || gas == 0 {
-		return 0, fmt.Errorf("gas estimation failed: execution error or revert")
+	// [FIX H-01] Check for Rust panic sentinel
+	if uint64(gas) == FFISentinelError {
+		return 0, fmt.Errorf("CRITICAL: Rust FFI panic during EstimateGas")
+	}
+
+	if uint64(gas) == 0 {
+		return 0, fmt.Errorf("gas estimation failed: execution reverted")
 	}
 
 	estimatedGas := uint64(gas)
 
-	// SECURITY CHECK 2: Validate before any arithmetic
 	if estimatedGas > maxEstimateGas {
 		return maxEstimateGas, nil
 	}
 
-	// SECURITY CHECK 3: Overflow-safe buffer calculation
+	// Add buffer safely
 	bufferAmount := estimatedGas / 10
-
 	if estimatedGas > maxEstimateGas-bufferAmount {
 		return maxEstimateGas, nil
 	}
 
-	gasWithBuffer := estimatedGas + bufferAmount
-	return gasWithBuffer, nil
+	return estimatedGas + bufferAmount, nil
 }
 
 // ============================================================================
