@@ -875,7 +875,7 @@ func (ws *WorldState) addValidator(validator *core.Validator) error {
 	}
 
 	if validator.Stake < ws.config.Staking.MinValidatorStake {
-		return fmt.Errorf("validator stake %d below minimum %d",
+		return fmt.Errorf("validator stake %s below minimum %s",
 			validator.Stake, ws.config.Staking.MinValidatorStake)
 	}
 
@@ -1374,7 +1374,7 @@ func (ws *WorldState) RestoreFromSnapshot(snapshot *StateSnapshot) error {
 	// Validate snapshot compatibility
 	if snapshot.Config != nil {
 		if ws.config.Economics.GenesisSupply != snapshot.Config.Economics.GenesisSupply {
-			return fmt.Errorf("incompatible genesis supply: current=%d, snapshot=%d",
+			return fmt.Errorf("incompatible genesis supply: current=%s, snapshot=%s",
 				ws.config.Economics.GenesisSupply, snapshot.Config.Economics.GenesisSupply)
 		}
 	}
@@ -2516,4 +2516,91 @@ func (ws *WorldState) SetNonce(address string, nonce uint64) error {
 
 	// FIX: Call the accountManager explicitly
 	return ws.accountManager.UpdateAccount(account)
+}
+
+// GetAccountMutex returns the sharded mutex for account locking
+func (ws *WorldState) GetAccountMutex() *ShardedMutex {
+	return ws.accountMu
+}
+
+// AtomicTransfer performs an atomic transfer between two accounts
+func (ws *WorldState) AtomicTransfer(fromAddr, toAddr string, updateFunc func(sender, receiver *core.Account) error) error {
+	addresses := []string{fromAddr, toAddr}
+	batch := ws.accountMu.BeginBatch(addresses)
+	batch.Lock()
+	defer batch.Rollback()
+
+	sender, err := ws.accountManager.GetAccount(fromAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get sender account: %w", err)
+	}
+
+	receiver, err := ws.accountManager.GetAccount(toAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get receiver account: %w", err)
+	}
+
+	if !batch.ValidateVersions() {
+		return fmt.Errorf("state conflict: accounts modified during transfer")
+	}
+
+	if err := updateFunc(sender, receiver); err != nil {
+		return err
+	}
+
+	if err := ws.accountManager.UpdateAccount(sender); err != nil {
+		return fmt.Errorf("failed to update sender: %w", err)
+	}
+	if err := ws.state.SaveAccount(sender); err != nil {
+		return fmt.Errorf("failed to save sender: %w", err)
+	}
+
+	if err := ws.accountManager.UpdateAccount(receiver); err != nil {
+		return fmt.Errorf("failed to update receiver: %w", err)
+	}
+	if err := ws.state.SaveAccount(receiver); err != nil {
+		return fmt.Errorf("failed to save receiver: %w", err)
+	}
+
+	batch.Commit()
+	return nil
+}
+
+// ExecuteInTransaction executes a function with transaction-like semantics
+func (ws *WorldState) ExecuteInTransaction(addresses []string, fn func() error) error {
+	batch := ws.accountMu.BeginBatch(addresses)
+	batch.Lock()
+	defer batch.Rollback()
+
+	if !batch.ValidateVersions() {
+		return fmt.Errorf("transaction conflict: state modified by concurrent transaction")
+	}
+
+	if err := fn(); err != nil {
+		return err
+	}
+
+	batch.Commit()
+	return nil
+}
+
+// GetAccountsSnapshot returns a consistent snapshot of multiple accounts
+func (ws *WorldState) GetAccountsSnapshot(addresses []string) ([]*core.Account, error) {
+	if len(addresses) == 0 {
+		return nil, nil
+	}
+
+	ws.accountMu.RLockMultiple(addresses)
+	defer ws.accountMu.RUnlockMultiple(addresses)
+
+	accounts := make([]*core.Account, 0, len(addresses))
+	for _, addr := range addresses {
+		acc, err := ws.accountManager.GetAccount(addr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get account %s: %w", addr, err)
+		}
+		accounts = append(accounts, acc)
+	}
+
+	return accounts, nil
 }
