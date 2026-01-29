@@ -54,6 +54,8 @@ func NewConsensusEngine(
 		currentSlot:       0,
 		chainCache:        NewChainCache(),
 		validatorActivity: make(map[string]*ValidatorActivity),
+		vrfSeedGen:        NewVRFSeedGenerator(),
+		vrfVerifier:       NewVRFVerifier(),
 	}
 
 	// Initialize validator management
@@ -389,14 +391,26 @@ func (ce *ConsensusEngine) updateValidatorActivity(validatorAddr string, wasBloc
 // proposeBlock creates and broadcast a new block proposal
 // proposeBlock creates and broadcasts a new block proposal
 func (ce *ConsensusEngine) proposeBlock() error {
-	// ✅ STEP 1: Generate VRF proof BEFORE creating block
-	epochBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(epochBytes, ce.currentEpoch)
+	// ✅ AUDIT FIX: Generate secure VRF seed from multiple sources
+	seed := ce.vrfSeedGen.GenerateSeed(
+		ce.currentEpoch,
+		ce.currentSlot,
+		ce.getPreviousBlockHash(), // Need to implement this helper
+		time.Now().Unix(),
+	)
 
-	vrfProof, err := ce.generateVRFProof(epochBytes)
+	// Validate seed meets minimum entropy
+	if err := ce.vrfSeedGen.ValidateSeed(seed); err != nil {
+		return fmt.Errorf("invalid VRF seed: %v", err)
+	}
+
+	vrfProof, err := ce.generateVRFProof(seed)
 	if err != nil {
 		return fmt.Errorf("VRF generation failed: %v", err)
 	}
+
+	// Record VRF output for future entropy
+	ce.vrfSeedGen.RecordOutput(vrfProof.Output)
 
 	// ✅ STEP 2: Create block (now WITH VRF data)
 	result, err := ce.blockProposer.ProposeBlockWithVRF(
@@ -452,6 +466,17 @@ func (ce *ConsensusEngine) proposeBlock() error {
 		result.TotalFees)
 
 	return nil
+}
+
+// getPreviousBlockHash returns the hash of the most recent block
+func (ce *ConsensusEngine) getPreviousBlockHash() string {
+	if ce.worldState != nil {
+		currentBlock := ce.worldState.GetCurrentBlock()
+		if currentBlock != nil {
+			return currentBlock.Hash
+		}
+	}
+	return ""
 }
 
 // createAttestation creates an attestation for the current head
@@ -520,8 +545,14 @@ func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 }
 
 // verifyVRFProof verifies a VRF proof from another validator
+// verifyVRFProof verifies a VRF proof from another validator
 func (ce *ConsensusEngine) verifyVRFProof(validatorPubKey crypto.PublicKey, input []byte, proof *VRFProof) (bool, error) {
-	valid, output, err := VerifyVRFProof(validatorPubKey, input, proof)
+	if validatorPubKey == nil {
+		return false, fmt.Errorf("validator public key is nil")
+	}
+
+	// FIX: Convert the interface to bytes using .Bytes()
+	valid, output, err := VerifyVRFProof(validatorPubKey.Bytes(), input, proof)
 	if err != nil {
 		return false, fmt.Errorf("VRF verification failed: %w", err)
 	}
@@ -1259,6 +1290,18 @@ func (bv *BlockValidator) validateVRFProof(block *core.Block) error {
 
 	if !valid {
 		return fmt.Errorf("VRF proof is invalid")
+	}
+
+	if bv.consensusEngine != nil && bv.consensusEngine.vrfVerifier != nil {
+		if err := bv.consensusEngine.vrfVerifier.VerifyVRFWithContext(
+			vrfProof,
+			block.Header.Epoch,
+			block.Header.Slot,
+			block.Header.PrevHash,
+			block.Header.Timestamp,
+		); err != nil {
+			return fmt.Errorf("VRF context verification failed: %w", err)
+		}
 	}
 
 	return nil

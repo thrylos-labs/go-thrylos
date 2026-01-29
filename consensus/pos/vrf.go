@@ -1,11 +1,13 @@
 package pos
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math/big"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 )
 
@@ -15,7 +17,7 @@ type VRFProof struct {
 	Proof  []byte // VRF proof (Gamma || c || s)
 }
 
-// Constants for ECVRF-secp256k1-SHA256-TAI (draft-irtf-cfrg-vrf-15)
+// Constants for ECVRF-secp256k1-SHA256-TAI
 const (
 	suiteString = "ECVRF_secp256k1_SHA256_TAI"
 	ptLen       = 33 // Compressed point length
@@ -29,9 +31,9 @@ func GenerateVRFProof(privateKey crypto.PrivateKey, alpha []byte) (*VRFProof, er
 		return nil, errors.New("private key cannot be nil")
 	}
 
-	// 1. Extract Private Key Scalar (d)
+	// 1. Extract Private Key
 	privKeyBytes := privateKey.Bytes()
-	privKey := secp256k1.PrivKeyFromBytes(privKeyBytes)
+	privKey, _ := btcec.PrivKeyFromBytes(privKeyBytes)
 
 	// 2. Hash to curve: H = ECVRF_hash_to_curve(Y, alpha)
 	pubKey := privKey.PubKey()
@@ -41,49 +43,48 @@ func GenerateVRFProof(privateKey crypto.PrivateKey, alpha []byte) (*VRFProof, er
 	}
 
 	// 3. Gamma = d * H
-	var gamma secp256k1.JacobianPoint
-	secp256k1.ScalarMultNonConst(&privKey.Key, &H, &gamma)
-	// Note: v4's ScalarMultNonConst is standard for variable points.
-	// For H (derived from alpha), this is acceptable.
+	// Use ScalarMult which returns *FieldVal in v2
+	dBytes := privKey.Key.Bytes()
+	gammaX, gammaY := btcec.S256().ScalarMult(H.X(), H.Y(), dBytes[:])
 
-	// 4. Nonce Generation (RFC 6979 Deterministic k)
+	// Construct Gamma via uncompressed bytes to avoid accessing FieldVal internals
+	gamma := fieldValsToPubKey(gammaX, gammaY)
+
+	// 4. Nonce Generation
 	k := generateNonce(privKey, H)
+	kBytes := k.Bytes()
 
-	// 5. k*B (Public Key part of commitment)
-	// NewPrivateKey implicitly calculates k*G
-	kB := secp256k1.NewPrivateKey(k).PubKey()
+	// 5. k*B
+	kBX, kBY := btcec.S256().ScalarBaseMult(kBytes[:])
+	kB := fieldValsToPubKey(kBX, kBY)
 
 	// 6. k*H
-	var kH secp256k1.JacobianPoint
-	secp256k1.ScalarMultNonConst(k, &H, &kH)
+	kHX, kHY := btcec.S256().ScalarMult(H.X(), H.Y(), kBytes[:])
+	kH := fieldValsToPubKey(kHX, kHY)
 
-	// Convert Jacobian to Affine for hashing
-	gammaAffine := jacobianToAffine(&gamma)
-	kHAffine := jacobianToAffine(&kH)
-
-	// 7. Challenge c = Hash(H, Gamma, k*B, k*H)
-	c := hashPoints(H, *gammaAffine, *kB, *kHAffine, *pubKey, alpha)
+	// 7. Challenge c
+	c := hashPoints(H, gamma, kB, kH, pubKey, alpha)
 
 	// 8. s = (k - c*d) mod q
-	var s secp256k1.ModNScalar
-	var cScalar secp256k1.ModNScalar
+	var s btcec.ModNScalar
+	var kScalar btcec.ModNScalar
+	var cScalar btcec.ModNScalar
+	var dScalar btcec.ModNScalar
+
+	kScalar.SetByteSlice(kBytes[:])
 	cScalar.SetByteSlice(c)
+	dScalar.SetByteSlice(dBytes[:])
 
-	// Calculate term = c * d
-	var term secp256k1.ModNScalar
-	term.Mul2(&cScalar, &privKey.Key)
-
-	// s = k - term
-	// Note: s = k + (-term) mod q
-	s.Set(k)
-	term.Negate() // term = -term
-	s.Add(&term)  // s = k + (-c*d)
+	var term btcec.ModNScalar
+	term.Mul2(&cScalar, &dScalar)
+	term.Negate()
+	s.Add2(&kScalar, &term)
 
 	// 9. Proof construction
-	proof := encodeProof(gammaAffine, c, &s)
+	proof := encodeProof(gamma, c, &s)
 
 	// 10. Beta (Output)
-	beta := proofToHash(gammaAffine)
+	beta := proofToHash(gamma)
 
 	return &VRFProof{
 		Output: beta,
@@ -92,7 +93,7 @@ func GenerateVRFProof(privateKey crypto.PrivateKey, alpha []byte) (*VRFProof, er
 }
 
 // VerifyVRFProof verifies the provided proof
-func VerifyVRFProof(publicKey crypto.PublicKey, alpha []byte, proof *VRFProof) (bool, []byte, error) {
+func VerifyVRFProof(publicKey []byte, alpha []byte, proof *VRFProof) (bool, []byte, error) {
 	if proof == nil || len(proof.Proof) == 0 {
 		return false, nil, errors.New("empty proof")
 	}
@@ -103,8 +104,7 @@ func VerifyVRFProof(publicKey crypto.PublicKey, alpha []byte, proof *VRFProof) (
 		return false, nil, err
 	}
 
-	// Parse Public Key
-	pubKey, err := secp256k1.ParsePubKey(publicKey.Bytes())
+	pubKey, err := btcec.ParsePubKey(publicKey)
 	if err != nil {
 		return false, nil, fmt.Errorf("invalid public key: %w", err)
 	}
@@ -116,49 +116,34 @@ func VerifyVRFProof(publicKey crypto.PublicKey, alpha []byte, proof *VRFProof) (
 	}
 
 	// 3. U = s*B + c*Y
+	sBytes := s.Bytes()
+
 	// s*B
-	sB := secp256k1.NewPrivateKey(s).PubKey()
+	sBX, sBY := btcec.S256().ScalarBaseMult(sBytes[:])
 
 	// c*Y
-	var cY secp256k1.JacobianPoint
-	var pubKeyJacobian secp256k1.JacobianPoint
-	pubKey.AsJacobian(&pubKeyJacobian)
-
-	var cScalar secp256k1.ModNScalar
-	cScalar.SetByteSlice(cBytes)
-
-	secp256k1.ScalarMultNonConst(&cScalar, &pubKeyJacobian, &cY)
+	cYX, cYY := btcec.S256().ScalarMult(pubKey.X(), pubKey.Y(), cBytes)
 
 	// U = sB + cY
-	var U_Jacobian secp256k1.JacobianPoint
-	var sB_Jacobian secp256k1.JacobianPoint
-	sB.AsJacobian(&sB_Jacobian)
-
-	secp256k1.AddNonConst(&sB_Jacobian, &cY, &U_Jacobian)
-	U := jacobianToAffine(&U_Jacobian)
+	uX, uY := btcec.S256().Add(sBX, sBY, cYX, cYY)
+	U := fieldValsToPubKey(uX, uY)
 
 	// 4. V = s*H + c*Gamma
 	// s*H
-	var sH secp256k1.JacobianPoint
-	secp256k1.ScalarMultNonConst(s, &H, &sH)
+	sHX, sHY := btcec.S256().ScalarMult(H.X(), H.Y(), sBytes[:])
 
 	// c*Gamma
-	var cGamma secp256k1.JacobianPoint
-	var gammaJacobian secp256k1.JacobianPoint
-	gamma.AsJacobian(&gammaJacobian)
-
-	secp256k1.ScalarMultNonConst(&cScalar, &gammaJacobian, &cGamma)
+	cGammaX, cGammaY := btcec.S256().ScalarMult(gamma.X(), gamma.Y(), cBytes)
 
 	// V = sH + cGamma
-	var V_Jacobian secp256k1.JacobianPoint
-	secp256k1.AddNonConst(&sH, &cGamma, &V_Jacobian)
-	V := jacobianToAffine(&V_Jacobian)
+	vX, vY := btcec.S256().Add(sHX, sHY, cGammaX, cGammaY)
+	V := fieldValsToPubKey(vX, vY)
 
 	// 5. Recompute Challenge c'
-	cPrime := hashPoints(H, *gamma, *U, *V, *pubKey, alpha)
+	cPrime := hashPoints(H, gamma, U, V, pubKey, alpha)
 
-	// 6. Compare c and c'
-	if !bytesEqual(cBytes, cPrime) {
+	// 6. Compare
+	if !bytes.Equal(cBytes, cPrime) {
 		return false, nil, errors.New("invalid challenge in proof")
 	}
 
@@ -166,17 +151,31 @@ func VerifyVRFProof(publicKey crypto.PublicKey, alpha []byte, proof *VRFProof) (
 	beta := proofToHash(gamma)
 
 	// 8. Check Output Match
-	if !bytesEqual(beta, proof.Output) {
+	if !bytes.Equal(beta, proof.Output) {
 		return false, nil, errors.New("VRF output does not match proof")
 	}
 
 	return true, beta, nil
 }
 
-// --- Helpers ---
+func fieldValsToPubKey(x, y *big.Int) *btcec.PublicKey {
+	// Standard uncompressed serialization: 0x04 || X || Y
+	b := make([]byte, 65)
+	b[0] = 0x04
+	xBytes := x.Bytes()
+	yBytes := y.Bytes()
 
-func hashToCurve(pubKey *secp256k1.PublicKey, alpha []byte) (secp256k1.JacobianPoint, error) {
-	var point secp256k1.JacobianPoint
+	// Copy X into [1..33], right-aligned
+	copy(b[33-len(xBytes):33], xBytes)
+
+	// Copy Y into [33..65], right-aligned
+	copy(b[65-len(yBytes):], yBytes)
+
+	key, _ := btcec.ParsePubKey(b)
+	return key
+}
+
+func hashToCurve(pubKey *btcec.PublicKey, alpha []byte) (*btcec.PublicKey, error) {
 	var header = []byte(suiteString)
 	var pubKeyBytes = pubKey.SerializeCompressed()
 
@@ -189,31 +188,26 @@ func hashToCurve(pubKey *secp256k1.PublicKey, alpha []byte) (secp256k1.JacobianP
 		h.Write([]byte{byte(ctr)})
 		digest := h.Sum(nil)
 
-		// Try to parse as compressed point (0x02 prefix for positive Y)
 		var candidate []byte
 		candidate = append(candidate, 0x02)
 		candidate = append(candidate, digest...)
 
-		p, err := secp256k1.ParsePubKey(candidate)
+		p, err := btcec.ParsePubKey(candidate)
 		if err == nil {
-			p.AsJacobian(&point)
-			return point, nil
+			return p, nil
 		}
 	}
-	return point, errors.New("hashToCurve failed to find point")
+	return nil, errors.New("hashToCurve failed to find point")
 }
 
-func generateNonce(privKey *secp256k1.PrivateKey, H secp256k1.JacobianPoint) *secp256k1.ModNScalar {
-	var k secp256k1.ModNScalar
+func generateNonce(privKey *btcec.PrivateKey, H *btcec.PublicKey) *btcec.ModNScalar {
+	var k btcec.ModNScalar
 	h := sha256.New()
 
-	// FIX: Bytes() returns array, copy it first to slice
 	pkBytes := privKey.Key.Bytes()
 	h.Write(pkBytes[:])
 
-	// Serialize H (X coordinate)
-	hAffine := jacobianToAffine(&H)
-	h.Write(hAffine.X().Bytes()[:]) // Bytes() returns *[32]byte or [32]byte, use slice
+	h.Write(H.SerializeCompressed())
 
 	digest := h.Sum(nil)
 	k.SetByteSlice(digest)
@@ -225,15 +219,12 @@ func generateNonce(privKey *secp256k1.PrivateKey, H secp256k1.JacobianPoint) *se
 	return &k
 }
 
-func hashPoints(H secp256k1.JacobianPoint, Gamma, U, V, PubKey secp256k1.PublicKey, alpha []byte) []byte {
+func hashPoints(H, Gamma, U, V, PubKey *btcec.PublicKey, alpha []byte) []byte {
 	h := sha256.New()
 	h.Write([]byte(suiteString))
 	h.Write([]byte{0x02})
 	h.Write(PubKey.SerializeCompressed())
-
-	hAffine := jacobianToAffine(&H)
-	h.Write(hAffine.SerializeCompressed())
-
+	h.Write(H.SerializeCompressed())
 	h.Write(Gamma.SerializeCompressed())
 	h.Write(U.SerializeCompressed())
 	h.Write(V.SerializeCompressed())
@@ -243,7 +234,7 @@ func hashPoints(H secp256k1.JacobianPoint, Gamma, U, V, PubKey secp256k1.PublicK
 	return digest[:cLen]
 }
 
-func proofToHash(gamma *secp256k1.PublicKey) []byte {
+func proofToHash(gamma *btcec.PublicKey) []byte {
 	h := sha256.New()
 	h.Write([]byte(suiteString))
 	h.Write([]byte{0x03})
@@ -251,70 +242,28 @@ func proofToHash(gamma *secp256k1.PublicKey) []byte {
 	return h.Sum(nil)
 }
 
-func jacobianToAffine(j *secp256k1.JacobianPoint) *secp256k1.PublicKey {
-	j.ToAffine()
-
-	// FIX: Use ToAffine() then read X/Y manually or re-parse
-	// dcrec/secp256k1/v4 has no simple "ToPublicKey" from Jacobian.
-	// Best way is to Serialize and Parse.
-
-	// Access X and Y field vals
-	// Note: The library does not expose easy "ToBytes" on Jacobian unless we do this:
-
-	var x, y secp256k1.FieldVal
-	j.X.Normalize()
-	j.Y.Normalize()
-	x = j.X
-	y = j.Y
-
-	// Manually construct compressed bytes
-	var compressed [33]byte
-	compressed[0] = 0x02 // Assume even
-	if y.IsOdd() {
-		compressed[0] = 0x03
-	}
-
-	xBytes := x.Bytes()
-	copy(compressed[1:], xBytes[:])
-
-	res, _ := secp256k1.ParsePubKey(compressed[:])
-	return res
-}
-
-func decodeProof(proof []byte) (*secp256k1.PublicKey, []byte, *secp256k1.ModNScalar, error) {
+func decodeProof(proof []byte) (*btcec.PublicKey, []byte, *btcec.ModNScalar, error) {
 	if len(proof) != ptLen+cLen+qLen {
 		return nil, nil, nil, fmt.Errorf("invalid proof len")
 	}
-	gamma, err := secp256k1.ParsePubKey(proof[0:ptLen])
+	gamma, err := btcec.ParsePubKey(proof[0:ptLen])
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	c := make([]byte, cLen)
 	copy(c, proof[ptLen:ptLen+cLen])
 
-	var s secp256k1.ModNScalar
+	var s btcec.ModNScalar
 	s.SetByteSlice(proof[ptLen+cLen:])
 
 	return gamma, c, &s, nil
 }
 
-func encodeProof(gamma *secp256k1.PublicKey, c []byte, s *secp256k1.ModNScalar) []byte {
+func encodeProof(gamma *btcec.PublicKey, c []byte, s *btcec.ModNScalar) []byte {
 	proof := make([]byte, 0, ptLen+cLen+qLen)
 	proof = append(proof, gamma.SerializeCompressed()...)
 	proof = append(proof, c...)
 	sBytes := s.Bytes()
 	proof = append(proof, sBytes[:]...)
 	return proof
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

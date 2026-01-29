@@ -124,6 +124,9 @@ type ConsensusEngine struct {
 
 	// Time synchronization and drift monitoring
 	timeValidator *TimeValidator
+
+	vrfSeedGen  *VRFSeedGenerator
+	vrfVerifier *VRFVerifier
 }
 
 // ForkChoice implements fork choice with memory management
