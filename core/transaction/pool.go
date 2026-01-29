@@ -24,7 +24,6 @@ type TransactionEntry struct {
 // Pool manages pending transactions for a shard
 type Pool struct {
 	// Transaction storage
-	// CHANGED: pending now maps to TransactionEntry instead of raw Transaction
 	pending   map[string]*TransactionEntry            // txid -> entry
 	byAddress map[string]map[uint64]*core.Transaction // address -> nonce -> tx
 	byHash    map[string]*core.Transaction            // hash -> tx for quick lookup
@@ -41,6 +40,9 @@ type Pool struct {
 	maxTxs      int
 	minGasPrice *big.Int
 	maxCount    int
+
+	// Security Limits
+	maxTxsPerAddress int // FIX: Per-address limit
 
 	// Lifecycle management
 	stopChan chan struct{}
@@ -65,7 +67,15 @@ type PoolStats struct {
 	MinGasPrice  string `json:"min_gas_price"`
 }
 
-// NewPool creates a new transaction pool for a shard
+const (
+	// MaxTransactionsPerSender limits how many pending txs a single account can have.
+	// 16 is a standard standard for preventing slot-filling attacks while allowing batching.
+	MaxTransactionsPerSender = 16
+
+	// ReplacementPriceBumpPercent requires a 10% price bump to replace a tx
+	ReplacementPriceBumpPercent = 10
+)
+
 // NewPool creates a new transaction pool for a shard
 func NewPool(
 	shardID account.ShardID,
@@ -87,6 +97,7 @@ func NewPool(
 		totalShards:       totalShards,
 		maxTxs:            maxCount,
 		minGasPrice:       minGasPriceBig,
+		maxTxsPerAddress:  MaxTransactionsPerSender, // Initialize security limit
 	}
 
 	// Start automatic cleanup
@@ -97,7 +108,6 @@ func NewPool(
 }
 
 // startAutoCleanup runs periodic cleanup of expired transactions
-// startAutoCleanup with graceful shutdown support
 func (p *Pool) startAutoCleanup() {
 	defer p.wg.Done()
 
@@ -121,9 +131,8 @@ func (p *Pool) Stop() {
 	p.wg.Wait()
 }
 
-const MaxTransactionsPerSender = 100
-
 func (p *Pool) AddTransaction(tx *core.Transaction) error {
+	// 1. Basic Validation (Stateless)
 	if err := p.validateTransactionForPool(tx); err != nil {
 		return fmt.Errorf("transaction validation failed: %v", err)
 	}
@@ -131,7 +140,7 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// 1. Check if transaction already exists
+	// 2. Check Global Duplicates
 	if _, exists := p.pending[tx.Id]; exists {
 		return fmt.Errorf("transaction %s already exists in pool", tx.Id)
 	}
@@ -139,81 +148,82 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 		return fmt.Errorf("transaction with hash %s already exists in pool", tx.Hash)
 	}
 
-	// 🔴 FIX-2: Initialize sender nonce reservation map if needed
+	// Initialize maps if needed
 	if _, exists := p.nonceReservations[tx.From]; !exists {
 		p.nonceReservations[tx.From] = make(map[uint64]bool)
 	}
-
-	// 2. Initialize sender map if needed
 	senderTxs, exists := p.byAddress[tx.From]
 	if !exists {
 		senderTxs = make(map[uint64]*core.Transaction)
 		p.byAddress[tx.From] = senderTxs
 	}
 
-	// 🔴 PER-SENDER LIMIT: Check BEFORE any modifications
-	// Important: Check against len(senderTxs) BEFORE replace-by-fee
+	// 3. Per-Address Limits & Replacement Logic (Stateful Security)
 	isReplacement := false
 	if existingTx, conflict := senderTxs[tx.Nonce]; conflict {
-		// This is a replacement, so don't count it toward the limit
+		// This is a replacement (RBF - Replace By Fee)
 		isReplacement = true
 
-		// Verify replacement has higher gas price
-		if tx.GasPrice <= existingTx.GasPrice {
-			return fmt.Errorf("nonce %d already exists; replacement requires higher gas price", tx.Nonce)
+		// FIX: Enforce 10% Price Bump to prevent spamming replacements
+		// NewPrice >= OldPrice * 1.10
+		oldPrice := math.ParseBigInt(existingTx.GasPrice)
+		newPrice := math.ParseBigInt(tx.GasPrice)
+		minRequired := new(big.Int).Mul(oldPrice, big.NewInt(100+ReplacementPriceBumpPercent))
+		minRequired.Div(minRequired, big.NewInt(100))
+
+		if newPrice.Cmp(minRequired) < 0 {
+			return fmt.Errorf("replacement transaction underpriced: needs gas price >= %s (current: %s)",
+				minRequired.String(), tx.GasPrice)
 		}
 	} else {
-		// Not a replacement - check limit
-		if len(senderTxs) >= MaxTransactionsPerSender {
+		// Not a replacement - check strict per-address limit
+		if len(senderTxs) >= p.maxTxsPerAddress {
 			return fmt.Errorf("sender %s has reached maximum pending transactions (%d)",
-				tx.From, MaxTransactionsPerSender)
+				tx.From, p.maxTxsPerAddress)
 		}
 	}
 
-	// 🔴 FIX-3: Check for nonce collision BEFORE Replace-by-Fee logic
+	// Check reserved nonces
 	if p.nonceReservations[tx.From][tx.Nonce] {
 		return fmt.Errorf("nonce %d is reserved for address %s (concurrent request in progress)", tx.Nonce, tx.From)
 	}
 
-	// 3. Handle replacement if needed
+	// 4. Handle Replacement
 	if isReplacement {
-		// Get the existing transaction again (we already validated it exists)
 		existingTx := senderTxs[tx.Nonce]
-		// Remove old transaction internally
 		p.removeInternal(existingTx)
 	}
 
-	// 4. Validate Total Pending Balance
+	// 5. Validate Balance (including all pending txs)
 	if err := p.validateTotalPendingBalance(tx.From, tx); err != nil {
 		return fmt.Errorf("insufficient balance for pending transactions: %v", err)
 	}
 
-	// 5. Check Global Pool Capacity
+	// 6. Global Pool Capacity & Dynamic Gas Price
 	if len(p.pending) >= p.maxTxs {
-		if !p.evictLowestGasPrice(tx.GasPrice) {
-			return fmt.Errorf("transaction pool is full")
+		// Pool is full. Try to evict a cheap transaction to make room for this one.
+		evicted := p.evictLowestGasPrice(tx.GasPrice)
+		if !evicted {
+			// If we couldn't evict anyone (meaning this tx is cheaper than everyone else), reject it.
+			return fmt.Errorf("transaction pool full and gas price too low to replace existing transactions")
 		}
 	}
 
-	// 🔴 FIX-4: Reserve nonce BEFORE adding to pool to atomically prevent race
+	// 7. Commit to Pool
+	// Reserve nonce first
 	p.nonceReservations[tx.From][tx.Nonce] = true
 	defer func() {
-		// Clean up reservation if we bail out after this point
+		// Cleanup reservation if we somehow fail strictly after this (though we are at the end)
 		if len(p.pending) == 0 || p.pending[tx.Id] == nil {
 			delete(p.nonceReservations[tx.From], tx.Nonce)
 		}
 	}()
 
-	// 6. Add to all indices
 	p.pending[tx.Id] = &TransactionEntry{
 		Transaction: tx,
 		ReceivedAt:  time.Now(),
 	}
 	p.byHash[tx.Hash] = tx
-
-	if p.byAddress[tx.From] == nil {
-		p.byAddress[tx.From] = make(map[uint64]*core.Transaction)
-	}
 	p.byAddress[tx.From][tx.Nonce] = tx
 
 	p.totalAdded++
@@ -221,7 +231,6 @@ func (p *Pool) AddTransaction(tx *core.Transaction) error {
 }
 
 // CleanupExpired removes transactions that have been in the pool longer than the TTL
-// Fixes: MEDIUM Severity - Missing Transaction Expiration
 func (p *Pool) CleanupExpired() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -230,7 +239,6 @@ func (p *Pool) CleanupExpired() {
 	expiredCount := 0
 	orphanedCount := 0
 
-	// 🔴 FIX-8a: Iterate over a snapshot to avoid modifying map during iteration
 	var entriesToRemove []*core.Transaction
 	for _, entry := range p.pending {
 		if now.Sub(entry.ReceivedAt) > config.TransactionPoolTTL {
@@ -240,30 +248,23 @@ func (p *Pool) CleanupExpired() {
 
 	// Remove expired transactions
 	for _, tx := range entriesToRemove {
-		p.removeInternal(tx) // This also cleans up nonce reservations (FIX-6)
+		p.removeInternal(tx)
 		expiredCount++
 		log.Printf("Removed expired transaction: %s (Age: %v)",
-			tx.Id, now.Sub(time.Unix(0, 0).Add(time.Duration(tx.Timestamp)*time.Second)))
+			tx.Id, now.Sub(entryReceivedTime(tx.Timestamp)))
 	}
 
-	// 🔴 FIX-8b: Clean up orphaned reservations (reserved but not in pool)
-	// This handles edge case where reservation succeeds but AddTransaction fails mid-process
+	// Clean up orphaned reservations
 	for address := range p.nonceReservations {
 		for nonce := range p.nonceReservations[address] {
-			// Check if this reserved nonce is actually in the pool
 			senderTxs, exists := p.byAddress[address]
 			txExists := exists && senderTxs[nonce] != nil
 
 			if !txExists {
-				// Reserved nonce is orphaned - check if it's stale
-				// If we can't determine age, assume it's orphaned after max age
 				delete(p.nonceReservations[address], nonce)
 				orphanedCount++
-				log.Printf("⚠️  Cleaned up orphaned nonce %d for address %s", nonce, address)
 			}
 		}
-
-		// Clean up empty address reservation maps
 		if len(p.nonceReservations[address]) == 0 {
 			delete(p.nonceReservations, address)
 		}
@@ -274,7 +275,11 @@ func (p *Pool) CleanupExpired() {
 	}
 }
 
-// validateTotalPendingBalance calculates the total cost of pending transactions
+// helper for logging timestamp conversion
+func entryReceivedTime(ts int64) time.Time {
+	return time.Unix(ts, 0)
+}
+
 // validateTotalPendingBalance calculates the total cost of pending transactions
 func (p *Pool) validateTotalPendingBalance(address string, newTx *core.Transaction) error {
 	if p.accountManager == nil {
@@ -286,16 +291,13 @@ func (p *Pool) validateTotalPendingBalance(address string, newTx *core.Transacti
 		return fmt.Errorf("could not retrieve account: %v", err)
 	}
 
-	// 1. Initialize Accumulator
 	totalRequired := big.NewInt(0)
 
-	// Helper function to calculate cost for a single tx and add to total
 	addCost := func(tx *core.Transaction) error {
 		amountBig := math.ParseBigInt(tx.Amount)
 		gasPriceBig := math.ParseBigInt(tx.GasPrice)
 		gasLimitBig := big.NewInt(tx.Gas)
 
-		// Cost = Amount + (Gas * GasPrice) with SafeMath
 		gasCost := math.MulBig(gasLimitBig, gasPriceBig)
 		txTotal := math.AddBig(amountBig, gasCost)
 
@@ -303,28 +305,22 @@ func (p *Pool) validateTotalPendingBalance(address string, newTx *core.Transacti
 		return nil
 	}
 
-	// 2. Sum up existing pending transactions
 	if senderTxs, exists := p.byAddress[address]; exists {
 		for _, tx := range senderTxs {
-			// Skip the transaction if it is being replaced (same nonce)
 			if tx.Nonce == newTx.Nonce {
-				continue
+				continue // Skip replaced tx
 			}
 			if err := addCost(tx); err != nil {
-				return fmt.Errorf("failed to calculate cost for pending tx: %w", err)
+				return err
 			}
 		}
 	}
 
-	// 3. Add new transaction cost
 	if err := addCost(newTx); err != nil {
-		return fmt.Errorf("failed to calculate cost for new tx: %w", err)
+		return err
 	}
 
-	// 4. Check Balance
 	balanceBig := math.ParseBigInt(account.Balance)
-
-	// Compare: if Balance < TotalRequired
 	if balanceBig.Cmp(totalRequired) < 0 {
 		return fmt.Errorf("insufficient funds for pending pool: have %s, need %s",
 			account.Balance, totalRequired.String())
@@ -449,7 +445,6 @@ func (p *Pool) GetTransactionsForAddress(address string) []*core.Transaction {
 }
 
 // GetExecutableTransactions returns transactions ready for execution
-// GetExecutableTransactions returns transactions ready for execution
 func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.AccountManager) []*core.Transaction {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -484,8 +479,6 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 		}
 
 		expectedNonce := currentNonce
-
-		// 1. Parse Initial Balance to BigInt
 		remainingBalanceBig := math.ParseBigInt(account.Balance)
 
 		for _, tx := range txs {
@@ -494,8 +487,6 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 			}
 
 			if tx.Nonce == expectedNonce {
-				// 2. Calculate Total Cost using BigInt Math
-				// Cost = Amount + (Gas * GasPrice)
 				amountBig := math.ParseBigInt(tx.Amount)
 				gasPriceBig := math.ParseBigInt(tx.GasPrice)
 				gasLimitBig := big.NewInt(tx.Gas)
@@ -503,24 +494,22 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 				gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
 				totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
 
-				// 3. Check Balance: if remainingBalance >= totalCost
 				if remainingBalanceBig.Cmp(totalCostBig) >= 0 {
 					executable = append(executable, tx)
 					expectedNonce++
-
-					// 4. Update Remaining Balance
 					remainingBalanceBig.Sub(remainingBalanceBig, totalCostBig)
 				} else {
-					break // Stop sequence if funds run out
+					break
 				}
 			} else if tx.Nonce > expectedNonce {
-				break // Gap in nonce sequence
+				break
 			}
 		}
 		processed[address] = true
 	}
 
-	// Second pass: Fill with high gas price txs if room
+	// Second pass: Fill with high gas price txs if room (Optional mining strategy)
+	// This helps miners pick profitable txs even if they are slightly out of order (for future blocks)
 	if len(executable) < maxCount && len(executable) < len(p.pending)/2 {
 		var remaining []*core.Transaction
 
@@ -538,12 +527,9 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 			}
 		}
 
-		// 5. Sort by Gas Price (Must parse BigInts to compare correctly!)
 		sort.Slice(remaining, func(i, j int) bool {
 			priceI := math.ParseBigInt(remaining[i].GasPrice)
 			priceJ := math.ParseBigInt(remaining[j].GasPrice)
-
-			// Return true if priceI > priceJ (Descending order)
 			return priceI.Cmp(priceJ) > 0
 		})
 
@@ -551,32 +537,10 @@ func (p *Pool) GetExecutableTransactions(maxCount int, accountManager *account.A
 			if len(executable) >= maxCount {
 				break
 			}
-
-			currentNonce, err := am.GetNonce(tx.From)
-			if err != nil {
-				continue
-			}
-
-			account, err := am.GetAccount(tx.From)
-			if err != nil {
-				continue
-			}
-
+			// Only include if nonce is reasonably close (prevent hoarding far-future txs)
+			currentNonce, _ := am.GetNonce(tx.From)
 			if tx.Nonce >= currentNonce && tx.Nonce <= currentNonce+5 {
-				// 6. Recalculate cost for individual check
-				amountBig := math.ParseBigInt(tx.Amount)
-				gasPriceBig := math.ParseBigInt(tx.GasPrice)
-				gasLimitBig := big.NewInt(tx.Gas)
-
-				gasCostBig := new(big.Int).Mul(gasLimitBig, gasPriceBig)
-				totalCostBig := new(big.Int).Add(amountBig, gasCostBig)
-
-				balanceBig := math.ParseBigInt(account.Balance)
-
-				// Check Balance
-				if balanceBig.Cmp(totalCostBig) >= 0 {
-					executable = append(executable, tx)
-				}
+				executable = append(executable, tx)
 			}
 		}
 	}
@@ -595,7 +559,10 @@ func (p *Pool) GetHighestGasPriceTransactions(maxCount int) []*core.Transaction 
 	}
 
 	sort.Slice(txs, func(i, j int) bool {
-		return txs[i].GasPrice > txs[j].GasPrice
+		// Use BigInt comparison for safety
+		pI := math.ParseBigInt(txs[i].GasPrice)
+		pJ := math.ParseBigInt(txs[j].GasPrice)
+		return pI.Cmp(pJ) > 0
 	})
 
 	if len(txs) > maxCount {
@@ -621,12 +588,8 @@ func (p *Pool) GetStats() *PoolStats {
 		TotalAdded:   p.totalAdded,
 		TotalRemoved: p.totalRemoved,
 		ShardID:      int(p.shardID),
-
-		// ✅ Match the field name in the struct
-		MaxCapacity: p.maxCount,
-
-		// ✅ Convert BigInt to string
-		MinGasPrice: minGasStr,
+		MaxCapacity:  p.maxTxs, // Fixed field name
+		MinGasPrice:  minGasStr,
 	}
 }
 
@@ -640,9 +603,11 @@ func (p *Pool) Clear() {
 	p.pending = make(map[string]*TransactionEntry)
 	p.byAddress = make(map[string]map[uint64]*core.Transaction)
 	p.byHash = make(map[string]*core.Transaction)
+	// Clear reservations too
+	p.nonceReservations = make(map[string]map[uint64]bool)
 }
 
-// CleanupStaleTransactions removes transactions older than the specified duration (based on Timestamp)
+// CleanupStaleTransactions removes transactions older than the specified duration
 func (p *Pool) CleanupStaleTransactions(maxAge time.Duration) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -653,7 +618,6 @@ func (p *Pool) CleanupStaleTransactions(maxAge time.Duration) int {
 	var staleTransactions []*core.Transaction
 
 	for _, entry := range p.pending {
-		// This checks the signed timestamp (when user created it)
 		if currentTime-entry.Transaction.Timestamp > int64(maxAge.Seconds()) {
 			staleTransactions = append(staleTransactions, entry.Transaction)
 		}
@@ -682,24 +646,17 @@ func (p *Pool) validateTransactionForPool(tx *core.Transaction) error {
 		return fmt.Errorf("sender address cannot be empty")
 	}
 
-	// 1. Validate Amount (String -> BigInt)
 	amountBig := math.ParseBigInt(tx.Amount)
 	if amountBig.Sign() < 0 {
 		return fmt.Errorf("transaction amount cannot be negative")
 	}
 
-	// 2. Validate Gas (still int64)
 	if tx.Gas <= 0 {
 		return fmt.Errorf("gas must be positive")
 	}
 
-	// 3. Validate Gas Price (String vs String)
 	gasPriceBig := math.ParseBigInt(tx.GasPrice)
-
-	// ✅ FIX: Compare directly against p.minGasPrice (which is already *big.Int)
-	// No need for big.NewInt()
 	if gasPriceBig.Cmp(p.minGasPrice) < 0 {
-		// ✅ FIX: Use %s and .String() for the error message
 		return fmt.Errorf("gas price %s below minimum %s", tx.GasPrice, p.minGasPrice.String())
 	}
 
@@ -720,25 +677,25 @@ func (p *Pool) validateTransactionForPool(tx *core.Transaction) error {
 }
 
 // evictLowestGasPrice removes the transaction with the lowest gas price
-// if it is lower than the new transaction's gas price.
-// ✅ UPDATE: newGasPrice changed from int64 -> string
+// Returns true if eviction happened, false if new tx is too cheap to evict anyone
 func (p *Pool) evictLowestGasPrice(newGasPrice string) bool {
-	// 1. Parse the threshold (the new tx's gas price)
-	lowestPriceBig := math.ParseBigInt(newGasPrice)
+	newPriceBig := math.ParseBigInt(newGasPrice)
 	var evictTx *core.Transaction
+	var lowestPriceBig *big.Int
 
+	// Find the absolute cheapest transaction in the pool
 	for _, entry := range p.pending {
-		// 2. Parse current tx price
 		currentPriceBig := math.ParseBigInt(entry.Transaction.GasPrice)
 
-		// 3. Compare: if current < lowest
-		if currentPriceBig.Cmp(lowestPriceBig) < 0 {
+		if lowestPriceBig == nil || currentPriceBig.Cmp(lowestPriceBig) < 0 {
 			lowestPriceBig = currentPriceBig
 			evictTx = entry.Transaction
 		}
 	}
 
-	if evictTx != nil {
+	// Only evict if the new transaction pays MORE than the cheapest one
+	// Strict > check (cannot be equal) to discourage spam
+	if evictTx != nil && newPriceBig.Cmp(lowestPriceBig) > 0 {
 		p.removeInternal(evictTx)
 		return true
 	}
@@ -753,11 +710,10 @@ func (p *Pool) GetNextNonce(address string, currentNonce uint64) uint64 {
 
 	senderTxs, exists := p.byAddress[address]
 	if !exists {
-		// Check reservations even if no transactions yet
 		reservations := p.nonceReservations[address]
 		for nonce := range reservations {
 			if nonce == currentNonce {
-				return currentNonce + 1 // Skip reserved nonce
+				return currentNonce + 1
 			}
 		}
 		return currentNonce
@@ -765,7 +721,6 @@ func (p *Pool) GetNextNonce(address string, currentNonce uint64) uint64 {
 
 	highestNonce := currentNonce - 1
 
-	// Check both pending transactions and reservations
 	for nonce := range senderTxs {
 		if nonce > highestNonce {
 			highestNonce = nonce
@@ -816,14 +771,11 @@ func (p *Pool) UpdateGasPrice(newMinGasPrice string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Parse and update
 	p.minGasPrice = math.ParseBigInt(newMinGasPrice)
 
 	var toRemove []*core.Transaction
 	for _, entry := range p.pending {
 		txPrice := math.ParseBigInt(entry.Transaction.GasPrice)
-
-		// Compare: if txPrice < newMinGasPrice
 		if txPrice.Cmp(p.minGasPrice) < 0 {
 			toRemove = append(toRemove, entry.Transaction)
 		}
@@ -847,10 +799,12 @@ func (p *Pool) GetTransactionsByGasPrice(ascending bool) []*core.Transaction {
 	}
 
 	sort.Slice(txs, func(i, j int) bool {
+		pI := math.ParseBigInt(txs[i].GasPrice)
+		pJ := math.ParseBigInt(txs[j].GasPrice)
 		if ascending {
-			return txs[i].GasPrice < txs[j].GasPrice
+			return pI.Cmp(pJ) < 0
 		}
-		return txs[i].GasPrice > txs[j].GasPrice
+		return pI.Cmp(pJ) > 0
 	})
 
 	return txs
