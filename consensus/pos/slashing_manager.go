@@ -78,6 +78,11 @@ type SlashingManager struct {
 
 	validatorRegistry ValidatorRegistry
 
+	rateLimiter   *EvidenceRateLimiter
+	confirmations *SlashingConfirmation
+	cooldowns     *SlashingCooldown
+	metrics       *SlashingMetrics
+
 	mu sync.RWMutex
 
 	// Reference to world state for stake updates
@@ -130,6 +135,10 @@ func NewSlashingManager(
 		validatorRegistry:       validatorRegistry,
 		worldState:              worldState,
 		storage:                 slashingStorage,
+		rateLimiter:             NewEvidenceRateLimiter(),
+		confirmations:           NewSlashingConfirmation(3, 10*time.Minute), // 3 confirmations, 10min window
+		cooldowns:               NewSlashingCooldown(),
+		metrics:                 NewSlashingMetrics(),
 	}
 
 	if sm.storage != nil {
@@ -138,7 +147,23 @@ func NewSlashingManager(
 		}
 	}
 
+	// Start cleanup goroutine
+	go sm.cleanupPeriodic()
+
 	return sm
+}
+
+// Add cleanup function
+func (sm *SlashingManager) cleanupPeriodic() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		cleaned := sm.confirmations.CleanupExpired()
+		if cleaned > 0 {
+			log.Printf("🧹 Cleaned up %d expired pending confirmations", cleaned)
+		}
+	}
 }
 
 // ValidateEvidence validates slashing evidence with cryptographic verification
@@ -152,18 +177,44 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// ✅ CRITICAL: Validate evidence FIRST (includes signature verification)
+	sm.metrics.RecordSubmission()
+
+	// LAYER 1: Rate Limiting (Spam Protection)
+	if err := sm.rateLimiter.CheckReporter(evidence.ReporterAddress); err != nil {
+		sm.metrics.RecordSpam()
+		return fmt.Errorf("rate limit exceeded: %w", err)
+	}
+
+	// LAYER 2: Validate Evidence (Existing - includes signature verification)
 	if err := evidence.Validate(sm.validatorRegistry); err != nil {
+		sm.rateLimiter.RecordRejection(evidence.ReporterAddress)
+		sm.metrics.RecordInvalid()
 		return fmt.Errorf("invalid evidence: %v", err)
 	}
 
-	// Check if already processed (replay protection)
+	// LAYER 3: Check Deduplication (Existing)
 	evidenceHash := evidence.Hash()
 	if sm.processedEvidence[evidenceHash] {
 		return fmt.Errorf("evidence already processed")
 	}
 
-	// Mark as processed
+	// LAYER 4: Check Cooldown Period
+	if err := sm.cooldowns.CheckCooldown(evidence.ValidatorAddress, evidence.Type); err != nil {
+		sm.metrics.RecordCooldown()
+		return err
+	}
+
+	// LAYER 5: Require Multiple Confirmations
+	ready, err := sm.confirmations.AddConfirmation(evidence, evidence.ReporterAddress)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		sm.metrics.RecordPending()
+		return nil // Waiting for more confirmations
+	}
+
+	// LAYER 6: Mark as Processed
 	sm.processedEvidence[evidenceHash] = true
 	if sm.storage != nil {
 		if err := sm.storage.SaveProcessedEvidence(evidenceHash); err != nil {
@@ -171,29 +222,43 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 		}
 	}
 
-	// Process based on evidence type
+	// LAYER 7: Record Valid Submission
+	sm.rateLimiter.RecordAcceptance(evidence.ReporterAddress)
+	sm.metrics.RecordValid()
+
+	// LAYER 8: Process Evidence by Type (EXISTING CODE)
+	var processErr error
 	switch evidence.Type {
 	case EvidenceDoubleVoting:
-		//  Log double signing attempt for security audit
 		dvEvidence, ok := evidence.Evidence.(*DoubleVoteEvidence)
 		if ok && dvEvidence.Attestation1 != nil {
 			security.LogDoubleSign(evidence.ValidatorAddress, dvEvidence.Attestation1.Slot)
 		}
-		return sm.processDoubleVoteEvidence(evidence)
+		processErr = sm.processDoubleVoteEvidence(evidence)
 	case EvidenceSurroundVoting:
-		return sm.processSurroundVoteEvidence(evidence)
+		processErr = sm.processSurroundVoteEvidence(evidence)
 	case EvidenceInvalidProposal:
 		dvEvidence, ok := evidence.Evidence.(*InvalidProposalEvidence)
 		if !ok {
 			return fmt.Errorf("invalid evidence format for invalid proposal")
 		}
-		return sm.ReportInvalidProposal(&types.BlockProposal{
+		processErr = sm.ReportInvalidProposal(&types.BlockProposal{
 			Proposer: evidence.ValidatorAddress,
 			Epoch:    dvEvidence.Proposal.Epoch,
 		}, "evidence submitted")
 	default:
-		return fmt.Errorf("unsupported evidence type: %v", evidence.Type)
+		processErr = fmt.Errorf("unsupported evidence type: %v", evidence.Type)
 	}
+
+	if processErr != nil {
+		return processErr
+	}
+
+	// LAYER 9: Record Cooldown
+	sm.cooldowns.RecordSlashing(evidence.ValidatorAddress, evidence.Type)
+	sm.metrics.RecordExecution()
+
+	return nil
 }
 
 func (sm *SlashingManager) processDoubleVoteEvidence(evidence *SlashingEvidence) error {
