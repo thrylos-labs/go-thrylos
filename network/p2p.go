@@ -22,6 +22,7 @@ type P2PNetwork struct {
 	AttestationChan chan interface{}
 	VoteChan        chan interface{}
 	startTime       time.Time
+	validator       *p2p.MessageValidator
 }
 
 // Config for P2P network
@@ -36,6 +37,14 @@ func NewP2PNetwork(cfg *config.Config) (*P2PNetwork, error) {
 	if !cfg.P2P.Enabled {
 		return nil, fmt.Errorf("P2P networking is disabled in configuration")
 	}
+
+	// Create a shared validator instance
+	validator := p2p.NewMessageValidator(
+		p2p.DefaultMaxMessageSize,
+		p2p.DefaultMaxBlockRangeSize,
+		p2p.DefaultStreamReadTimeout,
+		p2p.DefaultStreamWriteTimeout,
+	)
 
 	p2pConfig := &p2p.Config{
 		ListenPort:     cfg.P2P.ListenPort,
@@ -55,6 +64,7 @@ func NewP2PNetwork(cfg *config.Config) (*P2PNetwork, error) {
 		TransactionChan: make(chan *core.Transaction, 1000),
 		AttestationChan: make(chan interface{}, 1000),
 		VoteChan:        make(chan interface{}, 1000),
+		validator:       validator,
 	}
 
 	// Set up event handlers
@@ -178,22 +188,47 @@ func (n *P2PNetwork) processMessages() {
 
 // handleBlockchainMessage handles messages from the P2P layer
 func (n *P2PNetwork) handleBlockchainMessage(msg p2p.Message) {
+	// 1. Peer Check (Rate Limit & Ban Status)
+	if err := n.validator.CheckPeerStatus(msg.FromPeerID); err != nil {
+		stdlog.Printf("Dropped message from bad peer %s: %v", msg.FromPeerID, err)
+		return
+	}
+
 	switch msg.Type {
 	case p2p.ProcessBlock:
 		if block, ok := msg.Data.(*core.Block); ok {
+			// Basic Check: Is block valid? (Deep validation happens in Core, but surface check here)
+			if block == nil {
+				n.validator.AdjustReputation(msg.FromPeerID, p2p.ScoreSpam)
+				return
+			}
+
 			select {
 			case n.BlockChan <- block:
+				// Reward good behavior (tentatively)
+				n.validator.AdjustReputation(msg.FromPeerID, p2p.ScoreGoodBlock)
 			default:
-				stdlog.Println("Block channel full, dropping message")
+				stdlog.Println("Block channel full")
 			}
+		} else {
+			// Received malformed data
+			n.validator.AdjustReputation(msg.FromPeerID, p2p.ScoreInvalidBlock)
 		}
+
 	case p2p.ProcessTransaction:
 		if tx, ok := msg.Data.(*core.Transaction); ok {
+			if tx == nil {
+				n.validator.AdjustReputation(msg.FromPeerID, p2p.ScoreSpam)
+				return
+			}
 			select {
 			case n.TransactionChan <- tx:
+				// Transactions are neutral/slight positive
 			default:
-				stdlog.Println("Transaction channel full, dropping message")
+				stdlog.Println("Transaction channel full")
 			}
+		} else {
+			n.validator.AdjustReputation(msg.FromPeerID, p2p.ScoreInvalidTx)
 		}
 	case p2p.ProcessAttestation:
 		select {

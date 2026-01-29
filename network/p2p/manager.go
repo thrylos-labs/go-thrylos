@@ -58,6 +58,7 @@ type Message struct {
 	Type       MessageType
 	Data       interface{}
 	ResponseCh chan Response
+	FromPeerID peer.ID
 }
 
 type Response struct {
