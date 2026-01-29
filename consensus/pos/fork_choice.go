@@ -304,45 +304,56 @@ func (fc *ForkChoice) getCurrentEpoch() uint64 {
 }
 
 // GetHead returns the current head block according to fork choice
+// GetHead returns the current head block according to the fork choice rule.
 func (fc *ForkChoice) GetHead() string {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 
-	// Start from justified checkpoint (or use fallback)
+	// 1. Start from the finalized checkpoint if it exists;
+	// otherwise, use the justified checkpoint.
 	var startBlock string
 	if fc.finalizedCheckpoint != nil {
 		startBlock = fc.finalizedCheckpoint.BlockHash
-	} else if justified := fc.GetJustifiedCheckpoint(); justified != nil {
+	} else if justified := fc.justifiedCheckpoint; justified != nil {
 		startBlock = justified.BlockHash
 	}
 
-	// Fallback: no justified checkpoint yet, use simple highest stake
+	// Fallback: If no checkpoints exist, use the simple highest stake method.
 	if startBlock == "" {
 		return fc.getHeadByHighestStake()
 	}
 
-	// Walk down tree, choosing heaviest child (LMD GHOST)
+	// 2. Walk down the tree, choosing the heaviest child (LMD GHOST).
 	currentBlock := startBlock
-	maxDepth := 1000 // Prevent infinite loops
+	maxDepth := 1000 // Safety limit to prevent infinite loops
 
 	for i := 0; i < maxDepth; i++ {
 		children := fc.children[currentBlock]
 		if len(children) == 0 {
-			return currentBlock // Leaf node - this is the head
+			return currentBlock // Found a leaf node; this is the head
 		}
 
-		// Find child with most stake from latest messages
 		heaviestChild := ""
 		heaviestStake := big.NewInt(0)
 
 		for _, childHash := range children {
 			childStake := fc.getSubtreeStake(childHash)
-			if childStake.Cmp(heaviestStake) > 0 {
+			cmp := childStake.Cmp(heaviestStake)
+
+			if cmp > 0 {
+				// New heaviest branch found.
 				heaviestStake = childStake
 				heaviestChild = childHash
+			} else if cmp == 0 && heaviestChild != "" {
+				// RESOLVED: Deterministic Tie-Breaker.
+				// If stake is equal, choose the block with the smaller hash string.
+				if childHash < heaviestChild {
+					heaviestChild = childHash
+				}
 			}
 		}
 
+		// If no valid child is found, the current block is the head.
 		if heaviestChild == "" {
 			return currentBlock
 		}
@@ -613,4 +624,32 @@ func (fc *ForkChoice) GetTotalActiveStake() string {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 	return fc.getTotalActiveStake()
+}
+
+// This implements the "Exponential attestation weight decay" recommendation.
+func (fc *ForkChoice) ApplyWeightDecay(originalStake *big.Int, attestationEpoch uint64, currentEpoch uint64) *big.Int {
+	if currentEpoch <= attestationEpoch {
+		return originalStake
+	}
+
+	age := currentEpoch - attestationEpoch
+
+	// Decay calculation: Stake * (0.9 ^ age)
+	// For simplicity in integer math, we use basis points: (Stake * (9000^age)) / (10000^age)
+	// Or even simpler: reduce by 10% for every epoch of age.
+	decayedStake := new(big.Int).Set(originalStake)
+
+	// We limit the decay loop to prevent CPU exhaustion on very old blocks
+	maxDecayEpochs := 32
+	if age > uint64(maxDecayEpochs) {
+		age = uint64(maxDecayEpochs)
+	}
+
+	for i := uint64(0); i < age; i++ {
+		// Reduce by 10% each epoch: decayedStake = (decayedStake * 9) / 10
+		decayedStake.Mul(decayedStake, big.NewInt(9))
+		decayedStake.Div(decayedStake, big.NewInt(10))
+	}
+
+	return decayedStake
 }

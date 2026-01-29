@@ -22,6 +22,8 @@ type WorldStateBalancer interface {
 	// Accepts *big.Int
 	UpdateBalance(address string, amount *big.Int) error
 
+	GetHeight() int64
+
 	// Existing methods
 	GetValidator(address string) (*core.Validator, error)
 	UpdateValidator(validator *core.Validator) error
@@ -56,7 +58,8 @@ func (e *DoubleSigningError) Error() string {
 
 // SlashingManager handles all slashing-related operations
 type SlashingManager struct {
-	config *storage.SlashingConfig
+	config     *storage.SlashingConfig
+	forkChoice *ForkChoice
 
 	// Track all attestations by validator for double voting detection
 	attestationsByValidator map[string][]*storage.AttestationRecord
@@ -314,10 +317,12 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	// 1. Basic Window Validation
 	if time.Since(time.Unix(att.Timestamp, 0)) > sm.config.AttestationWindow {
 		return nil
 	}
 
+	// 2. Initialize storage if nil
 	if sm.attestationsByValidator == nil {
 		sm.attestationsByValidator = make(map[string][]*storage.AttestationRecord)
 	}
@@ -327,10 +332,46 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 
 	validatorAddress := att.ValidatorAddress
 
+	// 3. Jailing Check
 	if sm.isValidatorJailed(validatorAddress) {
 		return fmt.Errorf("validator %s is jailed and cannot attest", validatorAddress)
 	}
 
+	// 4. SECURITY INTEGRATION: Fork Choice & Reorg Validation
+	// This addresses the MEDIUM severity security finding regarding reorg depth.
+	if sm.forkChoice != nil {
+		// Retrieve current head to compare against the block in the attestation
+		currentHead := sm.forkChoice.GetHead() //
+
+		// If the attestation is for a block not on the current head's path, it's a potential reorg
+		if currentHead != "" && currentHead != att.BlockHash {
+			// We assume a helper or logic to determine depth; for validation,
+			// we use the security parameters defined in fork_choice_security.go.
+
+			// Note: Total stake and validator stake should be fetched from WorldState
+			totalStake := sm.forkChoice.GetTotalActiveStake()              //
+			validator, err := sm.worldState.GetValidator(validatorAddress) //
+
+			if err == nil && validator != nil {
+				// Perform the reorg security check before recording the attestation
+				// Depth is calculated as the difference between current height and fork point
+				approxDepth := int(sm.worldState.GetHeight() - int64(att.Slot))
+
+				err := sm.forkChoice.ValidateReorganization(
+					approxDepth,
+					att.Epoch,
+					validator.Stake,
+					totalStake,
+				)
+				if err != nil {
+					// Reject the attestation if it exceeds reorg depth or crosses finality
+					return fmt.Errorf("attestation rejected for security: %w", err)
+				}
+			}
+		}
+	}
+
+	// 5. Create Attestation Record
 	record := &storage.AttestationRecord{
 		ValidatorAddress: att.ValidatorAddress,
 		Epoch:            att.Epoch,
@@ -340,8 +381,9 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 		Timestamp:        time.Now(),
 	}
 
+	// 6. Double-Signing / Equivocation Check
+	// This is a primary function of the SlashingManager.
 	prevAttestations := sm.attestationsByValidator[validatorAddress]
-
 	for _, prev := range prevAttestations {
 		conflicts := record.Conflicts(prev)
 		if conflicts {
@@ -351,11 +393,14 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 		}
 	}
 
+	// 7. Update History and Metrics
 	sm.attestationsByValidator[validatorAddress] =
 		append(sm.attestationsByValidator[validatorAddress], record)
 
 	sm.recordAttestationForDowntime(validatorAddress, att)
 
+	// 8. Memory Management
+	// Keep a rolling window of attestations to prevent memory exhaustion
 	if len(sm.attestationsByValidator[validatorAddress]) > 1000 {
 		attestations := sm.attestationsByValidator[validatorAddress]
 		sm.attestationsByValidator[validatorAddress] = attestations[len(attestations)-1000:]

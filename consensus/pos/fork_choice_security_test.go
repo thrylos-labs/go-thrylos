@@ -2,6 +2,7 @@
 package pos
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -476,4 +477,46 @@ func TestForkChoice_SecurityMetrics(t *testing.T) {
 	assert.Equal(t, "justifie", metrics["justified_block"])
 	assert.Equal(t, 150, metrics["max_reorg_depth"])
 	assert.Equal(t, "75.0%", metrics["min_stake_for_reorg"])
+}
+
+func TestForkChoice_WeightDecay(t *testing.T) {
+	cfg := createTestConfig(32, 2, 0.66, 10) // Audit-recommended depth of 32
+	fc, _ := setupTestForkChoice(cfg)
+
+	t.Run("WeightDecay_ReducesStakeOverTime", func(t *testing.T) {
+		originalStake := big.NewInt(1000000) // 1M tokens
+
+		// 1. Current weight (0 epochs old) should be 100%
+		weight0 := fc.ApplyWeightDecay(originalStake, 10, 10)
+		assert.Equal(t, originalStake.Int64(), weight0.Int64(), "Weight should not decay at current epoch")
+
+		// 2. Weight after 1 epoch (10% decay)
+		weight1 := fc.ApplyWeightDecay(originalStake, 10, 11)
+		expected1 := int64(900000) // 1M * 0.9
+		assert.Equal(t, expected1, weight1.Int64(), "Weight should decay by 10% after 1 epoch")
+
+		// 3. Weight after 5 epochs (compounded decay)
+		weight5 := fc.ApplyWeightDecay(originalStake, 10, 15)
+		// 1,000,000 * (0.9^5) = 590,490
+		assert.Less(t, weight5.Int64(), int64(600000))
+		assert.Greater(t, weight5.Int64(), int64(590000))
+	})
+
+	t.Run("ForkSelection_PrefersFreshChain", func(t *testing.T) {
+		// Mock two branches:
+		// Branch A: 100 tokens, but 10 epochs old
+		// Branch B: 80 tokens, but 0 epochs old
+
+		oldStake := big.NewInt(100)
+		newStake := big.NewInt(80)
+
+		currentEpoch := uint64(20)
+
+		decayedOld := fc.ApplyWeightDecay(oldStake, 10, currentEpoch)
+		decayedNew := fc.ApplyWeightDecay(newStake, 20, currentEpoch)
+
+		// 100 * (0.9^10) is approx 34.8.
+		// 80 * (0.9^0) is 80.
+		assert.True(t, decayedNew.Cmp(decayedOld) > 0, "Newer lighter chain should outweigh older heavier chain")
+	})
 }

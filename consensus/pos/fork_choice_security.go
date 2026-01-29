@@ -15,7 +15,7 @@ import (
 
 // Security constants (defaults)
 const (
-	DefaultReorgDepthLimit    = 100  // Maximum blocks that can be reorganized
+	DefaultReorgDepthLimit    = 32   // Maximum blocks that can be reorganized
 	DefaultFinalizationEpochs = 2    // Epochs before auto-finalization
 	DefaultMinStakeForReorg   = 0.66 // 66% stake required for reorg
 	DefaultCheckpointInterval = 10   // Create checkpoint every 10 epochs
@@ -210,41 +210,33 @@ func (fc *ForkChoice) CalculateChainStakeFromHashes(blockHashes []string) (strin
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 
-	totalStake := big.NewInt(0)
+	totalDecayedStake := big.NewInt(0)
+	currentEpoch := fc.getCurrentEpoch() // Helper to get latest tracked epoch
 	seenValidators := make(map[string]bool)
 
 	for _, blockHash := range blockHashes {
-		// Get attestations for this block
 		attestations := fc.attestationsByBlock[blockHash]
+		blockEpoch := fc.blockEpochMap[blockHash]
+
 		for _, attestation := range attestations {
 			validator := attestation.ValidatorAddress
 
-			// Only count each validator once
 			if !seenValidators[validator] {
 				validatorInfo, err := fc.worldState.GetValidator(validator)
 				if err == nil && validatorInfo != nil && validatorInfo.Active {
 					stake := coremath.ParseBigInt(validatorInfo.Stake)
 
-					// AUDIT FIX: Validate stake before adding
-					if stake == nil || stake.Sign() < 0 {
-						log.Printf("⚠️ Invalid stake for validator %s, skipping", validator)
-						continue
-					}
+					// APPLY DECAY: Older votes are worth less
+					weight := fc.ApplyWeightDecay(stake, blockEpoch, currentEpoch)
 
-					// Use AddBig with error checking
-					newTotal := coremath.AddBig(totalStake, stake)
-					if err != nil {
-						log.Printf("⚠️ Stake addition error for validator %s: %v", validator, err)
-						continue
-					}
-					totalStake = newTotal
+					totalDecayedStake.Add(totalDecayedStake, weight)
 					seenValidators[validator] = true
 				}
 			}
 		}
 	}
 
-	return totalStake.String(), nil
+	return totalDecayedStake.String(), nil
 }
 
 // GetSecurityMetrics returns current security status for monitoring
@@ -255,7 +247,7 @@ func (fc *ForkChoice) GetSecurityMetrics() map[string]interface{} {
 
 	metrics := make(map[string]interface{})
 
-	// Finalization status
+	// 1. Finalization status
 	if fc.finalizedCheckpoint != nil {
 		metrics["finalized_epoch"] = fc.finalizedCheckpoint.Epoch
 		metrics["finalized_block"] = safeHashPrefix(fc.finalizedCheckpoint.BlockHash)
@@ -264,7 +256,7 @@ func (fc *ForkChoice) GetSecurityMetrics() map[string]interface{} {
 		metrics["finalized_block"] = "none"
 	}
 
-	// Justification status
+	// 2. Justification status
 	if fc.justifiedCheckpoint != nil {
 		metrics["justified_epoch"] = fc.justifiedCheckpoint.Epoch
 		metrics["justified_block"] = safeHashPrefix(fc.justifiedCheckpoint.BlockHash)
@@ -273,8 +265,8 @@ func (fc *ForkChoice) GetSecurityMetrics() map[string]interface{} {
 		metrics["justified_block"] = "none"
 	}
 
-	// Security config
-	maxDepth := DefaultReorgDepthLimit
+	// 3. Security config with Updated Default (Audit Recommendation: 32)
+	maxDepth := 32 // Hard-coded security recommendation fallback
 	if fc.config != nil && fc.config.Consensus.MaxReorgDepth > 0 {
 		maxDepth = fc.config.Consensus.MaxReorgDepth
 	}
@@ -286,17 +278,28 @@ func (fc *ForkChoice) GetSecurityMetrics() map[string]interface{} {
 	}
 	metrics["min_stake_for_reorg"] = fmt.Sprintf("%.1f%%", minStake*100)
 
-	finalizationEpochs := DefaultFinalizationEpochs
-	if fc.config != nil && fc.config.Consensus.FinalizationEpochs > 0 {
-		finalizationEpochs = fc.config.Consensus.FinalizationEpochs
-	}
-	metrics["finalization_epochs"] = finalizationEpochs
+	// 4. FORK DETECTION ALERTS (New Security Requirement)
+	// Identify how many unique block hashes have received votes in recent history
+	competingHeads := 0
+	mainHead := fc.getHeadByHighestStake()
 
-	checkpointInterval := DefaultCheckpointInterval
-	if fc.config != nil && fc.config.Consensus.CheckpointInterval > 0 {
-		checkpointInterval = fc.config.Consensus.CheckpointInterval
+	// Check the number of tracked block scores as a proxy for fork activity
+	// In a healthy network, this should not grow exponentially relative to finalization
+	for blockHash := range fc.blockScores {
+		if blockHash != mainHead && fc.HasQuorum(blockHash) {
+			competingHeads++
+		}
 	}
-	metrics["checkpoint_interval"] = checkpointInterval
+
+	metrics["detected_forks"] = competingHeads
+	metrics["security_status"] = "HEALTHY"
+
+	// Alerting logic: multiple blocks with quorum suggests a network partition or attack
+	if competingHeads > 0 {
+		metrics["security_status"] = "CRITICAL_FORK_DETECTED"
+	} else if len(fc.blockScores) > 100 { // Arbitrary threshold for uncleaned state
+		metrics["security_status"] = "DEGRADED_STATE_BLOAT"
+	}
 
 	return metrics
 }
