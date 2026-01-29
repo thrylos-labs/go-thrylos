@@ -41,8 +41,10 @@ type Validator struct {
 	config      *config.Config
 
 	// Replay protection
-	replayConfig *ReplayProtectionConfig
-	metrics      *ReplayProtectionMetrics
+	replayConfig   *ReplayProtectionConfig
+	metrics        *ReplayProtectionMetrics
+	replayDetector *ReplayDetectorV3 // V3 replay detection
+
 }
 
 // NewValidator creates a new transaction validator
@@ -57,12 +59,16 @@ func NewValidator(shardID account.ShardID, totalShards int, cfg *config.Config) 
 		replayConfig.AllowEmptyFinalizedBlock = false
 	}
 
+	metrics := &ReplayProtectionMetrics{}
+
 	return &Validator{
 		shardID:      shardID,
 		totalShards:  totalShards,
 		config:       cfg,
 		replayConfig: replayConfig,
-		metrics:      &ReplayProtectionMetrics{},
+		metrics:      metrics,
+		// ✅ ADD THIS LINE:
+		replayDetector: NewReplayDetectorV3(cfg.Network.ChainID, replayConfig, metrics),
 	}
 }
 
@@ -74,12 +80,15 @@ func isDevelopmentEnvironment(env string) bool {
 
 // NewValidatorWithReplayConfig creates a validator with custom replay protection config
 func NewValidatorWithReplayConfig(shardID account.ShardID, totalShards int, cfg *config.Config, replayConfig *ReplayProtectionConfig) *Validator {
+	metrics := &ReplayProtectionMetrics{}
+
 	return &Validator{
-		shardID:      shardID,
-		totalShards:  totalShards,
-		config:       cfg,
-		replayConfig: replayConfig,
-		metrics:      &ReplayProtectionMetrics{},
+		shardID:        shardID,
+		totalShards:    totalShards,
+		config:         cfg,
+		replayConfig:   replayConfig,
+		metrics:        metrics,
+		replayDetector: NewReplayDetectorV3(cfg.Network.ChainID, replayConfig, metrics),
 	}
 }
 
@@ -312,6 +321,13 @@ func (v *Validator) validateSignature(tx *core.Transaction) error {
 	if len(tx.FromPubkey) == 0 {
 		return fmt.Errorf("transaction from_pubkey cannot be empty")
 	}
+	// ==================== V3 ENHANCEMENT ====================
+	// Validate chain ID before signature verification
+	if err := ValidateChainIDMatch(tx.ChainId, v.config.Network.ChainID); err != nil {
+		v.metrics.RecordChainIDMismatch() // Record the attempt
+		return fmt.Errorf("chain ID validation failed: %w", err)
+	}
+	// ========================================================
 
 	// NEW: Handle Ethereum Transactions differently
 	if tx.Type == core.TransactionType_EVM_CONTRACT_CALL ||
@@ -660,34 +676,65 @@ func (v *Validator) ValidateTransaction(tx *core.Transaction, currentHeight int6
 		return fmt.Errorf("transaction cannot be nil")
 	}
 
-	// Structure validation
+	// ========================================================================
+	// ⭐ NEW #1: Chain ID Validation - MUST BE FIRST
+	// ========================================================================
+	if err := ValidateChainIDMatch(tx.ChainId, v.config.Network.ChainID); err != nil {
+		v.metrics.RecordChainIDMismatch()
+		return fmt.Errorf("chain ID validation failed: %w", err)
+	}
+
+	// ========================================================================
+	// ⭐ NEW #2: Replay Attack Detection
+	// ========================================================================
+	if v.replayDetector != nil {
+		if err := v.replayDetector.CheckReplayV3(
+			tx.Hash,
+			tx.ChainId,
+			tx.From,
+			tx.Nonce,
+			currentHeight,
+		); err != nil {
+			v.metrics.RecordReplayAttempt()
+			return fmt.Errorf("replay detection failed: %w", err)
+		}
+	}
+
+	// ========================================================================
+	// ⭐ NEW #3: Timing Validation (prevent old/future transactions)
+	// ========================================================================
+	if err := ValidateTransactionTimingV3(tx.Timestamp, v.replayConfig); err != nil {
+		v.metrics.RecordTimeBasedExpiration()
+		return fmt.Errorf("timing validation failed: %w", err)
+	}
+
+	// Structure validation (unchanged)
 	if err := v.validateStructure(tx); err != nil {
 		return fmt.Errorf("structure validation failed: %v", err)
 	}
 
-	// Hash validation
+	// Hash validation (unchanged)
 	if err := v.validateHash(tx); err != nil {
 		return fmt.Errorf("hash validation failed: %v", err)
 	}
 
-	// Shard validation
+	// Shard validation (unchanged)
 	if err := v.validateShard(tx); err != nil {
 		return fmt.Errorf("shard validation failed: %v", err)
 	}
 
-	// Signature validation
+	// Signature validation (unchanged)
 	if err := v.validateSignature(tx); err != nil {
-		// Log invalid signature for security audit
 		security.LogInvalidSignature(tx.From, tx.Id)
 		return fmt.Errorf("signature validation failed: %v", err)
 	}
 
-	// Business logic validation
+	// Business logic validation (unchanged)
 	if err := v.validateBusinessLogic(tx, stateReader); err != nil {
 		return fmt.Errorf("business logic validation failed: %v", err)
 	}
 
-	// ✅ NEW: Validate replay protection
+	// ✅ Validate replay protection (keep this - your existing code)
 	if err := v.ValidateReplayProtection(tx, currentHeight); err != nil {
 		return fmt.Errorf("replay protection validation failed: %w", err)
 	}
