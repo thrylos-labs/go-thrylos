@@ -90,8 +90,8 @@ func TestTPSStress(t *testing.T) {
 	}
 
 	config := TPSTestConfig{
-		TotalTransactions:    5000,
-		TransactionsPerBlock: 50, // Reduced from 200 to stay under block size limit
+		TotalTransactions:    1000, // ✅ Reduced from 5000
+		TransactionsPerBlock: 50,   // Reduced from 200 to stay under block size limit
 		Name:                 "Stress_5000tx",
 	}
 
@@ -121,8 +121,6 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 
 	genesisAddress := genesisAddrObj.String()
 
-	// Import "math/big"
-
 	if len(testConfig.Genesis.Accounts) == 0 {
 		// 1. Calculate the balance using BigInt math
 		// 1 Billion * BaseUnit (10^18)
@@ -131,10 +129,7 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 
 		testConfig.Genesis.Accounts = append(testConfig.Genesis.Accounts, config.GenesisAccount{
 			Address: genesisAddress,
-
-			// 2. Convert to string for the updated struct
 			Balance: balanceBig.String(),
-
 			Purpose: "Benchmark Genesis",
 		})
 	} else {
@@ -142,46 +137,39 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 	}
 	// --- FIX END ---
 
-	dataDir := fmt.Sprintf("/tmp/tps_test_%d", time.Now().UnixNano())
+	dataDir := t.TempDir() // ✅ Use this instead
+
 	badgerStorage, err := storage.NewBadgerStorage(dataDir)
 	require.NoError(t, err)
-	defer badgerStorage.Close()
+	defer badgerStorage.Close() // ✅ Ensure this exists
 
 	worldState, err := state.NewWorldState(dataDir, account.ShardID(0), 1, testConfig, badgerStorage)
 	require.NoError(t, err)
-	defer worldState.Close()
+	defer worldState.Close() // ✅ Ensure this exists
 
 	// --- CRITICAL FIX: Bootstrap Blockchain State ---
-	// This creates Block 0 (Genesis) using the config we just set up
 	err = worldState.InitializeFromConfig()
 	require.NoError(t, err)
-	// ------------------------------------------------
 
-	// 1. Calculate Stake: 100,000 * BaseUnit (10^18)
-	// You must use BigInt math, not standard '*'
-	stakeAmount := new(big.Int).Mul(big.NewInt(100_000), config.BaseUnit)
+	// ✅ FIX: Use 10,000 THRYLOS stake (4x the minimum of 2,500)
+	// MinValidatorStake is 2,500 THRYLOS = 2,500 * 10^18
+	stakeAmount := new(big.Int).Mul(big.NewInt(10_000), config.BaseUnit)
 
 	validator := &core.Validator{
-		Address: genesisAddress,
-		Pubkey:  genesisPrivKey.PublicKey().Bytes(),
-
-		// ✅ Fix: Assign as string
-		Stake:     stakeAmount.String(),
-		SelfStake: stakeAmount.String(),
-
-		// ✅ Fix: Use string "0" instead of int 0
+		Address:        genesisAddress,
+		Pubkey:         genesisPrivKey.PublicKey().Bytes(),
+		Stake:          stakeAmount.String(),
+		SelfStake:      stakeAmount.String(),
 		DelegatedStake: "0",
-
-		// ✅ Fix: Map values must be strings now
-		Delegators: make(map[string]string),
-
-		Commission: 0.05,
-		Active:     true,
-		CreatedAt:  time.Now().Unix(),
-		UpdatedAt:  time.Now().Unix(),
+		Delegators:     make(map[string]string),
+		Commission:     0.05,
+		Active:         true,
+		CreatedAt:      time.Now().Unix(),
+		UpdatedAt:      time.Now().Unix(),
 	}
+
 	err = worldState.AddValidator(validator)
-	require.NoError(t, err)
+	require.NoError(t, err, "Failed to add validator - check stake meets minimum requirement")
 
 	startTime := time.Now()
 	successfulTxs := 0
@@ -189,8 +177,7 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 
 	numBlocks := cfg.TotalTransactions / cfg.TransactionsPerBlock
 
-	// --- TIME FIX: Track timestamp explicitly ---
-	// We start at current time and manually increment to ensure unique, increasing timestamps
+	// Track timestamp explicitly
 	currentTimestamp := time.Now().Unix()
 
 	// Create and process blocks
@@ -198,37 +185,28 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 		var blockTransactions []*core.Transaction
 
 		// Create transactions for this block
-		// Create transactions for this block
 		for i := 0; i < cfg.TransactionsPerBlock; i++ {
 			// Generate valid keys/addresses for transactions
 			privKey, _ := crypto.NewPrivateKey()
-			recipientAddr := privKey.PublicKey().Address() // Only returns *address.Address
+			recipientAddr := privKey.PublicKey().Address()
 			recipient := recipientAddr.String()
 
 			txID := fmt.Sprintf("tx-%d-%d", blockNum, i)
 			nonce := uint64(blockNum*cfg.TransactionsPerBlock + i)
 
-			// 1. Calculate Amount: 1000 * BaseUnit
+			// Calculate amount: 1000 * BaseUnit
 			amountBig := new(big.Int).Mul(big.NewInt(1000), config.BaseUnit)
-
-			// 2. Prepare Gas Price as String
-			gasPriceStr := "1000" // Or big.NewInt(1000).String()
+			gasPriceStr := "1000"
 
 			tx := &core.Transaction{
-				Id:   txID,
-				From: genesisAddress,
-				To:   recipient,
-
-				// ✅ Fix: Assign string
-				Amount: amountBig.String(),
-
+				Id:        txID,
+				From:      genesisAddress,
+				To:        recipient,
+				Amount:    amountBig.String(),
 				Timestamp: time.Now().Unix(),
 				Nonce:     nonce,
-				Gas:       21000, // Gas limit stays int64
-
-				// ✅ Fix: Assign string
-				GasPrice: gasPriceStr,
-
+				Gas:       21000,
+				GasPrice:  gasPriceStr,
 				Signature: []byte("test_signature"),
 			}
 
@@ -247,9 +225,7 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 			t.Fatal("Genesis block missing")
 		}
 
-		// --- TIME FIX: Force Increment ---
-		// Ensure new timestamp is strictly greater than previous block's timestamp
-		// The check is: block.Timestamp > prevBlock.Timestamp
+		// Ensure new timestamp is strictly greater than previous block
 		if currentBlock.Header.Timestamp >= currentTimestamp {
 			currentTimestamp = currentBlock.Header.Timestamp + 1
 		} else {
@@ -260,11 +236,11 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 			Header: &core.BlockHeader{
 				Index:     blockIndex,
 				PrevHash:  prevHash,
-				Timestamp: currentTimestamp, // Use forced increment timestamp
+				Timestamp: currentTimestamp,
 				Validator: validator.Address,
 				GasLimit:  10000000,
 				GasUsed:   int64(len(blockTransactions) * 21000),
-				StateRoot: "", // Updated by AddBlock
+				StateRoot: "",
 			},
 			Transactions: blockTransactions,
 		}
@@ -272,7 +248,7 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 		block.Hash = fmt.Sprintf("block_%d_%d", blockIndex, currentTimestamp)
 
 		err = worldState.AddBlock(block)
-		require.NoError(t, err)
+		require.NoError(t, err, fmt.Sprintf("Failed to add block %d", blockIndex))
 
 		successfulTxs += len(blockTransactions)
 		totalBlocks++

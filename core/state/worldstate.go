@@ -359,15 +359,9 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 		return fmt.Errorf("block validation failed: %v", err)
 	}
 
-	// ✅ FIX: Use ExecuteTransaction which handles account locking
+	// ✅ FIX: Keep chainMu locked - no unlock/relock
 	for _, tx := range block.Transactions {
-		// Temporarily release chainMu to avoid deadlock
-		ws.chainMu.Unlock()
-
-		receipt, err := ws.ExecuteTransaction(tx) // This locks accounts properly
-
-		ws.chainMu.Lock() // Re-acquire
-
+		receipt, err := ws.ExecuteTransaction(tx)
 		if err != nil {
 			return fmt.Errorf("failed to execute transaction %s: %v", tx.Id, err)
 		}
@@ -393,7 +387,6 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 
 	block.Header.StateRoot = ws.stateRoot
 
-	// Save block + index by height
 	if err := ws.db.SaveBlock(block); err != nil {
 		return fmt.Errorf("failed to save block: %v", err)
 	}
@@ -401,7 +394,6 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 		return fmt.Errorf("failed to save block by height: %v", err)
 	}
 
-	// Commit block + accounts + validators (unchanged)
 	accounts := ws.accountManager.GetAllAccounts()
 	var updatedAccounts []*core.Account
 	for _, account := range accounts {
@@ -437,30 +429,12 @@ func (ws *WorldState) ValidateTransaction(tx *core.Transaction) error {
 }
 
 // ExecuteTransaction executes a single transaction (helper method)
+// worldstate.go - Updated ExecuteTransaction
 func (ws *WorldState) ExecuteTransaction(tx *core.Transaction) (*transaction.ExecutionReceipt, error) {
-	// 1. Identify accounts to lock
-	accountsToLock := []string{tx.From}
-	if tx.To != "" && tx.To != tx.From {
-		accountsToLock = append(accountsToLock, tx.To)
-	}
+	// ✅ REMOVED MANUAL LOCKING
+	// The executor's AtomicTransfer handles all locking internally
+	// to prevent deadlock and ensure proper lock ordering
 
-	// 2. ✅ FIX: Sort ALL addresses (not just 2)
-	sort.Strings(accountsToLock)
-
-	// 3. Acquire locks in sorted order
-	for _, addr := range accountsToLock {
-		ws.accountMu.Lock(addr)
-	}
-
-	// 4. ✅ FIX: Unlock in REVERSE order (LIFO)
-	defer func() {
-		// Unlock in reverse order for proper LIFO semantics
-		for i := len(accountsToLock) - 1; i >= 0; i-- {
-			ws.accountMu.Unlock(accountsToLock[i])
-		}
-	}()
-
-	// 5. Execute logic
 	return ws.txExecutor.ExecuteTransaction(tx, ws.accountManager)
 }
 
@@ -874,7 +848,12 @@ func (ws *WorldState) addValidator(validator *core.Validator) error {
 		return fmt.Errorf("validator public key cannot be empty")
 	}
 
-	if validator.Stake < ws.config.Staking.MinValidatorStake {
+	// ✅ FIX: Compare BigInts, not strings!
+	stakeBig := math.ParseBigInt(validator.Stake)
+	minStakeBig := math.ParseBigInt(ws.config.Staking.MinValidatorStake)
+
+	// Compare: if stake < minStake, reject
+	if stakeBig.Cmp(minStakeBig) < 0 {
 		return fmt.Errorf("validator stake %s below minimum %s",
 			validator.Stake, ws.config.Staking.MinValidatorStake)
 	}
@@ -886,7 +865,6 @@ func (ws *WorldState) addValidator(validator *core.Validator) error {
 
 	// Initialize validator fields if needed
 	if validator.Delegators == nil {
-		// ✅ FIX: Change int64 to string
 		validator.Delegators = make(map[string]string)
 	}
 
@@ -2561,7 +2539,12 @@ func (ws *WorldState) GetAccountMutex() *ShardedMutex {
 
 // AtomicTransfer performs an atomic transfer between two accounts
 func (ws *WorldState) AtomicTransfer(fromAddr, toAddr string, updateFunc func(sender, receiver *core.Account) error) error {
-	addresses := []string{fromAddr, toAddr}
+	// ✅ FIX: Deduplicate addresses for self-transfers
+	addresses := []string{fromAddr}
+	if toAddr != fromAddr {
+		addresses = append(addresses, toAddr)
+	}
+
 	batch := ws.accountMu.BeginBatch(addresses)
 	batch.Lock()
 	defer batch.Rollback()
@@ -2571,9 +2554,15 @@ func (ws *WorldState) AtomicTransfer(fromAddr, toAddr string, updateFunc func(se
 		return fmt.Errorf("failed to get sender account: %w", err)
 	}
 
-	receiver, err := ws.accountManager.GetAccount(toAddr)
-	if err != nil {
-		return fmt.Errorf("failed to get receiver account: %w", err)
+	// ✅ FIX: Handle self-transfer
+	var receiver *core.Account
+	if toAddr == fromAddr {
+		receiver = sender // Same account
+	} else {
+		receiver, err = ws.accountManager.GetAccount(toAddr)
+		if err != nil {
+			return fmt.Errorf("failed to get receiver account: %w", err)
+		}
 	}
 
 	if !batch.ValidateVersions() {
@@ -2584,6 +2573,7 @@ func (ws *WorldState) AtomicTransfer(fromAddr, toAddr string, updateFunc func(se
 		return err
 	}
 
+	// Update sender
 	if err := ws.accountManager.UpdateAccount(sender); err != nil {
 		return fmt.Errorf("failed to update sender: %w", err)
 	}
@@ -2591,11 +2581,14 @@ func (ws *WorldState) AtomicTransfer(fromAddr, toAddr string, updateFunc func(se
 		return fmt.Errorf("failed to save sender: %w", err)
 	}
 
-	if err := ws.accountManager.UpdateAccount(receiver); err != nil {
-		return fmt.Errorf("failed to update receiver: %w", err)
-	}
-	if err := ws.state.SaveAccount(receiver); err != nil {
-		return fmt.Errorf("failed to save receiver: %w", err)
+	// ✅ FIX: Only update receiver if it's a different account
+	if toAddr != fromAddr {
+		if err := ws.accountManager.UpdateAccount(receiver); err != nil {
+			return fmt.Errorf("failed to update receiver: %w", err)
+		}
+		if err := ws.state.SaveAccount(receiver); err != nil {
+			return fmt.Errorf("failed to save receiver: %w", err)
+		}
 	}
 
 	batch.Commit()
