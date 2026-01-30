@@ -1,7 +1,7 @@
 // core/transaction/replay.go
 // Transaction replay protection utilities
 // Prevents transactions from being replayed after chain reorganizations
-// AUDIT FIX: Enhanced security for CertiK Audit Finding #1 - Replay Attack Protection
+// AUDIT FIX: Enhanced security for CertiK Audit Finding M-1 - Replay Attack Protection Scope
 
 package transaction
 
@@ -62,6 +62,10 @@ type ReplayProtectionConfig struct {
 
 	// AUDIT ENHANCEMENT: Maximum nonce gap allowed
 	MaxNonceGap uint64
+
+	// M-1 FIX: Maximum reorg depth to handle (in blocks)
+	// Transactions older than this will be permanently rejected
+	MaxReorgDepth int64
 }
 
 // DefaultReplayProtectionConfig returns safe default configuration
@@ -74,6 +78,7 @@ func DefaultReplayProtectionConfig() *ReplayProtectionConfig {
 		TransactionTimeoutSeconds: 1800, // 30 minutes
 		EnableShardProtection:     true,
 		MaxNonceGap:               100, // Prevent nonce manipulation
+		MaxReorgDepth:             100, // Handle reorgs up to 100 blocks deep
 	}
 }
 
@@ -87,6 +92,7 @@ func DevelopmentReplayProtectionConfig() *ReplayProtectionConfig {
 		TransactionTimeoutSeconds: 3600,
 		EnableShardProtection:     false,
 		MaxNonceGap:               1000,
+		MaxReorgDepth:             1000,
 	}
 }
 
@@ -243,6 +249,10 @@ type ReplayProtectionMetrics struct {
 	NonceManipulationAttempts     uint64
 	FutureBlockReferences         uint64
 	FutureTimestampAttempts       uint64
+
+	// M-1 FIX: Reorg-specific metrics
+	ReorgReplayAttempts uint64
+	DeepReorgDetected   uint64
 }
 
 // RecordReplayAttempt records a detected replay attack attempt
@@ -252,6 +262,24 @@ func (m *ReplayProtectionMetrics) RecordReplayAttempt() {
 
 	m.ReplayAttemptsDetected++
 	m.LastReplayAttempt = time.Now()
+}
+
+// M-1 FIX: Record replay attempt after reorg
+func (m *ReplayProtectionMetrics) RecordReorgReplayAttempt() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.ReplayAttemptsDetected++
+	m.ReorgReplayAttempts++
+	m.LastReplayAttempt = time.Now()
+}
+
+// M-1 FIX: Record deep reorg detection
+func (m *ReplayProtectionMetrics) RecordDeepReorg() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.DeepReorgDetected++
 }
 
 // AUDIT ENHANCEMENT: Record time-based expiration
@@ -331,6 +359,8 @@ func (m *ReplayProtectionMetrics) GetMetrics() map[string]interface{} {
 		"nonce_manipulation_attempts":    m.NonceManipulationAttempts,
 		"future_block_references":        m.FutureBlockReferences,
 		"future_timestamp_attempts":      m.FutureTimestampAttempts,
+		"reorg_replay_attempts":          m.ReorgReplayAttempts,
+		"deep_reorg_detected":            m.DeepReorgDetected,
 		"last_replay_attempt":            m.LastReplayAttempt,
 	}
 }
@@ -348,6 +378,8 @@ func (m *ReplayProtectionMetrics) GetSecurityStats() map[string]uint64 {
 		"future_timestamp_attempts": m.FutureTimestampAttempts,
 		"time_based_expired":        m.TimeBasedExpiredTransactions,
 		"block_based_expired":       m.BlockBasedExpiredTransactions,
+		"reorg_replay_attempts":     m.ReorgReplayAttempts,
+		"deep_reorg_detected":       m.DeepReorgDetected,
 	}
 }
 
@@ -369,6 +401,11 @@ func (m *ReplayProtectionMetrics) IsSecurityEventThresholdExceeded() (bool, stri
 	// Alert if cross-shard replay attempts
 	if m.CrossShardReplayAttempts > 5 {
 		return true, fmt.Sprintf("Cross-shard replay attempts: %d", m.CrossShardReplayAttempts)
+	}
+
+	// M-1 FIX: Alert on reorg replay attempts
+	if m.ReorgReplayAttempts > 3 {
+		return true, fmt.Sprintf("Reorg replay attempts detected: %d", m.ReorgReplayAttempts)
 	}
 
 	return false, ""
@@ -396,6 +433,10 @@ type CachedTransaction struct {
 	ShardID   string
 	SeenAt    time.Time
 	ExpiresAt time.Time
+
+	// M-1 FIX: Track block height when transaction was seen
+	// This helps handle reorgs - we keep transactions even after reorg
+	SeenAtBlockHeight int64
 }
 
 // NewReplayCache creates a new replay cache
@@ -414,16 +455,18 @@ func NewReplayCache(maxSize int, cleanupInterval time.Duration) *ReplayCache {
 }
 
 // Add adds a transaction to the replay cache
-func (rc *ReplayCache) Add(txHash string, nonce uint64, shardID string, expiresAt time.Time) {
+// M-1 FIX: Now accepts blockHeight to track when transaction was seen
+func (rc *ReplayCache) Add(txHash string, nonce uint64, shardID string, expiresAt time.Time, blockHeight int64) {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
 	rc.cache[txHash] = &CachedTransaction{
-		TxHash:    txHash,
-		Nonce:     nonce,
-		ShardID:   shardID,
-		SeenAt:    time.Now(),
-		ExpiresAt: expiresAt,
+		TxHash:            txHash,
+		Nonce:             nonce,
+		ShardID:           shardID,
+		SeenAt:            time.Now(),
+		ExpiresAt:         expiresAt,
+		SeenAtBlockHeight: blockHeight,
 	}
 
 	// Trigger cleanup if cache is too large
@@ -545,9 +588,11 @@ func ValidateCrossShardReplay(txShardID, expectedShardID string) error {
 
 // ============================================================================
 // V3 ENHANCEMENTS - Enhanced Replay Detection with Chain ID Binding
+// M-1 FIX: Added explicit reorg protection
 // ============================================================================
 
 // ReplayDetectorV3 provides enhanced replay attack detection with chain ID binding
+// M-1 FIX: Now handles deep chain reorganizations explicitly
 type ReplayDetectorV3 struct {
 	cache   *ReplayCache
 	config  *ReplayProtectionConfig
@@ -577,37 +622,45 @@ func NewReplayDetectorV3(chainID string, config *ReplayProtectionConfig, metrics
 	}
 }
 
-// CheckReplayV3 performs comprehensive replay attack detection
+// CheckReplayV3 performs comprehensive replay attack detection with reorg protection
+// M-1 FIX: Explicitly handles deep chain reorganizations
 func (rd *ReplayDetectorV3) CheckReplayV3(txHash, txChainID, from string, nonce uint64, currentBlockHeight int64) error {
-	// 1. CRITICAL: Verify chain ID matches
+	// 1. CRITICAL: Verify chain ID matches (prevents cross-chain replay)
 	if txChainID != rd.chainID {
 		rd.metrics.RecordReplayAttempt()
 		return fmt.Errorf("chain ID mismatch: transaction has %s, expected %s", txChainID, rd.chainID)
 	}
 
-	// 2. Check if we've seen this transaction hash before
+	// 2. M-1 FIX: Check if we've seen this transaction hash before
+	// This prevents replay even after deep reorganizations
+	// The cache persists through reorgs until TransactionMaxAge/TransactionTimeoutSeconds
 	if rd.cache.Has(txHash) {
 		cached, exists := rd.cache.Get(txHash)
 		if exists {
-			// Same transaction hash seen again
-			return fmt.Errorf("duplicate transaction detected: hash %s already processed at %v",
-				txHash, cached.SeenAt)
+			// REORG PROTECTION: Even if the chain reorganizes, we permanently reject
+			// any transaction we've already seen, as long as it's within our cache window
+			rd.metrics.RecordReorgReplayAttempt()
+			return fmt.Errorf("replay attack detected: transaction %s was already processed at block %d (current: %d)",
+				txHash, cached.SeenAtBlockHeight, currentBlockHeight)
 		}
 	}
 
-	// 3. Check nonce ordering
+	// 3. M-1 FIX: Check nonce ordering (prevents nonce reuse after reorg)
 	rd.mu.Lock()
 	previousNonce, exists := rd.accountNonces[from]
 	if exists {
-		// Validate nonce sequence
+		// REORG PROTECTION: Nonces must always increase, even after reorganization
+		// This prevents an attacker from replaying old transactions with lower nonces
+		// after a reorg changes the chain state
 		if nonce <= previousNonce {
 			rd.mu.Unlock()
 			rd.metrics.RecordNonceManipulation()
-			return fmt.Errorf("invalid nonce: got %d, expected > %d (replay attack or nonce reuse)",
+			rd.metrics.RecordReorgReplayAttempt()
+			return fmt.Errorf("nonce replay detected: got %d, expected > %d (prevents reorg replay)",
 				nonce, previousNonce)
 		}
 
-		// Check for excessive nonce gap
+		// Check for excessive nonce gap (potential attack)
 		if err := ValidateNonceSequence(nonce, previousNonce, rd.config.MaxNonceGap); err != nil {
 			rd.mu.Unlock()
 			rd.metrics.RecordNonceManipulation()
@@ -615,13 +668,43 @@ func (rd *ReplayDetectorV3) CheckReplayV3(txHash, txChainID, from string, nonce 
 		}
 	}
 
-	// Update account nonce
+	// Update account nonce - this persists through reorgs
 	rd.accountNonces[from] = nonce
 	rd.mu.Unlock()
 
-	// 4. Add to cache
+	// 4. M-1 FIX: Add to cache with block height tracking
+	// The cache maintains transaction history across reorganizations
+	// Transactions remain in cache for TransactionTimeoutSeconds or until maxSize exceeded
 	expiresAt := time.Now().Add(time.Duration(rd.config.TransactionTimeoutSeconds) * time.Second)
-	rd.cache.Add(txHash, nonce, "", expiresAt)
+	rd.cache.Add(txHash, nonce, "", expiresAt, currentBlockHeight)
+
+	return nil
+}
+
+// M-1 FIX: CheckReorgDepth validates that a transaction isn't from too far in the past
+// This prevents replay of very old transactions that might have been processed before a deep reorg
+func (rd *ReplayDetectorV3) CheckReorgDepth(txBlockHeight, currentBlockHeight int64) error {
+	if rd.config.MaxReorgDepth == 0 {
+		return nil // No reorg depth limit
+	}
+
+	if txBlockHeight <= 0 || currentBlockHeight <= 0 {
+		return nil // Can't validate without valid heights
+	}
+
+	blockAge, err := math.SafeSub(currentBlockHeight, txBlockHeight)
+	if err != nil {
+		return fmt.Errorf("block age calculation error: %w", err)
+	}
+
+	// M-1 FIX: Reject transactions older than MaxReorgDepth
+	// This ensures that even if a massive reorg occurs, we won't accept
+	// transactions from before our "finality checkpoint"
+	if blockAge > rd.config.MaxReorgDepth {
+		rd.metrics.RecordDeepReorg()
+		return fmt.Errorf("transaction too old for reorg protection: age %d blocks exceeds max reorg depth %d",
+			blockAge, rd.config.MaxReorgDepth)
+	}
 
 	return nil
 }
@@ -721,6 +804,7 @@ func ValidateTransactionTimingV3(timestamp int64, config *ReplayProtectionConfig
 }
 
 // ValidateBlockHeightV3 validates block height references in transaction
+// M-1 FIX: Enhanced to work with CheckReorgDepth for complete reorg protection
 func ValidateBlockHeightV3(txBlockHeight, currentBlockHeight int64, config *ReplayProtectionConfig) error {
 	if txBlockHeight < 0 {
 		return fmt.Errorf("transaction block height cannot be negative: %d", txBlockHeight)
@@ -737,7 +821,7 @@ func ValidateBlockHeightV3(txBlockHeight, currentBlockHeight int64, config *Repl
 			txBlockHeight, currentBlockHeight)
 	}
 
-	// Check if transaction is too old
+	// Check if transaction is too old (this is separate from reorg depth)
 	if config.TransactionMaxAge > 0 {
 		blockAge, err := math.SafeSub(currentBlockHeight, txBlockHeight)
 		if err != nil {

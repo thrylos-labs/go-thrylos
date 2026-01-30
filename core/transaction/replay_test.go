@@ -1,6 +1,7 @@
 // core/transaction/replay_test.go
 // Comprehensive tests for replay protection
 // AUDIT FIX: CertiK Audit Finding #2 - Test Coverage
+// M-1 FIX: Added comprehensive reorg protection tests
 
 package transaction
 
@@ -28,7 +29,7 @@ func TestReplayProtection_Validate_ChainID(t *testing.T) {
 				FinalizedBlockHash:   "hash123",
 				FinalizedBlockHeight: 100,
 				Timestamp:            time.Now().Unix(),
-				ShardID:              "shard-1", // Added ShardID
+				ShardID:              "shard-1",
 			},
 			wantErr: false,
 		},
@@ -37,7 +38,7 @@ func TestReplayProtection_Validate_ChainID(t *testing.T) {
 			rp: &ReplayProtection{
 				FinalizedBlockHash:   "hash123",
 				FinalizedBlockHeight: 100,
-				ShardID:              "shard-1", // Added ShardID
+				ShardID:              "shard-1",
 			},
 			wantErr: true,
 		},
@@ -96,7 +97,7 @@ func TestReplayProtection_Validate_BlockAge(t *testing.T) {
 				FinalizedBlockHash:   "hash123",
 				FinalizedBlockHeight: tt.finalizedHeight,
 				Timestamp:            time.Now().Unix(),
-				ShardID:              "shard-1", // Added ShardID
+				ShardID:              "shard-1",
 			}
 
 			err := rp.Validate(config, tt.currentHeight)
@@ -145,7 +146,7 @@ func TestReplayProtection_Validate_TimeBasedExpiration(t *testing.T) {
 				FinalizedBlockHash:   "hash123",
 				FinalizedBlockHeight: 100,
 				Timestamp:            tt.timestamp,
-				ShardID:              "shard-1", // Added ShardID
+				ShardID:              "shard-1",
 			}
 
 			err := rp.Validate(config, 150)
@@ -310,6 +311,8 @@ func TestReplayProtectionMetrics_ThreadSafety(t *testing.T) {
 				metrics.RecordBlockBasedExpiration()
 				metrics.RecordCrossShardReplayAttempt()
 				metrics.RecordNonceManipulation()
+				metrics.RecordReorgReplayAttempt()
+				metrics.RecordDeepReorg()
 				metrics.GetMetrics()
 			}
 			done <- true
@@ -343,6 +346,32 @@ func TestReplayProtectionMetrics_RecordReplayAttempt(t *testing.T) {
 	}
 }
 
+// M-1 FIX: Test reorg-specific metrics
+func TestReplayProtectionMetrics_ReorgMetrics(t *testing.T) {
+	metrics := &ReplayProtectionMetrics{}
+
+	// Record reorg replay attempt
+	metrics.RecordReorgReplayAttempt()
+	if metrics.ReorgReplayAttempts != 1 {
+		t.Errorf("Expected ReorgReplayAttempts to be 1, got %d", metrics.ReorgReplayAttempts)
+	}
+	if metrics.ReplayAttemptsDetected != 1 {
+		t.Errorf("Expected ReplayAttemptsDetected to be 1, got %d", metrics.ReplayAttemptsDetected)
+	}
+
+	// Record deep reorg
+	metrics.RecordDeepReorg()
+	if metrics.DeepReorgDetected != 1 {
+		t.Errorf("Expected DeepReorgDetected to be 1, got %d", metrics.DeepReorgDetected)
+	}
+
+	// Check security stats
+	stats := metrics.GetSecurityStats()
+	if stats["reorg_replay_attempts"] != 1 {
+		t.Errorf("Expected reorg_replay_attempts to be 1, got %d", stats["reorg_replay_attempts"])
+	}
+}
+
 // ============================================================================
 // REPLAY CACHE TESTS
 // ============================================================================
@@ -353,9 +382,10 @@ func TestReplayCache_AddAndHas(t *testing.T) {
 
 	txHash := "tx123"
 	expiresAt := time.Now().Add(time.Hour)
+	blockHeight := int64(100)
 
 	// Add transaction
-	cache.Add(txHash, 1, "shard-1", expiresAt)
+	cache.Add(txHash, 1, "shard-1", expiresAt, blockHeight)
 
 	// Check it exists
 	if !cache.Has(txHash) {
@@ -374,9 +404,10 @@ func TestReplayCache_Expiration(t *testing.T) {
 
 	txHash := "tx123"
 	expiresAt := time.Now().Add(time.Millisecond * 200)
+	blockHeight := int64(100)
 
 	// Add transaction
-	cache.Add(txHash, 1, "shard-1", expiresAt)
+	cache.Add(txHash, 1, "shard-1", expiresAt, blockHeight)
 
 	// Should exist initially
 	if !cache.Has(txHash) {
@@ -400,9 +431,10 @@ func TestReplayCache_Get(t *testing.T) {
 	nonce := uint64(42)
 	shardID := "shard-1"
 	expiresAt := time.Now().Add(time.Hour)
+	blockHeight := int64(100)
 
 	// Add transaction
-	cache.Add(txHash, nonce, shardID, expiresAt)
+	cache.Add(txHash, nonce, shardID, expiresAt, blockHeight)
 
 	// Retrieve it
 	cached, exists := cache.Get(txHash)
@@ -417,6 +449,11 @@ func TestReplayCache_Get(t *testing.T) {
 	if cached.ShardID != shardID {
 		t.Errorf("Expected shardID %s, got %s", shardID, cached.ShardID)
 	}
+
+	// M-1 FIX: Check block height is tracked
+	if cached.SeenAtBlockHeight != blockHeight {
+		t.Errorf("Expected block height %d, got %d", blockHeight, cached.SeenAtBlockHeight)
+	}
 }
 
 func TestReplayCache_Size(t *testing.T) {
@@ -430,7 +467,7 @@ func TestReplayCache_Size(t *testing.T) {
 
 	// Add transactions
 	for i := 0; i < 10; i++ {
-		cache.Add("tx"+string(rune(i)), uint64(i), "shard-1", time.Now().Add(time.Hour))
+		cache.Add("tx"+string(rune(i)), uint64(i), "shard-1", time.Now().Add(time.Hour), int64(100+i))
 	}
 
 	size := cache.Size()
@@ -546,7 +583,346 @@ func TestValidateCrossShardReplay(t *testing.T) {
 }
 
 // ============================================================================
-// INTEGRATION TESTS
+// M-1 FIX: REPLAY DETECTOR V3 TESTS (REORG PROTECTION)
+// ============================================================================
+
+func TestReplayDetectorV3_CheckReplayV3_ChainIDMismatch(t *testing.T) {
+	detector := NewReplayDetectorV3("thrylos-mainnet", nil, nil)
+	defer detector.Stop()
+
+	// Try with wrong chain ID
+	err := detector.CheckReplayV3("tx123", "wrong-chain", "addr1", 1, 100)
+	if err == nil {
+		t.Error("Expected chain ID mismatch error")
+	}
+
+	// Verify metric was recorded
+	if detector.metrics.ReplayAttemptsDetected == 0 {
+		t.Error("Expected replay attempt to be recorded")
+	}
+}
+
+func TestReplayDetectorV3_CheckReplayV3_DuplicateTransaction(t *testing.T) {
+	detector := NewReplayDetectorV3("thrylos-mainnet", nil, nil)
+	defer detector.Stop()
+
+	txHash := "tx123"
+	chainID := "thrylos-mainnet"
+	from := "addr1"
+	nonce := uint64(1)
+	blockHeight := int64(100)
+
+	// First submission should succeed
+	err := detector.CheckReplayV3(txHash, chainID, from, nonce, blockHeight)
+	if err != nil {
+		t.Errorf("First submission should succeed: %v", err)
+	}
+
+	// Second submission with same hash should fail (REORG PROTECTION)
+	err = detector.CheckReplayV3(txHash, chainID, from, nonce+1, blockHeight+1)
+	if err == nil {
+		t.Error("Expected duplicate transaction error (replay attack)")
+	}
+
+	// Verify reorg replay metric was recorded
+	if detector.metrics.ReorgReplayAttempts == 0 {
+		t.Error("Expected reorg replay attempt to be recorded")
+	}
+}
+
+func TestReplayDetectorV3_CheckReplayV3_NonceReplay(t *testing.T) {
+	detector := NewReplayDetectorV3("thrylos-mainnet", nil, nil)
+	defer detector.Stop()
+
+	chainID := "thrylos-mainnet"
+	from := "addr1"
+	blockHeight := int64(100)
+
+	// Submit transaction with nonce 5
+	err := detector.CheckReplayV3("tx1", chainID, from, 5, blockHeight)
+	if err != nil {
+		t.Errorf("First submission should succeed: %v", err)
+	}
+
+	// Try to submit with nonce 3 (lower than previous)
+	// This simulates replay after reorg
+	err = detector.CheckReplayV3("tx2", chainID, from, 3, blockHeight+1)
+	if err == nil {
+		t.Error("Expected nonce replay error (prevents reorg replay)")
+	}
+
+	// Verify nonce manipulation was recorded
+	if detector.metrics.NonceManipulationAttempts == 0 {
+		t.Error("Expected nonce manipulation to be recorded")
+	}
+}
+
+func TestReplayDetectorV3_CheckReplayV3_NonceSequence(t *testing.T) {
+	detector := NewReplayDetectorV3("thrylos-mainnet", nil, nil)
+	defer detector.Stop()
+
+	chainID := "thrylos-mainnet"
+	from := "addr1"
+	blockHeight := int64(100)
+
+	// Submit transaction with nonce 1
+	err := detector.CheckReplayV3("tx1", chainID, from, 1, blockHeight)
+	if err != nil {
+		t.Errorf("Nonce 1 should succeed: %v", err)
+	}
+
+	// Submit with nonce 2 (valid increment)
+	err = detector.CheckReplayV3("tx2", chainID, from, 2, blockHeight+1)
+	if err != nil {
+		t.Errorf("Nonce 2 should succeed: %v", err)
+	}
+
+	// Submit with nonce 5 (valid but larger gap)
+	err = detector.CheckReplayV3("tx3", chainID, from, 5, blockHeight+2)
+	if err != nil {
+		t.Errorf("Nonce 5 should succeed: %v", err)
+	}
+}
+
+func TestReplayDetectorV3_CheckReplayV3_ExcessiveNonceGap(t *testing.T) {
+	config := DefaultReplayProtectionConfig()
+	config.MaxNonceGap = 10 // Small gap for testing
+
+	detector := NewReplayDetectorV3("thrylos-mainnet", config, nil)
+	defer detector.Stop()
+
+	chainID := "thrylos-mainnet"
+	from := "addr1"
+	blockHeight := int64(100)
+
+	// Submit transaction with nonce 1
+	err := detector.CheckReplayV3("tx1", chainID, from, 1, blockHeight)
+	if err != nil {
+		t.Errorf("Nonce 1 should succeed: %v", err)
+	}
+
+	// Try to submit with nonce 50 (exceeds max gap of 10)
+	err = detector.CheckReplayV3("tx2", chainID, from, 50, blockHeight+1)
+	if err == nil {
+		t.Error("Expected excessive nonce gap error")
+	}
+
+	// Verify nonce manipulation was recorded
+	if detector.metrics.NonceManipulationAttempts == 0 {
+		t.Error("Expected nonce manipulation to be recorded")
+	}
+}
+
+func TestReplayDetectorV3_CheckReorgDepth(t *testing.T) {
+	config := DefaultReplayProtectionConfig()
+	config.MaxReorgDepth = 100
+
+	detector := NewReplayDetectorV3("thrylos-mainnet", config, nil)
+	defer detector.Stop()
+
+	tests := []struct {
+		name            string
+		txBlockHeight   int64
+		currentHeight   int64
+		wantErr         bool
+		expectDeepReorg bool
+	}{
+		{
+			name:            "within reorg depth",
+			txBlockHeight:   100,
+			currentHeight:   150,
+			wantErr:         false,
+			expectDeepReorg: false,
+		},
+		{
+			name:            "at reorg depth limit",
+			txBlockHeight:   100,
+			currentHeight:   200,
+			wantErr:         false,
+			expectDeepReorg: false,
+		},
+		{
+			name:            "exceeds reorg depth",
+			txBlockHeight:   100,
+			currentHeight:   201,
+			wantErr:         true,
+			expectDeepReorg: true,
+		},
+		{
+			name:            "far exceeds reorg depth",
+			txBlockHeight:   100,
+			currentHeight:   1000,
+			wantErr:         true,
+			expectDeepReorg: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initialDeepReorg := detector.metrics.DeepReorgDetected
+
+			err := detector.CheckReorgDepth(tt.txBlockHeight, tt.currentHeight)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CheckReorgDepth() error = %v, wantErr %v", err, tt.wantErr)
+			}
+
+			if tt.expectDeepReorg {
+				if detector.metrics.DeepReorgDetected == initialDeepReorg {
+					t.Error("Expected deep reorg metric to be incremented")
+				}
+			}
+		})
+	}
+}
+
+func TestReplayDetectorV3_GetNonce(t *testing.T) {
+	detector := NewReplayDetectorV3("thrylos-mainnet", nil, nil)
+	defer detector.Stop()
+
+	from := "addr1"
+
+	// Initially, no nonce should exist
+	_, exists := detector.GetNonce(from)
+	if exists {
+		t.Error("Expected no nonce for new account")
+	}
+
+	// Submit a transaction
+	err := detector.CheckReplayV3("tx1", "thrylos-mainnet", from, 5, 100)
+	if err != nil {
+		t.Errorf("Transaction should succeed: %v", err)
+	}
+
+	// Now nonce should exist
+	nonce, exists := detector.GetNonce(from)
+	if !exists {
+		t.Error("Expected nonce to exist after transaction")
+	}
+	if nonce != 5 {
+		t.Errorf("Expected nonce 5, got %d", nonce)
+	}
+}
+
+// ============================================================================
+// M-1 FIX: INTEGRATION TESTS FOR REORG SCENARIOS
+// ============================================================================
+
+func TestReplayDetectorV3_Integration_SimpleReorg(t *testing.T) {
+	detector := NewReplayDetectorV3("thrylos-mainnet", nil, nil)
+	defer detector.Stop()
+
+	chainID := "thrylos-mainnet"
+	from := "addr1"
+
+	// Step 1: Process transaction at block 100
+	err := detector.CheckReplayV3("tx1", chainID, from, 1, 100)
+	if err != nil {
+		t.Fatalf("First transaction should succeed: %v", err)
+	}
+
+	// Step 2: Simulate reorg back to block 95
+	// Chain reorganizes, but our cache still has tx1
+
+	// Step 3: Attacker tries to replay tx1
+	err = detector.CheckReplayV3("tx1", chainID, from, 2, 96)
+	if err == nil {
+		t.Error("Replay attack should be detected (cache hit)")
+	}
+
+	// Verify it was recorded as reorg replay attempt
+	if detector.metrics.ReorgReplayAttempts == 0 {
+		t.Error("Expected reorg replay attempt to be recorded")
+	}
+}
+
+func TestReplayDetectorV3_Integration_DeepReorgWithOldTransaction(t *testing.T) {
+	config := DefaultReplayProtectionConfig()
+	config.MaxReorgDepth = 100
+
+	detector := NewReplayDetectorV3("thrylos-mainnet", config, nil)
+	defer detector.Stop()
+
+	chainID := "thrylos-mainnet"
+	from := "addr1"
+
+	// Process transaction at block 100
+	err := detector.CheckReplayV3("tx1", chainID, from, 1, 100)
+	if err != nil {
+		t.Fatalf("First transaction should succeed: %v", err)
+	}
+
+	// Simulate deep reorg: current block is now 250
+	// Transaction is now 150 blocks old (exceeds MaxReorgDepth of 100)
+	err = detector.CheckReorgDepth(100, 250)
+	if err == nil {
+		t.Error("Transaction should be rejected due to reorg depth")
+	}
+
+	// Verify deep reorg was recorded
+	if detector.metrics.DeepReorgDetected == 0 {
+		t.Error("Expected deep reorg to be recorded")
+	}
+}
+
+func TestReplayDetectorV3_Integration_MultipleAccountsAfterReorg(t *testing.T) {
+	detector := NewReplayDetectorV3("thrylos-mainnet", nil, nil)
+	defer detector.Stop()
+
+	chainID := "thrylos-mainnet"
+	blockHeight := int64(100)
+
+	// Process transactions from multiple accounts
+	accounts := []string{"addr1", "addr2", "addr3"}
+	for i, account := range accounts {
+		err := detector.CheckReplayV3("tx"+string(rune(i)), chainID, account, uint64(i+1), blockHeight)
+		if err != nil {
+			t.Errorf("Transaction for %s should succeed: %v", account, err)
+		}
+	}
+
+	// Simulate reorg - try to replay with lower nonces
+	for i, account := range accounts {
+		err := detector.CheckReplayV3("tx_replay"+string(rune(i)), chainID, account, uint64(i), blockHeight+1)
+		if err == nil {
+			t.Errorf("Replay for %s should be rejected (nonce too low)", account)
+		}
+	}
+
+	// Verify all were recorded as nonce manipulation
+	if detector.metrics.NonceManipulationAttempts != 3 {
+		t.Errorf("Expected 3 nonce manipulation attempts, got %d", detector.metrics.NonceManipulationAttempts)
+	}
+}
+
+func TestReplayDetectorV3_Integration_CacheExpirationDuringReorg(t *testing.T) {
+	config := DefaultReplayProtectionConfig()
+	config.TransactionTimeoutSeconds = 1 // 1 second for fast test
+
+	detector := NewReplayDetectorV3("thrylos-mainnet", config, nil)
+	defer detector.Stop()
+
+	chainID := "thrylos-mainnet"
+	from := "addr1"
+	blockHeight := int64(100)
+
+	// Process transaction
+	err := detector.CheckReplayV3("tx1", chainID, from, 1, blockHeight)
+	if err != nil {
+		t.Fatalf("First transaction should succeed: %v", err)
+	}
+
+	// Wait for cache to expire
+	time.Sleep(2 * time.Second)
+
+	// After expiration, cache won't block, but nonce still will
+	err = detector.CheckReplayV3("tx1", chainID, from, 1, blockHeight+10)
+	if err == nil {
+		t.Error("Should still be rejected due to nonce check (even though cache expired)")
+	}
+}
+
+// ============================================================================
+// INTEGRATION TESTS (EXISTING)
 // ============================================================================
 
 func TestReplayProtection_Integration_ChainReorg(t *testing.T) {
@@ -574,7 +950,7 @@ func TestReplayProtection_Integration_ChainReorg(t *testing.T) {
 }
 
 func TestReplayProtection_Integration_CrossShardAttack(t *testing.T) {
-	metrics := &ReplayProtectionMetrics{} // ✅ Removed unused config
+	metrics := &ReplayProtectionMetrics{}
 
 	// Transaction from shard-1
 	txShardID := "shard-1"
@@ -617,6 +993,170 @@ func TestReplayProtection_Integration_NonceManipulation(t *testing.T) {
 }
 
 // ============================================================================
+// HELPER FUNCTION TESTS
+// ============================================================================
+
+func TestValidateChainIDMatch(t *testing.T) {
+	tests := []struct {
+		name            string
+		txChainID       string
+		expectedChainID string
+		wantErr         bool
+	}{
+		{
+			name:            "exact match",
+			txChainID:       "thrylos-mainnet",
+			expectedChainID: "thrylos-mainnet",
+			wantErr:         false,
+		},
+		{
+			name:            "case insensitive match",
+			txChainID:       "Thrylos-MainNet",
+			expectedChainID: "thrylos-mainnet",
+			wantErr:         false,
+		},
+		{
+			name:            "mismatch",
+			txChainID:       "thrylos-testnet",
+			expectedChainID: "thrylos-mainnet",
+			wantErr:         true,
+		},
+		{
+			name:            "empty tx chain ID",
+			txChainID:       "",
+			expectedChainID: "thrylos-mainnet",
+			wantErr:         true,
+		},
+		{
+			name:            "empty expected chain ID",
+			txChainID:       "thrylos-mainnet",
+			expectedChainID: "",
+			wantErr:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateChainIDMatch(tt.txChainID, tt.expectedChainID)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateChainIDMatch() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateTransactionTimingV3(t *testing.T) {
+	config := DefaultReplayProtectionConfig()
+	config.TransactionTimeoutSeconds = 60
+
+	now := time.Now().Unix()
+
+	tests := []struct {
+		name      string
+		timestamp int64
+		wantErr   bool
+	}{
+		{
+			name:      "current timestamp",
+			timestamp: now,
+			wantErr:   false,
+		},
+		{
+			name:      "recent timestamp",
+			timestamp: now - 30,
+			wantErr:   false,
+		},
+		{
+			name:      "expired timestamp",
+			timestamp: now - 120,
+			wantErr:   true,
+		},
+		{
+			name:      "future timestamp",
+			timestamp: now + 60,
+			wantErr:   true,
+		},
+		{
+			name:      "zero timestamp",
+			timestamp: 0,
+			wantErr:   true,
+		},
+		{
+			name:      "negative timestamp",
+			timestamp: -1,
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateTransactionTimingV3(tt.timestamp, config)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateTransactionTimingV3() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateBlockHeightV3(t *testing.T) {
+	config := DefaultReplayProtectionConfig()
+	config.TransactionMaxAge = 100
+
+	tests := []struct {
+		name          string
+		txBlockHeight int64
+		currentHeight int64
+		wantErr       bool
+	}{
+		{
+			name:          "recent block",
+			txBlockHeight: 100,
+			currentHeight: 150,
+			wantErr:       false,
+		},
+		{
+			name:          "at age limit",
+			txBlockHeight: 100,
+			currentHeight: 200,
+			wantErr:       false,
+		},
+		{
+			name:          "exceeds age limit",
+			txBlockHeight: 100,
+			currentHeight: 201,
+			wantErr:       true,
+		},
+		{
+			name:          "future block",
+			txBlockHeight: 200,
+			currentHeight: 100,
+			wantErr:       true,
+		},
+		{
+			name:          "negative block height",
+			txBlockHeight: -1,
+			currentHeight: 100,
+			wantErr:       true,
+		},
+		{
+			name:          "no current height",
+			txBlockHeight: 100,
+			currentHeight: 0,
+			wantErr:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateBlockHeightV3(tt.txBlockHeight, tt.currentHeight, config)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateBlockHeightV3() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// ============================================================================
 // BENCHMARK TESTS
 // ============================================================================
 
@@ -641,10 +1181,11 @@ func BenchmarkReplayCache_Add(b *testing.B) {
 	defer cache.Stop()
 
 	expiresAt := time.Now().Add(time.Hour)
+	blockHeight := int64(100)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		cache.Add("tx"+string(rune(i%1000)), uint64(i), "shard-1", expiresAt)
+		cache.Add("tx"+string(rune(i%1000)), uint64(i), "shard-1", expiresAt, blockHeight)
 	}
 }
 
@@ -654,12 +1195,27 @@ func BenchmarkReplayCache_Has(b *testing.B) {
 
 	// Pre-populate cache
 	expiresAt := time.Now().Add(time.Hour)
+	blockHeight := int64(100)
 	for i := 0; i < 1000; i++ {
-		cache.Add("tx"+string(rune(i)), uint64(i), "shard-1", expiresAt)
+		cache.Add("tx"+string(rune(i)), uint64(i), "shard-1", expiresAt, blockHeight)
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		cache.Has("tx" + string(rune(i%1000)))
+	}
+}
+
+func BenchmarkReplayDetectorV3_CheckReplayV3(b *testing.B) {
+	detector := NewReplayDetectorV3("thrylos-mainnet", nil, nil)
+	defer detector.Stop()
+
+	chainID := "thrylos-mainnet"
+	from := "addr1"
+	blockHeight := int64(100)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		detector.CheckReplayV3("tx"+string(rune(i)), chainID, from, uint64(i), blockHeight+int64(i))
 	}
 }
