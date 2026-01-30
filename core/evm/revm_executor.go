@@ -70,14 +70,22 @@ uint64_t revm_get_next_nonce(void* executor, CAddress address);
 size_t revm_get_active_locks(void* executor);
 bool revm_is_account_locked(void* executor, CAddress address);
 size_t revm_get_reserved_nonces_count(void* executor);
+
+// Memory Tracking Functions
+void revm_report_memory_stats();
+size_t revm_get_leak_count();
+size_t revm_get_tracked_error_messages();
+size_t revm_get_tracked_return_data();
 */
 import "C"
 import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"strconv"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -243,22 +251,22 @@ func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte
 
 	cValue := bigIntToC(value)
 
-	// Call Rust (nonce already incremented by Go)
+	// Call Rust
 	res := C.revm_execute_call(e.executor, cCaller, cContract, cData, C.uint64_t(gas), cValue, C.uint64_t(nonce))
+
+	// ✅ CRITICAL: This defer ensures ALL memory is freed properly
 	defer C.revm_free_result(res)
 
-	// Process result
+	// Process result (does NOT free memory, that's done by defer above)
 	data, gasUsed, err := e.processResult(res)
 
-	// ✅ FIX: Refund unused gas
+	// Refund unused gas
 	if gasUsed < gas {
 		e.RefundGas(gas - gasUsed)
 	}
 
-	// ✅ FIX: If execution failed, refund on error path too
 	if err != nil {
-		// Note: gasUsed is already returned from processResult even on error
-		// So we only refund the difference
+
 		return data, gasUsed, err
 	}
 
@@ -322,11 +330,13 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 	cValue := bigIntToC(value)
 
 	res := C.revm_deploy_contract(e.executor, cDeployer, cCode, C.uint64_t(gas), cValue, C.uint64_t(nonce))
+
+	// ✅ CRITICAL: This defer ensures ALL memory is freed properly
 	defer C.revm_free_result(res)
 
 	_, gasUsed, err := e.processResult(res)
 
-	// ✅ FIX: Refund unused gas
+	// Refund unused gas
 	if gasUsed < gas {
 		e.RefundGas(gas - gasUsed)
 	}
@@ -411,6 +421,10 @@ func (e *RevmExecutor) GetReservedNoncesCount() int {
 // ============================================================================
 
 func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, error) {
+	// IMPORTANT: Do NOT free res.error_message or res.return_data here
+	// They will be freed by the deferred revm_free_result call in the caller
+
+	// Check for panic
 	if int(res.error_code) == int(C.FFI_PANIC_CAUGHT) {
 		msg := "Rust panic detected"
 		if res.error_message != nil {
@@ -419,6 +433,7 @@ func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, er
 		return nil, 0, fmt.Errorf("CRITICAL: REVM panic - %s", msg)
 	}
 
+	// Check for other errors
 	if int(res.error_code) != int(C.FFI_SUCCESS) {
 		msg := "Unknown FFI error"
 		if res.error_message != nil {
@@ -435,11 +450,13 @@ func (e *RevmExecutor) processResult(res C.CExecutionResult) ([]byte, uint64, er
 		return nil, 0, fmt.Errorf("suspicious gas value: %d exceeds maximum %d", gasUsed, maxReasonableGas)
 	}
 
+	// Copy return data (C.GoBytes makes a copy, original will be freed by defer)
 	var data []byte
 	if res.return_data.len > 0 {
 		data = C.GoBytes(unsafe.Pointer(res.return_data.data), C.int(res.return_data.len))
 	}
 
+	// Check execution success
 	if res.success == 0 {
 		var msg string
 		if res.error_message != nil {
@@ -558,6 +575,17 @@ func NewRevmExecutor(cfg *config.Config, worldState StateReader) (*RevmExecutor,
 // Close frees the executor resources
 func (e *RevmExecutor) Close() {
 	if e.executor != nil {
+		// Report memory stats before closing (in debug mode)
+		if os.Getenv("REVM_DEBUG") != "" {
+			log.Println("📊 Memory stats before executor close:")
+			e.ReportMemoryStats()
+		}
+
+		// Check for leaks
+		if leaks := e.GetLeakCount(); leaks > 0 {
+			log.Printf("⚠️ WARNING: %d potential memory leaks detected before closing executor", leaks)
+		}
+
 		C.revm_executor_free(e.executor)
 		e.executor = nil
 	}
@@ -567,6 +595,31 @@ func (e *RevmExecutor) Close() {
 		globalExecutor = nil
 	}
 	executorMutex.Unlock()
+}
+
+// StartMemoryHealthCheck starts a goroutine that periodically checks memory health
+// Returns a channel that can be used to stop the health check
+func (e *RevmExecutor) StartMemoryHealthCheck(interval time.Duration) chan struct{} {
+	done := make(chan struct{})
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if err := e.CheckMemoryHealth(); err != nil {
+					log.Printf("⚠️ Memory health check failed: %v", err)
+					e.ReportMemoryStats()
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	return done
 }
 
 // ============================================================================
@@ -660,4 +713,41 @@ func getStorageCallback(addr C.CAddress, key C.CU256) C.CU256 {
 		}
 	}
 	return c
+}
+
+// ============================================================================
+// NEW: Memory tracking functions for Go
+// ============================================================================
+
+// ReportMemoryStats prints a detailed memory report from the Rust side
+func (e *RevmExecutor) ReportMemoryStats() {
+	C.revm_report_memory_stats()
+}
+
+// GetLeakCount returns the number of potential memory leaks detected
+func (e *RevmExecutor) GetLeakCount() int {
+	count := C.revm_get_leak_count()
+	return int(count)
+}
+
+// GetTrackedErrorMessages returns the number of currently tracked error messages
+func (e *RevmExecutor) GetTrackedErrorMessages() int {
+	count := C.revm_get_tracked_error_messages()
+	return int(count)
+}
+
+// GetTrackedReturnData returns the number of currently tracked return data allocations
+func (e *RevmExecutor) GetTrackedReturnData() int {
+	count := C.revm_get_tracked_return_data()
+	return int(count)
+}
+
+// CheckMemoryHealth performs a health check on memory management
+// Returns an error if potential leaks are detected
+func (e *RevmExecutor) CheckMemoryHealth() error {
+	leaks := e.GetLeakCount()
+	if leaks > 0 {
+		return fmt.Errorf("memory leak detected: %d potential leaks", leaks)
+	}
+	return nil
 }

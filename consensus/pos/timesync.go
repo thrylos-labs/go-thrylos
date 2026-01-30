@@ -6,20 +6,24 @@ package pos
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
 
 const (
 	// MaxAllowedTimeDrift is the maximum acceptable clock drift for validators
-	// This must match or be stricter than MaxFutureBlockTime in config
-	MaxAllowedTimeDrift = 15 * time.Second
+	// Tightened from 15s to 5s to reduce manipulation window (Recommendation 1)
+	MaxAllowedTimeDrift = 5 * time.Second
 
 	// TimeCheckInterval is how often we check system time drift
 	TimeCheckInterval = 1 * time.Minute
 
 	// MaxCumulativeTimeDrift is the maximum cumulative drift before warning
-	MaxCumulativeTimeDrift = 30 * time.Second
+	MaxCumulativeTimeDrift = 10 * time.Second
+
+	// MinBlockTimeInterval ensures blocks aren't produced too rapidly (Spam protection)
+	MinBlockTimeInterval = 1 * time.Second
 )
 
 // TimeValidator monitors and validates system time synchronization
@@ -27,13 +31,16 @@ type TimeValidator struct {
 	mu sync.RWMutex
 
 	// Track time drift samples
-	driftSamples      []time.Duration
-	maxSamples        int
-	lastNTPSync       time.Time
-	cumulativeDrift   time.Duration
-	warningIssued     bool
-	ntpSyncRequired   bool
+	driftSamples    []time.Duration
+	maxSamples      int
+	lastNTPSync     time.Time
+	cumulativeDrift time.Duration
+	warningIssued   bool
+	ntpSyncRequired bool
+
+	// For detecting local clock manipulation (jumps)
 	lastDriftCheck    time.Time
+	lastMonotonic     time.Time // Uses Go's monotonic clock
 	driftChecksFailed int
 }
 
@@ -42,25 +49,26 @@ func NewTimeValidator() *TimeValidator {
 	return &TimeValidator{
 		driftSamples:    make([]time.Duration, 0, 100),
 		maxSamples:      100,
-		lastNTPSync:     time.Now(),
-		lastDriftCheck:  time.Now(),
-		ntpSyncRequired: true, // Require NTP by default
+		lastNTPSync:     time.Now().UTC(),
+		lastDriftCheck:  time.Now().UTC(),
+		lastMonotonic:   time.Now(), // Captures monotonic clock
+		ntpSyncRequired: true,
 	}
 }
 
 // ValidateTimestamp checks if a timestamp is within acceptable bounds
 // This is the PRIMARY defense against time manipulation attacks
 func (tv *TimeValidator) ValidateTimestamp(timestamp int64, maxFutureDrift, maxPastDrift time.Duration) error {
-	currentTime := time.Now().Unix()
+	currentTime := time.Now().UTC().Unix()
 
-	// Check future drift
+	// Check future drift (Preventing "Time Warp" attacks where miners post from the future)
 	futureDrift := timestamp - currentTime
 	if futureDrift > int64(maxFutureDrift.Seconds()) {
 		return fmt.Errorf("timestamp %d is %d seconds in future (max allowed: %d seconds)",
 			timestamp, futureDrift, int64(maxFutureDrift.Seconds()))
 	}
 
-	// Check past drift
+	// Check past drift (Preventing selfish mining or withholding)
 	pastDrift := currentTime - timestamp
 	if pastDrift > int64(maxPastDrift.Seconds()) {
 		return fmt.Errorf("timestamp %d is %d seconds in past (max allowed: %d seconds)",
@@ -71,20 +79,27 @@ func (tv *TimeValidator) ValidateTimestamp(timestamp int64, maxFutureDrift, maxP
 }
 
 // CheckSystemTimeDrift checks if the system clock has significant drift
-// This should be called periodically by validators
+// Implements local anomaly detection by comparing Wall Clock vs Monotonic Clock
 func (tv *TimeValidator) CheckSystemTimeDrift() (time.Duration, error) {
 	tv.mu.Lock()
 	defer tv.mu.Unlock()
 
-	// In a production system, this would:
-	// 1. Query NTP servers
-	// 2. Calculate offset from network time
-	// 3. Track drift over time
-	// 4. Alert if drift exceeds thresholds
+	now := time.Now().UTC()
+	monotonicNow := time.Now()
 
-	// For now, we'll implement a basic check
+	// 1. Calculate expected elapsed time based on monotonic clock (immune to wall-clock changes)
+	realElapsed := monotonicNow.Sub(tv.lastMonotonic)
 
-	drift := time.Duration(0)
+	// 2. Calculate elapsed time based on system wall clock
+	wallElapsed := now.Sub(tv.lastDriftCheck)
+
+	// 3. The difference is the "Drift" caused by OS clock adjustments
+	// If the OS clock was changed manually, wallElapsed will differ significantly from realElapsed
+	drift := wallElapsed - realElapsed
+
+	// Update baselines
+	tv.lastDriftCheck = now
+	tv.lastMonotonic = monotonicNow
 
 	// Record the drift sample
 	if len(tv.driftSamples) >= tv.maxSamples {
@@ -92,19 +107,25 @@ func (tv *TimeValidator) CheckSystemTimeDrift() (time.Duration, error) {
 	}
 	tv.driftSamples = append(tv.driftSamples, drift)
 
-	// Calculate cumulative drift
+	// Calculate cumulative drift (Absolute value to detect volatility)
 	tv.cumulativeDrift = tv.calculateAverageDrift()
 
-	// Check if drift is excessive
+	// Check if drift is excessive (Outlier Detection)
+	// We use Abs() because drift can be negative if clock is set backwards
+	if math.Abs(drift.Seconds()) > 1.0 {
+		tv.driftChecksFailed++
+		return drift, fmt.Errorf("CRITICAL: System clock jumped by %s (potential manipulation detected)", drift)
+	}
+
+	// Check cumulative average drift
 	if tv.cumulativeDrift > MaxCumulativeTimeDrift {
 		if !tv.warningIssued {
 			tv.warningIssued = true
-			return drift, fmt.Errorf("WARNING: System time drift (%s) exceeds safe threshold (%s) - NTP sync required",
+			return drift, fmt.Errorf("WARNING: Average system time drift (%s) exceeds safe threshold (%s)",
 				tv.cumulativeDrift, MaxCumulativeTimeDrift)
 		}
 	}
 
-	tv.lastDriftCheck = time.Now()
 	return drift, nil
 }
 
@@ -114,12 +135,14 @@ func (tv *TimeValidator) calculateAverageDrift() time.Duration {
 		return 0
 	}
 
-	var total time.Duration
+	var total float64
 	for _, drift := range tv.driftSamples {
-		total += drift
+		// usage of Abs ensures we track volatility, not just offset
+		total += math.Abs(drift.Seconds())
 	}
 
-	return total / time.Duration(len(tv.driftSamples))
+	avgSeconds := total / float64(len(tv.driftSamples))
+	return time.Duration(avgSeconds * float64(time.Second))
 }
 
 // GetTimeDriftStatus returns the current time drift status
@@ -144,20 +167,13 @@ func (tv *TimeValidator) IsTimeSyncHealthy() bool {
 	tv.mu.RLock()
 	defer tv.mu.RUnlock()
 
-	// System is healthy if:
-	// 1. Cumulative drift is within limits
-	// 2. Recent drift check was successful
-	// 3. No excessive warnings
-
 	if tv.cumulativeDrift > MaxCumulativeTimeDrift {
 		return false
 	}
-
-	if tv.driftChecksFailed > 3 {
+	// Strict: Fail immediately if checks are failing
+	if tv.driftChecksFailed > 0 {
 		return false
 	}
-
-	// Check if last drift check was recent
 	if time.Since(tv.lastDriftCheck) > 5*time.Minute {
 		return false
 	}
@@ -166,7 +182,6 @@ func (tv *TimeValidator) IsTimeSyncHealthy() bool {
 }
 
 // StartDriftMonitoring starts background monitoring of time drift
-// Should be called when consensus engine starts
 func (tv *TimeValidator) StartDriftMonitoring(stopChan <-chan struct{}) {
 	ticker := time.NewTicker(TimeCheckInterval)
 	defer ticker.Stop()
@@ -177,13 +192,13 @@ func (tv *TimeValidator) StartDriftMonitoring(stopChan <-chan struct{}) {
 			drift, err := tv.CheckSystemTimeDrift()
 			if err != nil {
 				fmt.Printf("⚠️  Time drift warning: %v (drift: %s)\n", err, drift)
-				tv.mu.Lock()
-				tv.driftChecksFailed++
-				tv.mu.Unlock()
+				// We do NOT reset driftChecksFailed here; manual intervention or successful checks required
 			} else {
-				// Reset failure count on success
 				tv.mu.Lock()
-				tv.driftChecksFailed = 0
+				// Only decay failure count on success to prevent flapping
+				if tv.driftChecksFailed > 0 {
+					tv.driftChecksFailed--
+				}
 				tv.warningIssued = false
 				tv.mu.Unlock()
 			}
@@ -195,7 +210,6 @@ func (tv *TimeValidator) StartDriftMonitoring(stopChan <-chan struct{}) {
 }
 
 // ValidateBlockTimestamp validates a block timestamp with enhanced checks
-// This combines multiple validation strategies for defense in depth
 func (tv *TimeValidator) ValidateBlockTimestamp(
 	blockTimestamp int64,
 	previousBlockTimestamp int64,
@@ -207,28 +221,27 @@ func (tv *TimeValidator) ValidateBlockTimestamp(
 		return fmt.Errorf("timestamp validation failed: %v", err)
 	}
 
-	// Special case: no previous block timestamp known yet
-	// This is typical for the first block, or if the node has no prior chain view.
 	if previousBlockTimestamp == 0 {
-		// We *only* enforce absolute drift vs wall-clock in this case.
-		// Relative monotonicity and increment checks don't make sense without a baseline.
 		if !tv.IsTimeSyncHealthy() {
-			// Soft warning – don't fail block, but surface potential misconfig
 			fmt.Printf("⚠️  WARNING: Validating first block without previous timestamp and unhealthy time sync status\n")
 		}
 		return nil
 	}
 
-	// 2. Check monotonic increase from previous block
+	// 2. Check monotonic increase
 	if blockTimestamp <= previousBlockTimestamp {
-		return fmt.Errorf(
-			"block timestamp %d must be greater than previous block timestamp %d",
-			blockTimestamp, previousBlockTimestamp,
-		)
+		return fmt.Errorf("block timestamp %d must be strictly greater than previous %d",
+			blockTimestamp, previousBlockTimestamp)
 	}
 
-	// 3. Check reasonable increment (not too far ahead of previous)
-	// A block shouldn't jump more than 1 hour ahead of previous block
+	// 3. [NEW] Enforce Minimum Block Interval (Spam Protection)
+	// Prevents validators from creating blocks with 1ms difference
+	timeDiff := time.Duration(blockTimestamp-previousBlockTimestamp) * time.Second
+	if timeDiff < MinBlockTimeInterval {
+		return fmt.Errorf("block timestamp increment %s too small (min: %s)", timeDiff, MinBlockTimeInterval)
+	}
+
+	// 4. Check reasonable increment
 	maxReasonableIncrement := int64(3600) // 1 hour
 	increment := blockTimestamp - previousBlockTimestamp
 	if increment > maxReasonableIncrement {
@@ -238,9 +251,8 @@ func (tv *TimeValidator) ValidateBlockTimestamp(
 		)
 	}
 
-	// 4. Warn if system time drift is unhealthy
+	// 5. Warn if system time drift is unhealthy
 	if !tv.IsTimeSyncHealthy() {
-		// Don't reject, but log warning
 		fmt.Printf("⚠️  WARNING: Validating block with unhealthy time sync status\n")
 	}
 

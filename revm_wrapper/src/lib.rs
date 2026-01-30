@@ -2,10 +2,12 @@
 mod ffi_safety;
 mod bytecode_validation;
 mod gas_analyzer;
+mod memory_tracker;
+use memory_tracker::get_memory_tracker;
 use gas_analyzer::GasAnalyzer;
 
 use bytecode_validation::{validate_bytecode, MIN_DEPLOYMENT_GAS};
-use ffi_safety::{ffi_safe_exec, FFIResult, FFIErrorCode};
+use ffi_safety::{ffi_safe_exec, FFIResult, FFIErrorCode, revm_free_error_message};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 // Ultra-fast EVM implementation using revm (Rust)
@@ -423,199 +425,184 @@ impl EVMExecutor {
             .unwrap_or(current_nonce)
     }
 
-    pub fn execute_call(
-        &mut self,
-        caller: Address,
-        to: Address,
-        data: Bytes,
-        gas_limit: u64,
-        value: U256,
-        nonce: u64,
-    ) -> CExecutionResult {
-
-   // SECURITY: Validate gas before execution
-        if let Err(e) = self.validate_gas_requirements(gas_limit, None) {
-            return CExecutionResult {
-                success: 0,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(e).unwrap().into_raw(),
-                error_code: FFIErrorCode::InvalidInput as i32,
-            };
-        }
-
-        // Add calldata gas analysis
-        let calldata_gas = GasAnalyzer::analyze_calldata(data.as_ref());
-        if calldata_gas > gas_limit {
-            return CExecutionResult {
-                success: 0,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(format!(
-                    "Calldata requires {} gas but limit is {}",
-                    calldata_gas, gas_limit
-                ))
-                .unwrap()
-                .into_raw(),
-                error_code: FFIErrorCode::OutOfGas as i32,
-            };
-        }
-
-        let account_lock = self.get_account_lock(&caller);
-        let _guard = account_lock.lock();
-        
-        let c_addr = CAddress {
-            bytes: caller.0.0,
-        };
-        let state_nonce = (self.db.get_nonce_fn)(c_addr);
-        
-        // Validate nonce matches (Go side handles increment via AtomicIncrementNonce)
-        if nonce != state_nonce {
-            self.release_nonce(&caller, nonce);
-            
-            return CExecutionResult {
-                success: 0,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(format!(
-                    "Nonce mismatch: expected {}, got {}",
-                    state_nonce, nonce
-                ))
-                .unwrap()
-                .into_raw(),
-                error_code: FFIErrorCode::InvalidInput as i32,
-            };
-        }
-
-        self.release_nonce(&caller, nonce);
-
-        let mut tx_env = TxEnv::default();
-        tx_env.caller = caller;
-        tx_env.transact_to = TransactTo::Call(to);
-        tx_env.data = data;
-        tx_env.gas_limit = gas_limit;
-        tx_env.value = value;
-        tx_env.chain_id = Some(self.chain_id);
-        tx_env.nonce = Some(nonce);
-
-        let mut evm = Evm::builder()
-            .with_db(&mut self.db)
-            .modify_tx_env(|tx| *tx = tx_env)
-            .build();
-
-        let result = match evm.transact() {
-            Ok(result) => Self::convert_result(result.result),
-            Err(e) => CExecutionResult {
-                success: 0,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(format!("{:?}", e))
-                    .unwrap()
-                    .into_raw(),
-                error_code: FFIErrorCode::ExecutionFailed as i32,
-            },
-        };
-
-        result
+    fn execute_call(
+    &mut self,
+    caller: Address,
+    to: Address,
+    data: Bytes,
+    gas_limit: u64,
+    value: U256,
+    nonce: u64,
+) -> CExecutionResult {
+    // Check circuit breaker
+    if let Err(e) = self.circuit_breaker.check_and_record(gas_limit) {
+        eprintln!("⚠️ Circuit breaker triggered: {}", e);
+        return create_error_result_with_code(&e, FFIErrorCode::ExecutionFailed);
     }
 
-    pub fn deploy_contract(
-        &mut self,
-        deployer: Address,
-        bytecode: Bytes,
-        gas_limit: u64,
-        value: U256,
-        nonce: u64,
-    ) -> CExecutionResult {
-         // SECURITY: Validate gas with bytecode analysis
-        if let Err(e) = self.validate_gas_requirements(gas_limit, Some(&bytecode)) {
-            return CExecutionResult {
-                success: 0,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(e).unwrap().into_raw(),
-                error_code: FFIErrorCode::InvalidInput as i32,
-            };
+    let mut tx_env = TxEnv::default();
+    tx_env.caller = caller;
+    tx_env.transact_to = TransactTo::Call(to);
+    tx_env.data = data;
+    tx_env.gas_limit = gas_limit;
+    tx_env.value = value;
+    tx_env.chain_id = Some(self.chain_id);
+    tx_env.nonce = Some(nonce);
+
+    let mut evm = Evm::builder()
+        .with_db(&mut self.db)
+        .modify_tx_env(|tx| *tx = tx_env)
+        .build();
+
+    let result = match evm.transact() {
+        Ok(result) => result,
+        Err(e) => {
+            let err_msg = format!("EVM execution failed: {:?}", e);
+            return create_error_result_with_code(&err_msg, FFIErrorCode::ExecutionFailed);
         }
+    };
 
-        let account_lock = self.get_account_lock(&deployer);
-        let _guard = account_lock.lock();
+    let gas_used = result.result.gas_used();
+
+   let return_data = if let Some(output) = result.result.output() {
+    let data = output.clone(); // Clone the Bytes
+    let len = data.len();
+    let ptr = data.as_ptr() as *mut u8;
         
-        let c_addr = CAddress {
-            bytes: deployer.0.0,
-        };
-        let state_nonce = (self.db.get_nonce_fn)(c_addr);
+        // ✅ Track the allocation before forgetting
+        get_memory_tracker().track_return_data(ptr, len);
+        std::mem::forget(data);
         
-        // Validate nonce matches (Go side handles increment via AtomicIncrementNonce)
-        if nonce != state_nonce {
-            self.release_nonce(&deployer, nonce);
-            
-            return CExecutionResult {
-                success: 0,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(format!(
-                    "Nonce mismatch: expected {}, got {}",
-                    state_nonce, nonce
-                ))
-                .unwrap()
-                .into_raw(),
-                error_code: FFIErrorCode::InvalidInput as i32,
-            };
+        CByteSlice { data: ptr, len }
+    } else {
+        CByteSlice {
+            data: std::ptr::null(),
+            len: 0,
         }
+    };
 
-        self.release_nonce(&deployer, nonce);
+    if result.result.is_success() {
+        CExecutionResult {
+            success: 1,
+            gas_used,
+            return_data,
+            error_message: std::ptr::null(),
+            error_code: FFIErrorCode::Success as i32,
+        }
+    } else {
+        let error_msg = format!("Execution reverted: {:?}", result.result);
+        let c_msg = CString::new(error_msg)
+            .unwrap_or_else(|_| CString::new("Execution reverted").unwrap());
+        let msg_ptr = c_msg.into_raw();
+        
+        // ✅ Track error message
+        get_memory_tracker().track_error_message(msg_ptr);
 
-        let mut tx_env = TxEnv::default();
-        tx_env.caller = deployer;
-        tx_env.transact_to = TransactTo::Create;
-        tx_env.data = bytecode;
-        tx_env.gas_limit = gas_limit;
-        tx_env.value = value;
-        tx_env.chain_id = Some(self.chain_id);
-        tx_env.nonce = Some(nonce);
-
-        let mut evm = Evm::builder()
-            .with_db(&mut self.db)
-            .modify_tx_env(|tx| *tx = tx_env)
-            .build();
-
-        let result = match evm.transact() {
-            Ok(result) => Self::convert_result(result.result),
-            Err(e) => CExecutionResult {
-                success: 0,
-                gas_used: 0,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(format!("{:?}", e))
-                    .unwrap()
-                    .into_raw(),
-                error_code: FFIErrorCode::ExecutionFailed as i32,
-            },
-        };
-
-        result
+        CExecutionResult {
+            success: 0,
+            gas_used,
+            return_data,
+            error_message: msg_ptr,
+            error_code: FFIErrorCode::Revert as i32,
+        }
     }
+}
+
+   fn deploy_contract(
+    &mut self,
+    deployer: Address,
+    code: Bytes,
+    gas_limit: u64,
+    value: U256,
+    nonce: u64,
+) -> CExecutionResult {
+    // Validate bytecode
+    if let Err(e) = validate_bytecode(&code) {
+        return create_error_result_with_code(
+            &format!("Bytecode validation failed: {}", e),
+            FFIErrorCode::InvalidInput
+        );
+    }
+
+    // Check circuit breaker
+    if let Err(e) = self.circuit_breaker.check_and_record(gas_limit) {
+        return create_error_result_with_code(&e, FFIErrorCode::ExecutionFailed);
+    }
+
+    if gas_limit < MIN_DEPLOYMENT_GAS {
+        return create_error_result_with_code(
+            &format!("Gas limit {} below minimum deployment gas {}", gas_limit, MIN_DEPLOYMENT_GAS),
+            FFIErrorCode::OutOfGas
+        );
+    }
+
+    let mut tx_env = TxEnv::default();
+    tx_env.caller = deployer;
+    tx_env.transact_to = TransactTo::Create;
+    tx_env.data = code;
+    tx_env.gas_limit = gas_limit;
+    tx_env.value = value;
+    tx_env.chain_id = Some(self.chain_id);
+    tx_env.nonce = Some(nonce);
+
+    let mut evm = Evm::builder()
+        .with_db(&mut self.db)
+        .modify_tx_env(|tx| *tx = tx_env)
+        .build();
+
+    let result = match evm.transact() {
+        Ok(result) => result,
+        Err(e) => {
+            let err_msg = format!("Contract deployment failed: {:?}", e);
+            return create_error_result_with_code(&err_msg, FFIErrorCode::ExecutionFailed);
+        }
+    };
+
+    let gas_used = result.result.gas_used();
+
+    let return_data = if let Some(output) = result.result.output() {
+    let data = output.clone(); // Clone the Bytes
+    let len = data.len();
+    let ptr = data.as_ptr() as *mut u8;
+        
+        // ✅ Track the allocation before forgetting
+        get_memory_tracker().track_return_data(ptr, len);
+        std::mem::forget(data);
+        
+        CByteSlice { data: ptr, len }
+    } else {
+        CByteSlice {
+            data: std::ptr::null(),
+            len: 0,
+        }
+    };
+
+    if result.result.is_success() {
+        CExecutionResult {
+            success: 1,
+            gas_used,
+            return_data,
+            error_message: std::ptr::null(),
+            error_code: FFIErrorCode::Success as i32,
+        }
+    } else {
+        let error_msg = format!("Deployment failed: {:?}", result.result);
+        let c_msg = CString::new(error_msg)
+            .unwrap_or_else(|_| CString::new("Deployment failed").unwrap());
+        let msg_ptr = c_msg.into_raw();
+        
+        // ✅ Track error message
+        get_memory_tracker().track_error_message(msg_ptr);
+
+        CExecutionResult {
+            success: 0,
+            gas_used,
+            return_data,
+            error_message: msg_ptr,
+            error_code: FFIErrorCode::Revert as i32,
+        }
+    }
+}
 
     fn convert_result(result: ExecutionResult) -> CExecutionResult {
         match result {
@@ -729,19 +716,14 @@ pub extern "C" fn revm_executor_free(executor: *mut EVMExecutor) {
 
 #[no_mangle]
 pub extern "C" fn revm_free_result(result: CExecutionResult) {
+    // Free return data if present
     if !result.return_data.data.is_null() && result.return_data.len > 0 {
-        unsafe {
-            let _ = Vec::from_raw_parts(
-                result.return_data.data as *mut u8,
-                result.return_data.len,
-                result.return_data.len,
-            );
-        }
+        revm_free_bytes(result.return_data.data as *mut u8, result.return_data.len);
     }
+    
+    // Free error message if present
     if !result.error_message.is_null() {
-        unsafe {
-            let _ = CString::from_raw(result.error_message as *mut c_char);
-        }
+        revm_free_error_message(result.error_message as *mut c_char);
     }
 }
 
@@ -876,11 +858,16 @@ fn create_error_result_with_code(msg: &str, code: FFIErrorCode) -> CExecutionRes
     let c_msg = CString::new(msg)
         .unwrap_or_else(|_| CString::new("Error creating message").unwrap());
     
+    let ptr = c_msg.into_raw();
+    
+    // ✅ Track the allocation
+    get_memory_tracker().track_error_message(ptr);
+    
     CExecutionResult {
         success: 0,
         gas_used: 0,
         return_data: CByteSlice { data: std::ptr::null(), len: 0 },
-        error_message: c_msg.into_raw(),
+        error_message: ptr,
         error_code: code as i32,
     }
 }
@@ -987,12 +974,22 @@ pub extern "C" fn revm_free_string(s: *mut c_char) {
 
 #[no_mangle]
 pub extern "C" fn revm_free_bytes(data: *mut u8, len: usize) {
-    if !data.is_null() {
-        unsafe {
-            let _ = Vec::from_raw_parts(data as *mut u8, len, len);
-        }
+    if data.is_null() {
+        return;
+    }
+    
+    // ✅ Check if pointer is tracked (prevents double-free)
+    if !get_memory_tracker().untrack_return_data(data) {
+        eprintln!("⚠️ revm_free_bytes: Prevented double-free or invalid free at {:p}", data);
+        return;
+    }
+    
+    // Free the actual memory
+    unsafe {
+        let _ = Vec::from_raw_parts(data, len, len);
     }
 }
+
 
 #[no_mangle]
 pub extern "C" fn revm_calculate_create_address(deployer: CAddress, nonce: u64) -> CAddress {
@@ -1116,4 +1113,30 @@ pub extern "C" fn revm_get_reserved_nonces_count(executor: *mut EVMExecutor) -> 
     
     let executor = unsafe { &*executor };
     executor.get_reserved_nonces_count()
+}
+
+/// Report memory statistics to stderr
+/// This can be called from Go to check for memory leaks
+#[no_mangle]
+pub extern "C" fn revm_report_memory_stats() {
+    get_memory_tracker().report();
+}
+
+/// Get the number of potential memory leaks
+/// Returns the difference between allocations and frees
+#[no_mangle]
+pub extern "C" fn revm_get_leak_count() -> usize {
+    get_memory_tracker().get_leak_count()
+}
+
+/// Get the number of currently tracked error messages
+#[no_mangle]
+pub extern "C" fn revm_get_tracked_error_messages() -> usize {
+    get_memory_tracker().get_error_message_count()
+}
+
+/// Get the number of currently tracked return data allocations
+#[no_mangle]
+pub extern "C" fn revm_get_tracked_return_data() -> usize {
+    get_memory_tracker().get_return_data_count()
 }

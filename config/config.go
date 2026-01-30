@@ -299,7 +299,7 @@ func Load() (*Config, error) {
 			MinGasPrice:        math.BigIntToString(BaseGasPrice), // FIX
 			MaxValidators:      100,
 			ValidatorRotation:  24 * time.Hour,
-			MaxFutureBlockTime: 15 * time.Second,
+			MaxFutureBlockTime: 5 * time.Second,
 			MaxPastBlockTime:   2 * time.Hour,
 			MaxBlockTimeDrift:  10 * time.Minute,
 			MaxTimestampSkew:   5 * time.Minute,

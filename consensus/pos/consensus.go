@@ -1347,8 +1347,8 @@ func (bv *BlockValidator) validateBlockStructure(block *core.Block) error {
 	err := bv.consensusEngine.timeValidator.ValidateBlockTimestamp(
 		block.Header.Timestamp,
 		previousBlockTimestamp,
-		cfg.MaxFutureBlockTime,
-		cfg.MaxPastBlockTime,
+		MaxAllowedTimeDrift, // Forces 5s limit defined in timesync.go
+		MaxAllowedTimeDrift, // Forces 5s limit defined in timesync.go
 	)
 	if err != nil {
 		return fmt.Errorf("block timestamp validation failed: %v", err)

@@ -737,6 +737,7 @@ func (sm *SlashingManager) slashDowntime(validatorAddress string, history *stora
 }
 
 // applySlashing executes the slashing penalty
+// applySlashing executes the slashing penalty
 func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 	validatorAddress := record.ValidatorAddress
 
@@ -748,9 +749,10 @@ func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 
 	if sm.storage != nil {
 		// M-2 FIX: Save with metadata for pruning
+		// FIX APPLIED: Changed string(record.Condition) to record.Condition.String()
 		if err := sm.storage.SaveProcessedEvidenceWithMetadata(
 			evidenceHash,
-			string(record.Condition), // Use condition as type
+			record.Condition.String(), // ✅ Fixed type conversion error
 			validatorAddress,
 		); err != nil {
 			fmt.Printf("⚠️  Failed to persist processed evidence: %v\n", err)
@@ -764,7 +766,6 @@ func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 	}
 
 	// 2. Parse SlashedAmount (Convert int64 back to BigInt)
-	// ✅ FIX: Create BigInt from int64 field
 	slashedAmountBig := big.NewInt(record.SlashedAmount)
 
 	// 3. Subtract (BigInt)

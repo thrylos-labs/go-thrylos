@@ -109,3 +109,23 @@ func (e *SlashingEvidence) Hash() string {
 
 	return hex.EncodeToString(h.Sum(nil))
 }
+
+// In package types (e.g., types/slashing.go)
+
+// String implements the fmt.Stringer interface for readable logging
+func (sc SlashingCondition) String() string {
+	switch sc {
+	case DoubleVoting:
+		return "DoubleVoting"
+	case SurroundVoting:
+		return "SurroundVoting"
+	case InvalidProposal:
+		return "InvalidProposal"
+	case Downtime:
+		return "Downtime"
+	case InvalidSignature:
+		return "InvalidSignature"
+	default:
+		return fmt.Sprintf("UnknownCondition(%d)", int(sc))
+	}
+}
