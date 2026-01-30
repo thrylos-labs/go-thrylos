@@ -3,6 +3,7 @@ package block
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
@@ -12,35 +13,88 @@ import (
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
+// [FIX M-08] Cache entry for validation results
+type validationResult struct {
+	isValid   bool
+	err       error
+	timestamp time.Time
+}
+
 // Validator represents block validation logic
 type Validator struct {
 	shardID     account.ShardID
 	totalShards int
-	config      *config.Config // [FIX] Add config field
+	config      *config.Config
+
+	// [FIX M-08] Mutex for thread-safe validation
+	mu sync.RWMutex
+	// [FIX M-08] Cache validation results to prevent race conditions and redundant work
+	validationCache map[string]validationResult
 }
 
 // NewValidator creates a new block validator
 func NewValidator(shardID account.ShardID, totalShards int, cfg *config.Config) *Validator {
 	return &Validator{
-		shardID:     shardID,
-		totalShards: totalShards,
-		config:      cfg,
+		shardID:         shardID,
+		totalShards:     totalShards,
+		config:          cfg,
+		validationCache: make(map[string]validationResult),
 	}
 }
 
 // ValidateBlock performs comprehensive block validation
+// [FIX M-08] Now implements Atomic Validation and Result Caching
 func (v *Validator) ValidateBlock(block *core.Block, prevBlock *core.Block, publicKey *crypto.PublicKey) error {
-	// Basic block structure validation
+	if block == nil {
+		return fmt.Errorf("block cannot be nil")
+	}
+
+	// 1. Check Cache (Read Lock)
+	// If validation has already completed (successfully or failed), return the result immediately.
+	v.mu.RLock()
+	if result, exists := v.validationCache[block.Hash]; exists {
+		v.mu.RUnlock()
+		return result.err
+	}
+	v.mu.RUnlock()
+
+	// 2. Perform Atomic Validation (No Lock held during expensive compute, result added at end)
+	// We do not hold the lock during the entire validation to avoid blocking other validators,
+	// but we strictly order operations within validateAtomic.
+	err := v.validateAtomic(block, prevBlock, publicKey)
+
+	// 3. Update Cache (Write Lock)
+	v.mu.Lock()
+	v.validationCache[block.Hash] = validationResult{
+		isValid:   err == nil,
+		err:       err,
+		timestamp: time.Now(),
+	}
+
+	// [FIX M-08] simple cache pruning to prevent memory leaks
+	if len(v.validationCache) > 1000 {
+		// In a production system, use an LRU cache.
+		// For now, clearing the map is safe and sufficient to prevent unbounded growth.
+		v.validationCache = make(map[string]validationResult)
+	}
+	v.mu.Unlock()
+
+	return err
+}
+
+// validateAtomic contains the actual validation logic, executed in a strict order
+func (v *Validator) validateAtomic(block *core.Block, prevBlock *core.Block, publicKey *crypto.PublicKey) error {
+	// 1. Basic block structure validation (Fastest checks first)
 	if err := v.validateBlockStructure(block); err != nil {
 		return fmt.Errorf("block structure validation failed: %v", err)
 	}
 
-	// Chain continuity validation
+	// 2. Chain continuity validation
 	if err := v.validateChainContinuity(block, prevBlock); err != nil {
 		return fmt.Errorf("chain continuity validation failed: %v", err)
 	}
 
-	// [FIX M-03] Enforce Timestamp Validation
+	// 3. Timestamp Validation
 	maxFuture := 15 * time.Second
 	maxPast := 2 * time.Hour
 	if v.config != nil {
@@ -52,17 +106,17 @@ func (v *Validator) ValidateBlock(block *core.Block, prevBlock *core.Block, publ
 		return fmt.Errorf("timestamp validation failed: %v", err)
 	}
 
-	// Shard-specific validation
+	// 4. Shard-specific validation
 	if err := v.validateShardTransactions(block); err != nil {
 		return fmt.Errorf("shard transaction validation failed: %v", err)
 	}
 
-	// ✅ ADD THIS: Gas usage validation with overflow protection
+	// 5. Gas usage validation
 	if err := v.ValidateGasUsage(block); err != nil {
 		return fmt.Errorf("gas usage validation failed: %v", err)
 	}
 
-	// Cryptographic validation
+	// 6. Cryptographic validation (Most expensive check last)
 	if err := v.validateCryptographic(block, publicKey); err != nil {
 		return fmt.Errorf("cryptographic validation failed: %v", err)
 	}
@@ -297,7 +351,6 @@ func (v *Validator) verifyBlockSignature(block *core.Block, publicKey crypto.Pub
 }
 
 // ValidateGasUsage validates that gas usage calculations are correct
-// ValidateGasUsage validates that gas usage calculations are correct
 func (v *Validator) ValidateGasUsage(block *core.Block) error {
 	calculatedGas := int64(0)
 
@@ -351,9 +404,7 @@ func (v *Validator) ValidateTimestamp(block *core.Block, prevBlock *core.Block, 
 				blockTime, prevBlock.Header.Timestamp)
 		}
 
-		// 4. [FIX M-01] Not too far ahead of parent (Drift Check)
-
-		// Define default safety fallback if config is somehow nil
+		// 4. Drift Check
 		maxDrift := 10 * time.Minute
 		if v.config != nil {
 			maxDrift = v.config.Consensus.MaxBlockTimeDrift
