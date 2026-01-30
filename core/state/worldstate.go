@@ -1098,6 +1098,7 @@ func NewCrossShardManager(worldState *WorldState) *CrossShardManager {
 
 // InitiateTransfer initiates a cross-shard transfer
 // ✅ UPDATE: amount parameter changed from int64 to string
+// Update InitiateTransfer to use atomic operations:
 func (csm *CrossShardManager) InitiateTransfer(from, to string, amount string, nonce uint64) (*CrossShardTransfer, error) {
 	csm.mu.Lock()
 	defer csm.mu.Unlock()
@@ -1114,71 +1115,122 @@ func (csm *CrossShardManager) InitiateTransfer(from, to string, amount string, n
 			csm.worldState.shardID, fromShard)
 	}
 
-	// 1. Validate sender account
-	senderAccount, err := csm.worldState.GetAccount(from)
+	// ✅ Use atomic transaction wrapper
+	var transfer *CrossShardTransfer
+	err := csm.worldState.ExecuteInTransaction([]string{from}, func() error {
+		// Validate sender account
+		senderAccount, err := csm.worldState.accountManager.GetAccount(from)
+		if err != nil {
+			return fmt.Errorf("failed to get sender account: %v", err)
+		}
+
+		balanceBig := math.ParseBigInt(senderAccount.Balance)
+		amountBig := math.ParseBigInt(amount)
+
+		if balanceBig.Cmp(amountBig) < 0 {
+			return fmt.Errorf("insufficient balance: have %s, need %s", senderAccount.Balance, amount)
+		}
+
+		if senderAccount.Nonce != nonce {
+			return fmt.Errorf("invalid nonce: expected %d, got %d", senderAccount.Nonce, nonce)
+		}
+
+		// Create transfer record
+		transfer = &CrossShardTransfer{
+			FromShard: fromShard,
+			ToShard:   toShard,
+			From:      from,
+			To:        to,
+			Amount:    amount,
+			Nonce:     nonce,
+			Timestamp: time.Now().Unix(),
+			Status:    "pending",
+		}
+
+		// Calculate hash
+		var buf []byte
+		buf = append(buf, []byte(from)...)
+		buf = append(buf, []byte(to)...)
+		buf = append(buf, []byte(amount)...)
+
+		nonceBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(nonceBytes, nonce)
+		buf = append(buf, nonceBytes...)
+
+		timestampBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(timestampBytes, uint64(transfer.Timestamp))
+		buf = append(buf, timestampBytes...)
+
+		hashBytes := hash.Keccak256(buf)
+		transfer.Hash = fmt.Sprintf("%x", hashBytes)
+
+		// Debit sender (atomic)
+		newBalanceBig := new(big.Int).Sub(balanceBig, amountBig)
+		senderAccount.Balance = newBalanceBig.String()
+
+		if err := csm.worldState.accountManager.UpdateAccount(senderAccount); err != nil {
+			return fmt.Errorf("failed to update sender account: %v", err)
+		}
+
+		if err := csm.worldState.state.SaveAccount(senderAccount); err != nil {
+			return fmt.Errorf("failed to save sender account: %v", err)
+		}
+
+		return nil
+	})
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to get sender account: %v", err)
-	}
-
-	// 2. Parse Balance and Amount to BigInt
-	balanceBig := math.ParseBigInt(senderAccount.Balance)
-	amountBig := math.ParseBigInt(amount)
-
-	// Check insufficient funds: Balance < Amount
-	if balanceBig.Cmp(amountBig) < 0 {
-		return nil, fmt.Errorf("insufficient balance: have %s, need %s", senderAccount.Balance, amount)
-	}
-
-	if senderAccount.Nonce != nonce {
-		return nil, fmt.Errorf("invalid nonce: expected %d, got %d", senderAccount.Nonce, nonce)
-	}
-
-	// 3. Create transfer record
-	// Note: Assuming CrossShardTransfer.Amount is also updated to string
-	transfer := &CrossShardTransfer{
-		FromShard: fromShard,
-		ToShard:   toShard,
-		From:      from,
-		To:        to,
-		Amount:    amount, // ✅ Store as string
-		Nonce:     nonce,
-		Timestamp: time.Now().Unix(),
-		Status:    "pending",
-	}
-
-	// 4. Calculate transfer hash
-	var buf []byte
-	buf = append(buf, []byte(from)...)
-	buf = append(buf, []byte(to)...)
-
-	// ✅ FIX: Append amount string bytes directly (instead of uint64 binary)
-	buf = append(buf, []byte(amount)...)
-
-	nonceBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(nonceBytes, nonce)
-	buf = append(buf, nonceBytes...)
-
-	timestampBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(timestampBytes, uint64(transfer.Timestamp))
-	buf = append(buf, timestampBytes...)
-
-	hashBytes := hash.Keccak256(buf)
-	transfer.Hash = fmt.Sprintf("%x", hashBytes)
-
-	// 5. Debit sender account
-	// NewBalance = Balance - Amount
-	newBalanceBig := new(big.Int).Sub(balanceBig, amountBig)
-
-	senderAccount.Balance = newBalanceBig.String()
-
-	if err := csm.worldState.accountManager.UpdateAccount(senderAccount); err != nil {
-		return nil, fmt.Errorf("failed to update sender account: %v", err)
+		return nil, err
 	}
 
 	// Store pending transfer
 	csm.pendingTransfers[transfer.Hash] = transfer
-
 	return transfer, nil
+}
+
+// ExecuteAtomicAccountUpdate performs atomic updates on multiple accounts
+func (ws *WorldState) ExecuteAtomicAccountUpdate(addresses []string, updateFn func(accounts map[string]*core.Account) error) error {
+	if len(addresses) == 0 {
+		return nil
+	}
+
+	// Use the atomic batch system
+	batch := ws.accountMu.BeginBatch(addresses)
+	batch.Lock()
+	defer batch.Rollback()
+
+	// Validate versions
+	if !batch.ValidateVersions() {
+		return fmt.Errorf("state conflict: accounts modified during update")
+	}
+
+	// Fetch all accounts
+	accounts := make(map[string]*core.Account)
+	for _, addr := range addresses {
+		acc, err := ws.accountManager.GetAccount(addr)
+		if err != nil {
+			return fmt.Errorf("failed to get account %s: %w", addr, err)
+		}
+		accounts[addr] = acc
+	}
+
+	// Execute update function
+	if err := updateFn(accounts); err != nil {
+		return err
+	}
+
+	// Save all accounts
+	for _, acc := range accounts {
+		if err := ws.accountManager.UpdateAccount(acc); err != nil {
+			return fmt.Errorf("failed to update account %s: %w", acc.Address, err)
+		}
+		if err := ws.state.SaveAccount(acc); err != nil {
+			return fmt.Errorf("failed to save account %s: %w", acc.Address, err)
+		}
+	}
+
+	batch.Commit()
+	return nil
 }
 
 // CompleteTransfer completes a cross-shard transfer
@@ -1424,144 +1476,128 @@ func (ws *WorldState) GetStakingManager() *StakingManager {
 // Delegate stakes tokens to a validator
 // Delegate stakes tokens to a validator
 // Delegate stakes tokens to a validator
+// In worldstate.go, update the Delegate method:
 func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount int64) error {
 	ws := sm.worldState
 
-	// ✅ FIX: Correct lock order (chain → validator → accounts)
-	ws.chainMu.Lock()
-	defer ws.chainMu.Unlock()
+	// ✅ FIX: Use atomic batch instead of manual locking
+	addresses := []string{delegatorAddr}
 
-	ws.validatorMu.Lock()
-	defer ws.validatorMu.Unlock()
+	// Use AtomicUpdateAccounts wrapper
+	return ws.ExecuteInTransaction(addresses, func() error {
+		amountBig := big.NewInt(amount)
 
-	ws.accountMu.Lock(delegatorAddr)
-	defer ws.accountMu.Unlock(delegatorAddr)
+		// Validation
+		minDelegationBig, _ := new(big.Int).SetString(ws.config.Staking.MinDelegation, 10)
+		if minDelegationBig == nil {
+			minDelegationBig = big.NewInt(0)
+		}
 
-	// --- 1. Conversions ---
-	amountBig := big.NewInt(amount)
+		if amountBig.Cmp(minDelegationBig) < 0 {
+			return fmt.Errorf("delegation amount %d below minimum %s", amount, ws.config.Staking.MinDelegation)
+		}
 
-	// Fix: Parse MinDelegation (string) to BigInt for comparison
-	minDelegationBig, _ := new(big.Int).SetString(ws.config.Staking.MinDelegation, 10)
-	if minDelegationBig == nil {
-		minDelegationBig = big.NewInt(0)
-	}
+		// Get accounts (no manual locking needed - ExecuteInTransaction handles it)
+		delegator, err := ws.accountManager.GetAccount(delegatorAddr)
+		if err != nil {
+			return fmt.Errorf("failed to get delegator account: %v", err)
+		}
 
-	// Check min delegation: amount < MinDelegation
-	if amountBig.Cmp(minDelegationBig) < 0 {
-		return fmt.Errorf("delegation amount %d below minimum %s", amount, ws.config.Staking.MinDelegation)
-	}
+		// Acquire validator lock separately (different lock domain)
+		ws.validatorMu.Lock()
+		validator, exists := ws.validators[validatorAddr]
+		if !exists {
+			ws.validatorMu.Unlock()
+			return fmt.Errorf("validator %s not found", validatorAddr)
+		}
+		ws.validatorMu.Unlock()
 
-	delegator, err := ws.accountManager.GetAccount(delegatorAddr)
-	if err != nil {
-		return fmt.Errorf("failed to get delegator account: %v", err)
-	}
+		// Parse balances
+		delBalance, _ := new(big.Int).SetString(delegator.Balance, 10)
+		if delBalance == nil {
+			delBalance = big.NewInt(0)
+		}
 
-	// Parse Delegator Balance
-	delBalance, _ := new(big.Int).SetString(delegator.Balance, 10)
-	if delBalance == nil {
-		delBalance = big.NewInt(0)
-	}
+		if delBalance.Cmp(amountBig) < 0 {
+			return fmt.Errorf("insufficient balance: have %s, need %d", delegator.Balance, amount)
+		}
 
-	// Check sufficiency: Balance < Amount
-	if delBalance.Cmp(amountBig) < 0 {
-		return fmt.Errorf("insufficient balance: have %s, need %d", delegator.Balance, amount)
-	}
+		// Perform calculations
+		newBalance := new(big.Int).Sub(delBalance, amountBig)
+		currentStaked, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
+		if currentStaked == nil {
+			currentStaked = big.NewInt(0)
+		}
+		newStakedAmount := new(big.Int).Add(currentStaked, amountBig)
 
-	validator, exists := ws.validators[validatorAddr]
-	if !exists {
-		return fmt.Errorf("validator %s not found", validatorAddr)
-	}
+		// Update delegator maps
+		if delegator.DelegatedTo == nil {
+			delegator.DelegatedTo = make(map[string]string)
+		}
+		currentDelegationStr := delegator.DelegatedTo[validatorAddr]
+		currentDelegationBig, _ := new(big.Int).SetString(currentDelegationStr, 10)
+		if currentDelegationBig == nil {
+			currentDelegationBig = big.NewInt(0)
+		}
+		newDelegationBig := new(big.Int).Add(currentDelegationBig, amountBig)
+		delegator.DelegatedTo[validatorAddr] = newDelegationBig.String()
 
-	// --- 2. Calculations (BigInt) ---
+		// Update delegator account
+		delegator.Balance = newBalance.String()
+		delegator.StakedAmount = newStakedAmount.String()
 
-	// New Balance = Balance - Amount
-	newBalance := new(big.Int).Sub(delBalance, amountBig)
+		if err := ws.accountManager.UpdateAccount(delegator); err != nil {
+			return fmt.Errorf("failed to update delegator account: %v", err)
+		}
 
-	// New Staked Amount = Old Staked + Amount
-	currentStaked, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
-	if currentStaked == nil {
-		currentStaked = big.NewInt(0)
-	}
-	newStakedAmount := new(big.Int).Add(currentStaked, amountBig)
+		if err := ws.state.SaveAccount(delegator); err != nil {
+			return fmt.Errorf("failed to save delegator account: %v", err)
+		}
 
-	// --- Map Updates (The tricky part) ---
+		// Now update validator (with proper locking)
+		ws.validatorMu.Lock()
+		defer ws.validatorMu.Unlock()
 
-	// 1. Update Delegator's Map
-	if delegator.DelegatedTo == nil {
-		// Fix: Correct map type initialization
-		delegator.DelegatedTo = make(map[string]string)
-	}
+		if validator.Delegators == nil {
+			validator.Delegators = make(map[string]string)
+		}
 
-	// Get current delegation amount string
-	currentDelegationStr := delegator.DelegatedTo[validatorAddr]
-	currentDelegationBig, _ := new(big.Int).SetString(currentDelegationStr, 10)
-	if currentDelegationBig == nil {
-		currentDelegationBig = big.NewInt(0)
-	}
+		currentValDelStr := validator.Delegators[delegatorAddr]
+		currentValDelBig, _ := new(big.Int).SetString(currentValDelStr, 10)
+		if currentValDelBig == nil {
+			currentValDelBig = big.NewInt(0)
+		}
+		newValDelBig := new(big.Int).Add(currentValDelBig, amountBig)
+		validator.Delegators[delegatorAddr] = newValDelBig.String()
 
-	// Add amount and set back as string
-	newDelegationBig := new(big.Int).Add(currentDelegationBig, amountBig)
-	delegator.DelegatedTo[validatorAddr] = newDelegationBig.String()
+		valDelegated, _ := new(big.Int).SetString(validator.DelegatedStake, 10)
+		if valDelegated == nil {
+			valDelegated = big.NewInt(0)
+		}
+		newValDelegated := new(big.Int).Add(valDelegated, amountBig)
 
-	// 2. Update Validator's Delegators Map
-	if validator.Delegators == nil {
-		// Fix: Correct map type initialization
-		validator.Delegators = make(map[string]string)
-	}
+		valStake, _ := new(big.Int).SetString(validator.Stake, 10)
+		if valStake == nil {
+			valStake = big.NewInt(0)
+		}
+		newValStake := new(big.Int).Add(valStake, amountBig)
 
-	// Get current val delegation amount string
-	currentValDelStr := validator.Delegators[delegatorAddr]
-	currentValDelBig, _ := new(big.Int).SetString(currentValDelStr, 10)
-	if currentValDelBig == nil {
-		currentValDelBig = big.NewInt(0)
-	}
+		validator.DelegatedStake = newValDelegated.String()
+		validator.Stake = newValStake.String()
+		validator.UpdatedAt = time.Now().Unix()
 
-	// Add amount and set back as string
-	newValDelBig := new(big.Int).Add(currentValDelBig, amountBig)
-	validator.Delegators[delegatorAddr] = newValDelBig.String()
+		// Update global state (requires chain lock)
+		ws.chainMu.Lock()
+		totalStaked, _ := new(big.Int).SetString(ws.totalStaked, 10)
+		if totalStaked == nil {
+			totalStaked = big.NewInt(0)
+		}
+		newTotalStaked := new(big.Int).Add(totalStaked, amountBig)
+		ws.totalStaked = newTotalStaked.String()
+		ws.chainMu.Unlock()
 
-	// Validator Delegated Stake
-	valDelegated, _ := new(big.Int).SetString(validator.DelegatedStake, 10)
-	if valDelegated == nil {
-		valDelegated = big.NewInt(0)
-	}
-	newValDelegated := new(big.Int).Add(valDelegated, amountBig)
-
-	// Validator Total Stake
-	valStake, _ := new(big.Int).SetString(validator.Stake, 10)
-	if valStake == nil {
-		valStake = big.NewInt(0)
-	}
-	newValStake := new(big.Int).Add(valStake, amountBig)
-
-	// Total Global Staked
-	totalStaked, _ := new(big.Int).SetString(ws.totalStaked, 10)
-	if totalStaked == nil {
-		totalStaked = big.NewInt(0)
-	}
-	newTotalStaked := new(big.Int).Add(totalStaked, amountBig)
-
-	// --- 3. Commit Updates ---
-
-	delegator.Balance = newBalance.String()
-	delegator.StakedAmount = newStakedAmount.String()
-	// Map updates were applied directly above
-
-	validator.DelegatedStake = newValDelegated.String()
-	validator.Stake = newValStake.String()
-	validator.UpdatedAt = time.Now().Unix()
-
-	ws.totalStaked = newTotalStaked.String()
-
-	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
-		return fmt.Errorf("failed to update delegator account: %v", err)
-	}
-
-	if err := ws.SetValidator(validator.Address, validator); err != nil {
-		return fmt.Errorf("failed to update validator: %v", err)
-	}
-
-	return nil
+		return nil
+	})
 }
 
 // Undelegate unstakes tokens from a validator
