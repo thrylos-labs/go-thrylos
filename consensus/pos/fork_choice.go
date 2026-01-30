@@ -309,58 +309,53 @@ func (fc *ForkChoice) GetHead() string {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 
-	// 1. Start from the finalized checkpoint if it exists;
-	// otherwise, use the justified checkpoint.
-	var startBlock string
+	// 1. Anchor Point: Start at the latest secure checkpoint
+	// This simplifies complexity by ignoring all history before finalization.
+	currentBlockHash := ""
 	if fc.finalizedCheckpoint != nil {
-		startBlock = fc.finalizedCheckpoint.BlockHash
-	} else if justified := fc.justifiedCheckpoint; justified != nil {
-		startBlock = justified.BlockHash
+		currentBlockHash = fc.finalizedCheckpoint.BlockHash
+	} else if fc.justifiedCheckpoint != nil {
+		currentBlockHash = fc.justifiedCheckpoint.BlockHash
+	} else {
+		// Fallback to Genesis if no checkpoints exist
+		genesis, _ := fc.worldState.GetBlockByHash("") // or height 0
+		if genesis != nil {
+			currentBlockHash = genesis.Hash
+		}
 	}
 
-	// Fallback: If no checkpoints exist, use the simple highest stake method.
-	if startBlock == "" {
-		return fc.getHeadByHighestStake()
-	}
-
-	// 2. Walk down the tree, choosing the heaviest child (LMD GHOST).
-	currentBlock := startBlock
-	maxDepth := 1000 // Safety limit to prevent infinite loops
-
-	for i := 0; i < maxDepth; i++ {
-		children := fc.children[currentBlock]
+	// 2. LMD GHOST Traversal
+	// Loop until we reach a tip (a block with no children)
+	for {
+		children := fc.children[currentBlockHash]
 		if len(children) == 0 {
-			return currentBlock // Found a leaf node; this is the head
+			return currentBlockHash // Found the head
 		}
 
-		heaviestChild := ""
-		heaviestStake := big.NewInt(0)
+		bestChild := ""
+		maxWeight := big.NewInt(0)
 
 		for _, childHash := range children {
-			childStake := fc.getSubtreeStake(childHash)
-			cmp := childStake.Cmp(heaviestStake)
+			// Calculate weight (votes for this child + all its descendants)
+			weight := fc.getSubtreeStake(childHash)
 
+			// 3. Selection Rule: Heaviest Weight wins
+			cmp := weight.Cmp(maxWeight)
 			if cmp > 0 {
-				// New heaviest branch found.
-				heaviestStake = childStake
-				heaviestChild = childHash
-			} else if cmp == 0 && heaviestChild != "" {
-				// RESOLVED: Deterministic Tie-Breaker.
-				// If stake is equal, choose the block with the smaller hash string.
-				if childHash < heaviestChild {
-					heaviestChild = childHash
+				maxWeight = weight
+				bestChild = childHash
+			} else if cmp == 0 {
+				// 4. Tie-Breaker: Deterministic (Lower Hash wins)
+				// This solves the partition edge case where nodes split 50/50.
+				if bestChild == "" || childHash < bestChild {
+					bestChild = childHash
 				}
 			}
 		}
 
-		// If no valid child is found, the current block is the head.
-		if heaviestChild == "" {
-			return currentBlock
-		}
-		currentBlock = heaviestChild
+		// Move down the tree
+		currentBlockHash = bestChild
 	}
-
-	return currentBlock
 }
 
 // getHeadByHighestStake is the fallback when no justified checkpoint exists
@@ -413,25 +408,38 @@ func (fc *ForkChoice) getHeadByHighestStake() string {
 }
 
 // getSubtreeStake calculates stake supporting a subtree using latest messages
-func (fc *ForkChoice) getSubtreeStake(blockHash string) *big.Int {
+func (fc *ForkChoice) getSubtreeStake(rootHash string) *big.Int {
+	totalWeight := big.NewInt(0)
 	currentEpoch := fc.getCurrentEpoch()
-	totalStake := big.NewInt(0)
 
-	// Get latest messages from current epoch
-	if latestVotes := fc.latestMessages[currentEpoch]; latestVotes != nil {
-		for validator, votedBlock := range latestVotes {
-			// Check if this validator's vote supports this block or descendants
-			if fc.isDescendant(votedBlock, blockHash) || votedBlock == blockHash {
-				validatorInfo, err := fc.worldState.GetValidator(validator)
-				if err == nil && validatorInfo != nil && validatorInfo.Active {
-					stake := coremath.ParseBigInt(validatorInfo.Stake)
-					totalStake = coremath.Add(totalStake, stake)
+	// Iterate over the Latest Message of every validator
+	// (This is the "LMD" in LMD GHOST)
+	for epoch, votes := range fc.latestMessages {
+		// Optimization: Only look at recent epochs to reduce complexity
+		if epoch < currentEpoch-2 {
+			continue
+		}
+
+		for validatorAddr, votedBlockHash := range votes {
+			// Check if the validator's vote supports this branch
+			if votedBlockHash == rootHash || fc.isDescendant(votedBlockHash, rootHash) {
+
+				// Get Validator Stake
+				validator, err := fc.worldState.GetValidator(validatorAddr)
+				if err == nil && validator != nil && validator.Active {
+					stake := coremath.ParseBigInt(validator.Stake)
+
+					// Apply Weight Decay (Audit Recommendation)
+					// Reduces the weight of old votes to prevent long-range attacks
+					decayedStake := fc.ApplyWeightDecay(stake, epoch, currentEpoch)
+
+					totalWeight.Add(totalWeight, decayedStake)
 				}
 			}
 		}
 	}
 
-	return totalStake
+	return totalWeight
 }
 
 // OnBlockAdded tracks block relationships when adding blocks to the chain
@@ -561,20 +569,23 @@ func (fc *ForkChoice) isDescendant(childHash, ancestorHash string) bool {
 	if childHash == ancestorHash {
 		return true
 	}
-	currentHash := childHash
-	maxDepth := 1000
-	for i := 0; i < maxDepth; i++ {
-		block, err := fc.worldState.GetBlockByHash(currentHash)
-		if err != nil || block == nil {
+
+	curr := childHash
+	// Safety limit to prevent infinite loops in cyclic graphs (attack vector)
+	for i := 0; i < 100; i++ {
+		block, _ := fc.worldState.GetBlockByHash(curr)
+		if block == nil {
 			return false
 		}
-		if block.Header.PrevHash == ancestorHash {
+		parent := block.Header.PrevHash
+
+		if parent == ancestorHash {
 			return true
 		}
-		if block.Header.PrevHash == "" {
+		if parent == "" {
 			return false
 		}
-		currentHash = block.Header.PrevHash
+		curr = parent
 	}
 	return false
 }
