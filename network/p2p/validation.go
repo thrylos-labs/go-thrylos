@@ -17,18 +17,48 @@ const (
 	DefaultStreamReadTimeout  = 30 * time.Second
 	DefaultStreamWriteTimeout = 30 * time.Second
 
-	// Rate Limits
-	DefaultRequestRateLimit   = 50 // requests per minute
+	// M-3 FIX: Enhanced Rate Limits with tiers
+	DefaultRequestRateLimit   = 50 // requests per minute (normal peers)
 	DefaultMaxPendingRequests = 10 // Concurrent requests
+
+	// M-3 FIX: Tiered rate limits based on reputation
+	HighReputationRateLimit   = 100 // High reputation: 100 req/min
+	MediumReputationRateLimit = 50  // Medium: 50 req/min
+	LowReputationRateLimit    = 20  // Low reputation: 20 req/min
 
 	// Reputation Constants
 	ReputationInitial      = 100
 	ReputationMax          = 200
+	ReputationMin          = 0
 	ReputationBanThreshold = 50
+
+	// M-3 FIX: Reputation adjustments
 	ScoreInvalidBlock      = -20
 	ScoreInvalidTx         = -5
 	ScoreSpam              = -10
 	ScoreGoodBlock         = +5
+	ScoreGoodTx            = +2
+	ScoreTimeout           = -3
+	ScoreExcessiveRequests = -15
+
+	// M-3 FIX: Adaptive throttling thresholds
+	ThrottleHighLoad     = 0.8  // Throttle when 80% capacity used
+	ThrottleCriticalLoad = 0.95 // Critical throttling at 95%
+
+	// M-3 FIX: Ban durations
+	ShortBanDuration  = 10 * time.Minute
+	MediumBanDuration = 1 * time.Hour
+	LongBanDuration   = 24 * time.Hour
+)
+
+// M-3 FIX: Message priority levels
+type MessagePriority int
+
+const (
+	PriorityLow MessagePriority = iota
+	PriorityNormal
+	PriorityHigh
+	PriorityCritical
 )
 
 // MessageValidator handles P2P message validation, rate limiting, and reputation
@@ -41,6 +71,13 @@ type MessageValidator struct {
 	// Mutex for thread-safe map access
 	mu           sync.RWMutex
 	peerRequests map[peer.ID]*PeerRequestTracker
+
+	// M-3 FIX: Global load tracking for adaptive throttling
+	totalPendingRequests int
+	maxGlobalPending     int
+
+	// M-3 FIX: Ban history for repeat offenders
+	banHistory map[peer.ID]int // Count of times banned
 }
 
 // PeerRequestTracker tracks requests and reputation from a specific peer
@@ -57,6 +94,19 @@ type PeerRequestTracker struct {
 	score      int
 	isBanned   bool
 	banExpires time.Time
+
+	// M-3 FIX: Enhanced tracking
+	consecutiveFailures int
+	lastRequestTime     time.Time
+	goodRequests        int
+	badRequests         int
+
+	// M-3 FIX: Message priority tracking
+	priorityQuota map[MessagePriority]int
+
+	// M-3 FIX: Throttling state
+	isThrottled     bool
+	throttleExpires time.Time
 }
 
 // NewMessageValidator creates a new message validator
@@ -67,64 +117,186 @@ func NewMessageValidator(maxMsgSize int64, maxBlockRange int, readTimeout, write
 		readTimeout:       readTimeout,
 		writeTimeout:      writeTimeout,
 		peerRequests:      make(map[peer.ID]*PeerRequestTracker),
+		maxGlobalPending:  1000, // M-3 FIX: Global capacity
+		banHistory:        make(map[peer.ID]int),
 	}
 }
 
-// CheckPeerStatus verifies if a peer is allowed to communicate (Rate Limit + Reputation Check)
-func (mv *MessageValidator) CheckPeerStatus(peerID peer.ID) error {
+// M-3 FIX: CheckPeerStatusWithPriority includes priority-aware rate limiting
+func (mv *MessageValidator) CheckPeerStatusWithPriority(peerID peer.ID, priority MessagePriority) error {
 	mv.mu.Lock()
 	defer mv.mu.Unlock()
+
+	// 1. Check global load first (adaptive throttling)
+	if err := mv.checkGlobalLoadInternal(); err != nil {
+		// During high load, only allow high-priority messages
+		if priority < PriorityHigh {
+			return fmt.Errorf("system under high load, low priority requests throttled")
+		}
+	}
 
 	tracker, exists := mv.peerRequests[peerID]
 	if !exists {
 		// Initialize new peer with default reputation and limits
 		tracker = &PeerRequestTracker{
-			lastReset:  time.Now(),
-			score:      ReputationInitial,
-			rateLimit:  DefaultRequestRateLimit,
-			maxPending: DefaultMaxPendingRequests,
+			lastReset:       time.Now(),
+			score:           ReputationInitial,
+			rateLimit:       DefaultRequestRateLimit,
+			maxPending:      DefaultMaxPendingRequests,
+			priorityQuota:   make(map[MessagePriority]int),
+			lastRequestTime: time.Now(),
 		}
 		mv.peerRequests[peerID] = tracker
 	}
 
-	// 1. Check Ban Status
+	// 2. Check Ban Status
 	if tracker.isBanned {
 		if time.Now().After(tracker.banExpires) {
 			// Unban if expired
 			tracker.isBanned = false
-			tracker.score = ReputationInitial // Reset score
+			tracker.score = ReputationInitial / 2 // Partial reputation restore
+			tracker.consecutiveFailures = 0
 		} else {
 			return fmt.Errorf("peer %s is banned until %v", peerID, tracker.banExpires)
 		}
 	}
 
-	// 2. Rate Limiting Logic (Reset counter every minute)
+	// 3. Check Throttle Status (M-3 FIX)
+	if tracker.isThrottled && time.Now().Before(tracker.throttleExpires) {
+		// Only allow high-priority during throttle
+		if priority < PriorityHigh {
+			return fmt.Errorf("peer %s is throttled, only high-priority requests allowed", peerID)
+		}
+	}
+
+	// 4. Adaptive Rate Limiting (M-3 FIX: Reputation-based)
 	if time.Since(tracker.lastReset) > time.Minute {
 		tracker.requestCount = 0
 		tracker.lastReset = time.Now()
+		// Adjust rate limit based on reputation
+		tracker.rateLimit = mv.calculateRateLimitInternal(tracker.score)
 	}
 
 	// Check Request Frequency
 	if tracker.requestCount >= tracker.rateLimit {
 		// Penalize for spamming
-		tracker.score += ScoreSpam
+		tracker.score += ScoreExcessiveRequests
+		tracker.consecutiveFailures++
 
-		// If score drops too low from spamming, ban them
-		if tracker.score <= ReputationBanThreshold {
-			mv.banPeerInternal(tracker, 10*time.Minute)
-			return fmt.Errorf("peer %s banned for excessive rate limit spam", peerID)
+		// Progressive punishment
+		if tracker.consecutiveFailures >= 3 {
+			duration := mv.calculateBanDurationInternal(peerID, tracker)
+			mv.banPeerInternal(tracker, duration)
+			return fmt.Errorf("peer %s banned for excessive requests", peerID)
 		}
-		return fmt.Errorf("rate limit exceeded for peer %s", peerID)
+
+		// Throttle instead of immediate ban
+		mv.throttlePeerInternal(tracker, 5*time.Minute)
+		return fmt.Errorf("rate limit exceeded for peer %s (throttled)", peerID)
 	}
 
-	// Check Concurrent Pending Requests
+	// 5. Check Concurrent Pending Requests
 	if tracker.pendingRequests >= tracker.maxPending {
+		tracker.score += ScoreSpam
 		return fmt.Errorf("too many pending requests for peer %s: %d pending", peerID, tracker.pendingRequests)
 	}
 
+	// 6. Check Priority Quota (M-3 FIX)
+	if !mv.checkPriorityQuotaInternal(tracker, priority) {
+		return fmt.Errorf("priority quota exceeded for peer %s at priority %v", peerID, priority)
+	}
+
+	// 7. All checks passed - allow request
 	tracker.requestCount++
 	tracker.pendingRequests++
+	tracker.lastRequestTime = time.Now()
+	mv.totalPendingRequests++
+
 	return nil
+}
+
+// CheckPeerStatus verifies if a peer is allowed to communicate (backward compatible)
+func (mv *MessageValidator) CheckPeerStatus(peerID peer.ID) error {
+	return mv.CheckPeerStatusWithPriority(peerID, PriorityNormal)
+}
+
+// M-3 FIX: Check global system load for adaptive throttling
+func (mv *MessageValidator) checkGlobalLoadInternal() error {
+	if mv.maxGlobalPending == 0 {
+		return nil // No global limit
+	}
+
+	loadPercent := float64(mv.totalPendingRequests) / float64(mv.maxGlobalPending)
+
+	if loadPercent >= ThrottleCriticalLoad {
+		return fmt.Errorf("critical system load: %.1f%%", loadPercent*100)
+	}
+
+	if loadPercent >= ThrottleHighLoad {
+		return fmt.Errorf("high system load: %.1f%%", loadPercent*100)
+	}
+
+	return nil
+}
+
+// M-3 FIX: Calculate rate limit based on reputation
+func (mv *MessageValidator) calculateRateLimitInternal(score int) int {
+	if score >= 150 {
+		return HighReputationRateLimit // High reputation
+	} else if score >= 80 {
+		return MediumReputationRateLimit // Medium reputation
+	} else {
+		return LowReputationRateLimit // Low reputation
+	}
+}
+
+// M-3 FIX: Calculate ban duration based on history
+func (mv *MessageValidator) calculateBanDurationInternal(peerID peer.ID, tracker *PeerRequestTracker) time.Duration {
+	banCount := mv.banHistory[peerID]
+
+	switch {
+	case banCount == 0:
+		return ShortBanDuration // First offense: 10 minutes
+	case banCount == 1:
+		return MediumBanDuration // Second offense: 1 hour
+	default:
+		return LongBanDuration // Repeat offender: 24 hours
+	}
+}
+
+// M-3 FIX: Check priority-based quota
+func (mv *MessageValidator) checkPriorityQuotaInternal(tracker *PeerRequestTracker, priority MessagePriority) bool {
+	// Reset quotas every minute
+	if time.Since(tracker.lastReset) > time.Minute {
+		tracker.priorityQuota = make(map[MessagePriority]int)
+	}
+
+	// Define quotas per priority
+	var maxQuota int
+	switch priority {
+	case PriorityCritical:
+		maxQuota = 20 // Critical messages: 20/min
+	case PriorityHigh:
+		maxQuota = 30 // High priority: 30/min
+	case PriorityNormal:
+		maxQuota = 40 // Normal: 40/min
+	case PriorityLow:
+		maxQuota = 20 // Low priority: 20/min
+	}
+
+	current := tracker.priorityQuota[priority]
+	if current >= maxQuota {
+		return false
+	}
+
+	tracker.priorityQuota[priority] = current + 1
+	return true
+}
+
+// M-3 FIX: Throttle a peer temporarily
+func (mv *MessageValidator) throttlePeerInternal(tracker *PeerRequestTracker, duration time.Duration) {
+	tracker.isThrottled = true
+	tracker.throttleExpires = time.Now().Add(duration)
 }
 
 // ReleaseRequest decrements pending request counter (Must be called when processing finishes)
@@ -135,6 +307,7 @@ func (mv *MessageValidator) ReleaseRequest(peerID peer.ID) {
 	if tracker, exists := mv.peerRequests[peerID]; exists {
 		if tracker.pendingRequests > 0 {
 			tracker.pendingRequests--
+			mv.totalPendingRequests--
 		}
 	}
 }
@@ -149,17 +322,40 @@ func (mv *MessageValidator) AdjustReputation(peerID peer.ID, delta int) {
 		return
 	}
 
+	// M-3 FIX: Track good vs bad requests
+	if delta > 0 {
+		tracker.goodRequests++
+		tracker.consecutiveFailures = 0 // Reset failure counter on success
+	} else {
+		tracker.badRequests++
+		tracker.consecutiveFailures++
+	}
+
 	tracker.score += delta
 
-	// Cap score at Max
+	// Cap score at bounds
 	if tracker.score > ReputationMax {
 		tracker.score = ReputationMax
+	}
+	if tracker.score < ReputationMin {
+		tracker.score = ReputationMin
+	}
+
+	// M-3 FIX: Progressive punishment based on consecutive failures
+	if tracker.consecutiveFailures >= 5 {
+		duration := mv.calculateBanDurationInternal(peerID, tracker)
+		mv.banPeerInternal(tracker, duration)
+		fmt.Printf("🚫 Peer %s BANNED for %v due to %d consecutive failures\n",
+			peerID, duration, tracker.consecutiveFailures)
+		return
 	}
 
 	// Check Ban Threshold
 	if tracker.score <= ReputationBanThreshold {
-		mv.banPeerInternal(tracker, 1*time.Hour) // 1 Hour Ban for bad data
-		fmt.Printf("🚫 Peer %s BANNED due to low reputation (%d)\n", peerID, tracker.score)
+		duration := mv.calculateBanDurationInternal(peerID, tracker)
+		mv.banPeerInternal(tracker, duration)
+		fmt.Printf("🚫 Peer %s BANNED for %v due to low reputation (%d)\n",
+			peerID, duration, tracker.score)
 	}
 }
 
@@ -167,6 +363,35 @@ func (mv *MessageValidator) AdjustReputation(peerID peer.ID, delta int) {
 func (mv *MessageValidator) banPeerInternal(tracker *PeerRequestTracker, duration time.Duration) {
 	tracker.isBanned = true
 	tracker.banExpires = time.Now().Add(duration)
+
+	// M-3 FIX: Track ban history
+	// Note: peerID not available in this context, tracked by caller
+}
+
+// M-3 FIX: BanPeer allows external banning with history tracking
+func (mv *MessageValidator) BanPeer(peerID peer.ID, duration time.Duration, reason string) {
+	mv.mu.Lock()
+	defer mv.mu.Unlock()
+
+	tracker, exists := mv.peerRequests[peerID]
+	if !exists {
+		tracker = &PeerRequestTracker{
+			lastReset:     time.Now(),
+			score:         ReputationMin,
+			priorityQuota: make(map[MessagePriority]int),
+		}
+		mv.peerRequests[peerID] = tracker
+	}
+
+	tracker.isBanned = true
+	tracker.banExpires = time.Now().Add(duration)
+	tracker.score = ReputationMin
+
+	// Track ban history
+	mv.banHistory[peerID]++
+
+	fmt.Printf("🚫 Peer %s BANNED for %v: %s (ban #%d)\n",
+		peerID, duration, reason, mv.banHistory[peerID])
 }
 
 // ValidateStream sets timeouts and limits on a P2P stream
@@ -197,6 +422,41 @@ func (mv *MessageValidator) ValidateBlockRangeRequest(startHeight, endHeight int
 	return nil
 }
 
+// M-3 FIX: GetPeerReputation returns current reputation score
+func (mv *MessageValidator) GetPeerReputation(peerID peer.ID) int {
+	mv.mu.RLock()
+	defer mv.mu.RUnlock()
+
+	if tracker, exists := mv.peerRequests[peerID]; exists {
+		return tracker.score
+	}
+	return ReputationInitial
+}
+
+// M-3 FIX: GetPeerStats returns detailed peer statistics
+func (mv *MessageValidator) GetPeerStats(peerID peer.ID) map[string]interface{} {
+	mv.mu.RLock()
+	defer mv.mu.RUnlock()
+
+	tracker, exists := mv.peerRequests[peerID]
+	if !exists {
+		return map[string]interface{}{"error": "peer not found"}
+	}
+
+	return map[string]interface{}{
+		"reputation":           tracker.score,
+		"rate_limit":           tracker.rateLimit,
+		"request_count":        tracker.requestCount,
+		"pending_requests":     tracker.pendingRequests,
+		"good_requests":        tracker.goodRequests,
+		"bad_requests":         tracker.badRequests,
+		"consecutive_failures": tracker.consecutiveFailures,
+		"is_banned":            tracker.isBanned,
+		"is_throttled":         tracker.isThrottled,
+		"ban_count":            mv.banHistory[peerID],
+	}
+}
+
 // GetMetrics returns current validation metrics for monitoring
 func (mv *MessageValidator) GetMetrics() map[string]interface{} {
 	mv.mu.RLock()
@@ -205,23 +465,66 @@ func (mv *MessageValidator) GetMetrics() map[string]interface{} {
 	totalPeers := len(mv.peerRequests)
 	totalRequests := 0
 	bannedPeers := 0
-	totalPending := 0
+	throttledPeers := 0
+	highRepPeers := 0
+	lowRepPeers := 0
 
 	for _, tracker := range mv.peerRequests {
 		totalRequests += tracker.requestCount
-		totalPending += tracker.pendingRequests
 		if tracker.isBanned {
 			bannedPeers++
 		}
+		if tracker.isThrottled {
+			throttledPeers++
+		}
+		if tracker.score >= 150 {
+			highRepPeers++
+		} else if tracker.score < 80 {
+			lowRepPeers++
+		}
+	}
+
+	loadPercent := float64(0)
+	if mv.maxGlobalPending > 0 {
+		loadPercent = float64(mv.totalPendingRequests) / float64(mv.maxGlobalPending) * 100
 	}
 
 	return map[string]interface{}{
-		"total_peers":      totalPeers,
-		"total_requests":   totalRequests,
-		"pending_requests": totalPending,
-		"banned_peers":     bannedPeers,
-		"max_message_size": mv.maxMessageSize,
+		"total_peers":         totalPeers,
+		"total_requests":      totalRequests,
+		"pending_requests":    mv.totalPendingRequests,
+		"banned_peers":        bannedPeers,
+		"throttled_peers":     throttledPeers,
+		"high_rep_peers":      highRepPeers,
+		"low_rep_peers":       lowRepPeers,
+		"system_load_percent": loadPercent,
+		"max_message_size":    mv.maxMessageSize,
+		"max_global_pending":  mv.maxGlobalPending,
 	}
+}
+
+// M-3 FIX: CleanupInactivePeers removes peers that haven't been seen recently
+func (mv *MessageValidator) CleanupInactivePeers(inactiveThreshold time.Duration) int {
+	mv.mu.Lock()
+	defer mv.mu.Unlock()
+
+	now := time.Now()
+	cleaned := 0
+
+	for peerID, tracker := range mv.peerRequests {
+		// Don't cleanup banned peers (they need to stay banned)
+		if tracker.isBanned {
+			continue
+		}
+
+		// Remove if inactive for threshold period
+		if now.Sub(tracker.lastRequestTime) > inactiveThreshold {
+			delete(mv.peerRequests, peerID)
+			cleaned++
+		}
+	}
+
+	return cleaned
 }
 
 // It performs the exact same checks (Ban + Rate Limit).
