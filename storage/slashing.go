@@ -1,23 +1,6 @@
+// storage/slashing.go
 // SlashingStorage handles blockchain slashing data persistence
-//
-// This component manages the persistent storage of slashing-related data for the
-// Proof-of-Stake consensus mechanism. It handles:
-//
-// • Jailed Validators: Tracks validators temporarily excluded from consensus
-// • Slashing Records: Complete audit trail of all slashing events
-// • Processed Evidence: Prevents double-slashing for the same offense
-// • Validator Status: Active/jailed/slashed/exited state tracking
-// • Attestation History: For downtime detection and slashing
-//
-// SlashingStorage operates independently of consensus logic, providing clean
-// separation between storage operations and business logic. It ensures all
-// slashing data survives node restarts and maintains accountability.
-//
-// Key responsibilities:
-// - Atomic storage of slashing events
-// - Deduplication of evidence to prevent double slashing
-// - Efficient bulk loading on node startup
-// - Audit trail for governance and appeals
+// M-2 FIX: Added evidence pruning and archival support
 
 package storage
 
@@ -38,18 +21,43 @@ const (
 	keyPrefixEvidence = "slashing:evidence:"
 	keyPrefixHistory  = "slashing:history:"
 	keyPrefixStatus   = "slashing:status:"
+	// M-2 FIX: Add prefix for archived evidence
+	keyPrefixArchive = "slashing:archive:"
+	// M-2 FIX: Track pruning statistics
+	keyPrefixPruning = "slashing:pruning:stats"
 )
 
 // SlashingStorage handles slashing data persistence
 type SlashingStorage struct {
 	db *badger.DB
+	// M-2 FIX: Track pruning stats
+	pruningStats *PruningStats
+	mu           sync.RWMutex
+}
+
+// M-2 FIX: PruningStats tracks pruning activity
+type PruningStats struct {
+	LastPruneTime       time.Time         `json:"last_prune_time"`
+	TotalPruned         uint64            `json:"total_pruned"`
+	TotalArchived       uint64            `json:"total_archived"`
+	LastPruneCount      uint64            `json:"last_prune_count"`
+	LastArchiveCount    uint64            `json:"last_archive_count"`
+	EvidenceCountByType map[string]uint64 `json:"evidence_count_by_type"`
 }
 
 // NewSlashingStorage creates a new slashing storage handler
 func NewSlashingStorage(db *badger.DB) *SlashingStorage {
-	return &SlashingStorage{
+	ss := &SlashingStorage{
 		db: db,
+		pruningStats: &PruningStats{
+			EvidenceCountByType: make(map[string]uint64),
+		},
 	}
+
+	// M-2 FIX: Load pruning stats on startup
+	_ = ss.loadPruningStats()
+
+	return ss
 }
 
 // Close implements the Storage interface
@@ -194,12 +202,52 @@ func (ss *SlashingStorage) GetSlashingRecords(address string) ([]*types.Slashing
 
 // ===== Processed Evidence Operations =====
 
+// M-2 FIX: Enhanced evidence storage with metadata
+type StoredEvidence struct {
+	Hash        string    `json:"hash"`
+	ProcessedAt time.Time `json:"processed_at"`
+	Type        string    `json:"type"`
+	Validator   string    `json:"validator"`
+}
+
 // SaveProcessedEvidence marks evidence as processed to prevent double slashing
 func (ss *SlashingStorage) SaveProcessedEvidence(evidenceHash string) error {
 	key := keyPrefixEvidence + evidenceHash
 
+	// M-2 FIX: Store metadata with evidence
+	evidence := &StoredEvidence{
+		Hash:        evidenceHash,
+		ProcessedAt: time.Now(),
+	}
+
+	data, err := json.Marshal(evidence)
+	if err != nil {
+		return fmt.Errorf("failed to marshal evidence: %w", err)
+	}
+
 	return ss.db.Update(func(txn *badger.Txn) error {
-		return txn.Set([]byte(key), []byte("1"))
+		return txn.Set([]byte(key), data)
+	})
+}
+
+// M-2 FIX: Enhanced version with metadata
+func (ss *SlashingStorage) SaveProcessedEvidenceWithMetadata(evidenceHash, evidenceType, validator string) error {
+	key := keyPrefixEvidence + evidenceHash
+
+	evidence := &StoredEvidence{
+		Hash:        evidenceHash,
+		ProcessedAt: time.Now(),
+		Type:        evidenceType,
+		Validator:   validator,
+	}
+
+	data, err := json.Marshal(evidence)
+	if err != nil {
+		return fmt.Errorf("failed to marshal evidence: %w", err)
+	}
+
+	return ss.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(key), data)
 	})
 }
 
@@ -244,6 +292,262 @@ func (ss *SlashingStorage) GetAllProcessedEvidence() (map[string]bool, error) {
 	})
 
 	return evidence, err
+}
+
+// ===== M-2 FIX: Evidence Pruning Operations =====
+
+// PruneOldEvidence removes evidence older than the retention period
+func (ss *SlashingStorage) PruneOldEvidence(olderThan time.Time) (uint64, error) {
+	var pruneCount uint64
+
+	err := ss.db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(keyPrefixEvidence)
+
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		var toDelete [][]byte
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+
+			err := item.Value(func(val []byte) error {
+				var stored StoredEvidence
+				if err := json.Unmarshal(val, &stored); err != nil {
+					// Old format - just use key
+					return nil
+				}
+
+				// Check if old enough to prune
+				if stored.ProcessedAt.Before(olderThan) {
+					toDelete = append(toDelete, item.KeyCopy(nil))
+					pruneCount++
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+
+		// Delete marked entries
+		for _, key := range toDelete {
+			if err := txn.Delete(key); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to prune evidence: %w", err)
+	}
+
+	// Update stats
+	ss.mu.Lock()
+	ss.pruningStats.LastPruneTime = time.Now()
+	ss.pruningStats.LastPruneCount = pruneCount
+	ss.pruningStats.TotalPruned += pruneCount
+	ss.mu.Unlock()
+
+	_ = ss.savePruningStats()
+
+	return pruneCount, nil
+}
+
+// ArchiveEvidence moves old evidence to archive storage
+func (ss *SlashingStorage) ArchiveEvidence(evidenceHash string, evidence []byte) error {
+	key := keyPrefixArchive + evidenceHash
+
+	return ss.db.Update(func(txn *badger.Txn) error {
+		// Save to archive
+		if err := txn.Set([]byte(key), evidence); err != nil {
+			return err
+		}
+
+		// Remove from active storage
+		activeKey := keyPrefixEvidence + evidenceHash
+		return txn.Delete([]byte(activeKey))
+	})
+}
+
+// GetArchivedEvidence retrieves evidence from archive
+func (ss *SlashingStorage) GetArchivedEvidence(evidenceHash string) ([]byte, error) {
+	key := keyPrefixArchive + evidenceHash
+
+	var data []byte
+	err := ss.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(key))
+		if err != nil {
+			return err
+		}
+
+		return item.Value(func(val []byte) error {
+			data = append([]byte{}, val...)
+			return nil
+		})
+	})
+
+	if err == badger.ErrKeyNotFound {
+		return nil, nil
+	}
+
+	return data, err
+}
+
+// PruneAndArchive combines pruning with archival
+func (ss *SlashingStorage) PruneAndArchive(archiveAge, pruneAge time.Time) (archived, pruned uint64, err error) {
+	err = ss.db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(keyPrefixEvidence)
+
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		var toArchive []struct{ key, value []byte }
+		var toDelete [][]byte
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+
+			err := item.Value(func(val []byte) error {
+				var stored StoredEvidence
+				if err := json.Unmarshal(val, &stored); err != nil {
+					return nil
+				}
+
+				// Very old - just delete
+				if stored.ProcessedAt.Before(pruneAge) {
+					toDelete = append(toDelete, item.KeyCopy(nil))
+					pruned++
+				} else if stored.ProcessedAt.Before(archiveAge) {
+					// Old but worth archiving
+					toArchive = append(toArchive, struct{ key, value []byte }{
+						key:   item.KeyCopy(nil),
+						value: append([]byte{}, val...),
+					})
+					archived++
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+
+		// Archive entries
+		for _, item := range toArchive {
+			hash := string(item.key)[len(keyPrefixEvidence):]
+			archiveKey := []byte(keyPrefixArchive + hash)
+			if err := txn.Set(archiveKey, item.value); err != nil {
+				return err
+			}
+			if err := txn.Delete(item.key); err != nil {
+				return err
+			}
+		}
+
+		// Delete very old entries
+		for _, key := range toDelete {
+			if err := txn.Delete(key); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to prune and archive: %w", err)
+	}
+
+	// Update stats
+	ss.mu.Lock()
+	ss.pruningStats.LastPruneTime = time.Now()
+	ss.pruningStats.LastArchiveCount = archived
+	ss.pruningStats.LastPruneCount = pruned
+	ss.pruningStats.TotalArchived += archived
+	ss.pruningStats.TotalPruned += pruned
+	ss.mu.Unlock()
+
+	_ = ss.savePruningStats()
+
+	return archived, pruned, nil
+}
+
+// GetEvidenceCount returns count of active evidence entries
+func (ss *SlashingStorage) GetEvidenceCount() (uint64, error) {
+	var count uint64
+
+	err := ss.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(keyPrefixEvidence)
+		opts.PrefetchValues = false
+
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			count++
+		}
+		return nil
+	})
+
+	return count, err
+}
+
+// GetPruningStats returns current pruning statistics
+func (ss *SlashingStorage) GetPruningStats() *PruningStats {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+
+	// Return a copy
+	stats := *ss.pruningStats
+	stats.EvidenceCountByType = make(map[string]uint64)
+	for k, v := range ss.pruningStats.EvidenceCountByType {
+		stats.EvidenceCountByType[k] = v
+	}
+
+	return &stats
+}
+
+// savePruningStats persists pruning statistics
+func (ss *SlashingStorage) savePruningStats() error {
+	ss.mu.RLock()
+	data, err := json.Marshal(ss.pruningStats)
+	ss.mu.RUnlock()
+
+	if err != nil {
+		return fmt.Errorf("failed to marshal pruning stats: %w", err)
+	}
+
+	return ss.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(keyPrefixPruning), data)
+	})
+}
+
+// loadPruningStats loads pruning statistics from storage
+func (ss *SlashingStorage) loadPruningStats() error {
+	err := ss.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(keyPrefixPruning))
+		if err != nil {
+			return err
+		}
+
+		return item.Value(func(val []byte) error {
+			ss.mu.Lock()
+			defer ss.mu.Unlock()
+			return json.Unmarshal(val, ss.pruningStats)
+		})
+	})
+
+	if err == badger.ErrKeyNotFound {
+		return nil // No stats yet
+	}
+
+	return err
 }
 
 // ===== Validator Status Operations =====
@@ -430,6 +734,12 @@ type SlashingConfig struct {
 
 	// Minimum stake required to be a validator
 	MinimumStake string // Default: 1000 tokens
+
+	// M-2 FIX: Pruning configuration
+	EvidenceRetentionDays int  // Days to keep evidence before archiving
+	ArchiveRetentionDays  int  // Days to keep archived evidence before deletion
+	EnableAutoPruning     bool // Automatically prune old evidence
+	PruneIntervalHours    int  // How often to run pruning (hours)
 }
 
 // DefaultSlashingConfig returns sensible default configuration
@@ -438,12 +748,17 @@ func DefaultSlashingConfig() *SlashingConfig {
 		DoubleVotingPenalty:     50,
 		SurroundVotingPenalty:   30,
 		InvalidProposalPenalty:  20,
-		SlashingDowntime:        5, // Renamed field
+		SlashingDowntime:        5,
 		InvalidSignaturePenalty: 10,
 		MaxMissedAttestations:   100,
 		AttestationWindow:       24 * time.Hour,
 		JailDurationHours:       168, // 7 days (168 hours)
 		MinimumStake:            "1000000000000000000000",
+		// M-2 FIX: Pruning defaults
+		EvidenceRetentionDays: 30, // Keep evidence for 30 days
+		ArchiveRetentionDays:  90, // Keep archives for 90 days
+		EnableAutoPruning:     true,
+		PruneIntervalHours:    24, // Prune daily
 	}
 }
 

@@ -1,5 +1,6 @@
 // consensus/pos/slashing_evidence.go
 // Slashing evidence types and broadcasting system
+// M-2 FIX: Added evidence expiration and pruning support
 
 package pos
 
@@ -42,6 +43,17 @@ func (t SlashingEvidenceType) String() string {
 	}
 }
 
+// M-2 FIX: Evidence retention periods by type
+const (
+	// How long to keep evidence before it can be pruned
+	EvidenceRetentionCritical = 90 * 24 * time.Hour // 90 days for critical offenses
+	EvidenceRetentionStandard = 30 * 24 * time.Hour // 30 days for standard offenses
+	EvidenceRetentionMinor    = 7 * 24 * time.Hour  // 7 days for minor offenses
+
+	// Maximum age for evidence to be considered valid for slashing
+	MaxEvidenceAge = 7 * 24 * time.Hour // 7 days
+)
+
 // SlashingEvidence represents evidence of a slashable offense
 type SlashingEvidence struct {
 	// Unique identifier for this evidence
@@ -64,6 +76,12 @@ type SlashingEvidence struct {
 
 	// Reporter's signature on the evidence
 	ReporterSignature []byte `json:"reporter_signature"`
+
+	// M-2 FIX: Track when evidence was processed
+	ProcessedAt int64 `json:"processed_at,omitempty"`
+
+	// M-2 FIX: Track if evidence resulted in slashing
+	SlashingApplied bool `json:"slashing_applied"`
 }
 
 // DoubleVoteEvidence contains proof of double voting
@@ -145,6 +163,7 @@ func NewSlashingEvidence(
 		Evidence:         evidence,
 		Timestamp:        time.Now().Unix(),
 		ReporterAddress:  reporterAddress,
+		SlashingApplied:  false, // M-2 FIX: Initialize as not applied
 	}
 
 	// Generate unique ID from content
@@ -251,12 +270,11 @@ func (se *SlashingEvidence) Validate(registry ValidatorRegistry) error {
 		return fmt.Errorf("evidence timestamp is in the future")
 	}
 
-	const MaxEvidenceAge = 86400 * 7 // 7 days
-	if se.Timestamp < now-MaxEvidenceAge {
+	// M-2 FIX: Use MaxEvidenceAge constant
+	if se.Timestamp < now-int64(MaxEvidenceAge.Seconds()) {
 		return fmt.Errorf("evidence is too old (stale): %d seconds", now-se.Timestamp)
 	}
 
-	// ✅ NEW: Pass registry to type-specific validation
 	return se.validateTypeSpecific(registry)
 }
 
@@ -305,7 +323,7 @@ func (se *SlashingEvidence) validateDoubleVoteEvidence(registry ValidatorRegistr
 		return fmt.Errorf("attestations for same block (not double voting)")
 	}
 
-	// ✅ H-01 FIX: Cryptographic verification
+	// H-01 FIX: Cryptographic verification
 	if registry == nil {
 		return fmt.Errorf("validator registry required for signature verification")
 	}
@@ -351,7 +369,7 @@ func (se *SlashingEvidence) validateSurroundVoteEvidence(registry ValidatorRegis
 
 	validatorAddr := evidence.InnerAttestation.ValidatorAddress
 
-	// ✅ H-01 FIX: Cryptographic verification
+	// H-01 FIX: Cryptographic verification
 	if registry == nil {
 		return fmt.Errorf("validator registry required for signature verification")
 	}
@@ -440,4 +458,63 @@ func (se *SlashingEvidence) Hash() string {
 	data, _ := json.Marshal(se)
 	hash := sha256.Sum256(data)
 	return fmt.Sprintf("%x", hash)
+}
+
+// M-2 FIX: Evidence lifecycle management
+
+// MarkProcessed marks evidence as processed
+func (se *SlashingEvidence) MarkProcessed() {
+	se.ProcessedAt = time.Now().Unix()
+}
+
+// MarkSlashed marks that slashing was applied for this evidence
+func (se *SlashingEvidence) MarkSlashed() {
+	se.SlashingApplied = true
+	if se.ProcessedAt == 0 {
+		se.ProcessedAt = time.Now().Unix()
+	}
+}
+
+// GetRetentionPeriod returns the retention period for this evidence type
+func (se *SlashingEvidence) GetRetentionPeriod() time.Duration {
+	switch se.Type {
+	case EvidenceDoubleVoting, EvidenceSurroundVoting:
+		// Critical offenses - keep longer
+		return EvidenceRetentionCritical
+	case EvidenceInvalidProposal, EvidenceInvalidSignature:
+		// Standard offenses
+		return EvidenceRetentionStandard
+	case EvidenceDowntime:
+		// Minor offenses - shorter retention
+		return EvidenceRetentionMinor
+	default:
+		return EvidenceRetentionStandard
+	}
+}
+
+// CanBePruned checks if evidence is old enough to be pruned
+func (se *SlashingEvidence) CanBePruned() bool {
+	// Evidence can only be pruned if:
+	// 1. It has been processed
+	// 2. It's past the retention period
+
+	if se.ProcessedAt == 0 {
+		// Not yet processed - use creation timestamp
+		return false
+	}
+
+	retentionPeriod := se.GetRetentionPeriod()
+	expiryTime := se.ProcessedAt + int64(retentionPeriod.Seconds())
+
+	return time.Now().Unix() > expiryTime
+}
+
+// Age returns how old the evidence is
+func (se *SlashingEvidence) Age() time.Duration {
+	return time.Since(time.Unix(se.Timestamp, 0))
+}
+
+// IsExpired checks if evidence has exceeded MaxEvidenceAge
+func (se *SlashingEvidence) IsExpired() bool {
+	return se.Age() > MaxEvidenceAge
 }

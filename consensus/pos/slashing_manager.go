@@ -153,6 +153,11 @@ func NewSlashingManager(
 	// Start cleanup goroutine
 	go sm.cleanupPeriodic()
 
+	// M-2 FIX: Start evidence pruning goroutine
+	if sm.storage != nil && sm.config.EnableAutoPruning {
+		go sm.pruneEvidencePeriodic()
+	}
+
 	return sm
 }
 
@@ -220,7 +225,12 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 	// LAYER 6: Mark as Processed
 	sm.processedEvidence[evidenceHash] = true
 	if sm.storage != nil {
-		if err := sm.storage.SaveProcessedEvidence(evidenceHash); err != nil {
+		evidence.MarkProcessed() // M-2 FIX: Mark as processed
+		if err := sm.storage.SaveProcessedEvidenceWithMetadata(
+			evidenceHash,
+			evidence.Type.String(),
+			evidence.ValidatorAddress,
+		); err != nil {
 			log.Printf("⚠️ Failed to persist processed evidence: %v", err)
 		}
 	}
@@ -737,7 +747,12 @@ func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 	sm.processedEvidence[evidenceHash] = true
 
 	if sm.storage != nil {
-		if err := sm.storage.SaveProcessedEvidence(evidenceHash); err != nil {
+		// M-2 FIX: Save with metadata for pruning
+		if err := sm.storage.SaveProcessedEvidenceWithMetadata(
+			evidenceHash,
+			string(record.Condition), // Use condition as type
+			validatorAddress,
+		); err != nil {
 			fmt.Printf("⚠️  Failed to persist processed evidence: %v\n", err)
 		}
 	}
@@ -925,4 +940,62 @@ func (sm *SlashingManager) IsValidatorActive(validatorKey string) bool {
 	}
 
 	return true
+}
+
+// M-2 FIX: pruneEvidencePeriodic runs periodic evidence pruning
+func (sm *SlashingManager) pruneEvidencePeriodic() {
+	if sm.storage == nil {
+		return
+	}
+
+	interval := time.Duration(sm.config.PruneIntervalHours) * time.Hour
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		sm.pruneOldEvidence()
+	}
+}
+
+// M-2 FIX: pruneOldEvidence performs the actual pruning
+func (sm *SlashingManager) pruneOldEvidence() {
+	// Calculate cutoff times
+	archiveAge := time.Now().AddDate(0, 0, -sm.config.EvidenceRetentionDays)
+	pruneAge := time.Now().AddDate(0, 0, -sm.config.ArchiveRetentionDays)
+
+	// Run pruning with archival
+	archived, pruned, err := sm.storage.PruneAndArchive(archiveAge, pruneAge)
+	if err != nil {
+		log.Printf("⚠️ Evidence pruning failed: %v", err)
+		return
+	}
+
+	if archived > 0 || pruned > 0 {
+		log.Printf("📦 Evidence pruning completed: archived=%d, pruned=%d", archived, pruned)
+	}
+
+	// Optional: Log warning if evidence count is growing too fast
+	count, err := sm.storage.GetEvidenceCount()
+	if err == nil && count > 100000 {
+		log.Printf("⚠️ Evidence count high: %d entries", count)
+	}
+}
+
+// M-2 FIX: GetPruningStats returns current pruning statistics
+func (sm *SlashingManager) GetPruningStats() map[string]interface{} {
+	if sm.storage == nil {
+		return nil
+	}
+
+	stats := sm.storage.GetPruningStats()
+	count, _ := sm.storage.GetEvidenceCount()
+
+	return map[string]interface{}{
+		"active_evidence_count": count,
+		"total_pruned":          stats.TotalPruned,
+		"total_archived":        stats.TotalArchived,
+		"last_prune_time":       stats.LastPruneTime,
+		"last_prune_count":      stats.LastPruneCount,
+		"last_archive_count":    stats.LastArchiveCount,
+	}
 }
