@@ -12,6 +12,9 @@ use std::collections::HashSet;
 /// Minimum bytecode size for a valid contract
 const MIN_BYTECODE_SIZE: usize = 1;
 
+
+pub const MIN_DEPLOYMENT_GAS: u64 = 100_000;
+
 /// Maximum bytecode size (EIP-170 limit is 24KB)
 pub const MAX_BYTECODE_SIZE: usize = 24_576; 
 
@@ -25,7 +28,9 @@ mod opcodes {
     pub const JUMPDEST: u8 = 0x5b;
     pub const PUSH1: u8 = 0x60;
     pub const PUSH32: u8 = 0x7f;
+    #[allow(dead_code)]
     pub const RETURN: u8 = 0xf3;
+    #[allow(dead_code)]
     pub const REVERT: u8 = 0xfd;
     pub const INVALID: u8 = 0xfe;
     pub const SELFDESTRUCT: u8 = 0xff;

@@ -1,10 +1,13 @@
 // thrylos-revm/src/lib.rs
 mod ffi_safety;
 mod bytecode_validation;
+mod gas_analyzer;
+use gas_analyzer::GasAnalyzer;
 
 use bytecode_validation::{validate_bytecode, MIN_DEPLOYMENT_GAS};
 use ffi_safety::{ffi_safe_exec, FFIResult, FFIErrorCode};
-
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 // Ultra-fast EVM implementation using revm (Rust)
 // 5-10x faster than go-ethereum
 
@@ -36,6 +39,21 @@ use std::collections::HashMap;
 use dashmap::DashMap;
 use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
+
+
+// Add this struct to lib.rs
+pub struct CircuitBreaker {
+    // Rolling window tracking
+    window_start: AtomicU64,
+    window_gas_used: AtomicU64,
+    window_tx_count: AtomicU64,
+    
+    // Thresholds
+    max_gas_per_window: u64,
+    max_tx_per_window: u64,
+    window_duration_secs: u64,
+}
+
 
 // ============================================================================
 // C FFI Types for Go interop
@@ -232,16 +250,81 @@ impl Database for EmptyDB {
     }
 }
 
+impl CircuitBreaker {
+    pub fn new(max_gas_per_window: u64, max_tx_per_window: u64, window_duration_secs: u64) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        Self {
+            window_start: AtomicU64::new(now),
+            window_gas_used: AtomicU64::new(0),
+            window_tx_count: AtomicU64::new(0),
+            max_gas_per_window,
+            max_tx_per_window,
+            window_duration_secs,
+        }
+    }
+
+    /// Check if transaction should be allowed
+    pub fn check_and_record(&self, gas_limit: u64) -> Result<(), String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let window_start = self.window_start.load(Ordering::Relaxed);
+
+        // Reset window if expired
+        if now >= window_start + self.window_duration_secs {
+            self.window_start.store(now, Ordering::Relaxed);
+            self.window_gas_used.store(0, Ordering::Relaxed);
+            self.window_tx_count.store(0, Ordering::Relaxed);
+        }
+
+        // Check transaction count
+        let tx_count = self.window_tx_count.fetch_add(1, Ordering::Relaxed);
+        if tx_count >= self.max_tx_per_window {
+            return Err(format!(
+                "Circuit breaker: too many transactions in window ({}/{})",
+                tx_count, self.max_tx_per_window
+            ));
+        }
+
+        // Check gas usage
+        let gas_used = self.window_gas_used.fetch_add(gas_limit, Ordering::Relaxed);
+        if gas_used + gas_limit > self.max_gas_per_window {
+            return Err(format!(
+                "Circuit breaker: gas limit exceeded for window ({}/{})",
+                gas_used + gas_limit,
+                self.max_gas_per_window
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn get_stats(&self) -> (u64, u64, u64) {
+        (
+            self.window_gas_used.load(Ordering::Relaxed),
+            self.window_tx_count.load(Ordering::Relaxed),
+            self.window_start.load(Ordering::Relaxed),
+        )
+    }
+}
+
 // ============================================================================
 // EVM Executor - WITH ATOMIC NONCE VALIDATION & RESERVATION SYSTEM
 // ============================================================================
 
 pub struct EVMExecutor {
-    magic: u64,  
+    magic: u64,
     db: ThrylosDB,
     chain_id: u64,
     account_locks: Arc<DashMap<Address, Arc<Mutex<()>>>>,
     reserved_nonces: Arc<RwLock<HashMap<Address, Vec<u64>>>>,
+    circuit_breaker: Arc<CircuitBreaker>, // NEW
 }
 
 impl EVMExecutor {
@@ -260,13 +343,35 @@ impl EVMExecutor {
             cache: CacheDB::new(EmptyDB),
         };
 
+         // Circuit breaker: 300M gas per 10 seconds, max 1000 tx
+        let circuit_breaker = Arc::new(CircuitBreaker::new(
+            300_000_000, // 300M gas per window
+            1000,        // 1000 tx per window
+            10,          // 10 second window
+        ));
+
         Self {
             magic: EXECUTOR_MAGIC,
             db,
             chain_id,
             account_locks: Arc::new(DashMap::new()),
             reserved_nonces: Arc::new(RwLock::new(HashMap::new())),
+            circuit_breaker,
         }
+    }
+
+        // Add gas pre-validation method
+    fn validate_gas_requirements(&self, gas_limit: u64, bytecode: Option<&Bytes>) -> Result<(), String> {
+        // Check circuit breaker
+        self.circuit_breaker.check_and_record(gas_limit)?;
+
+        // If bytecode provided, do static analysis
+        if let Some(code) = bytecode {
+            let estimate = GasAnalyzer::analyze_bytecode(code);
+            GasAnalyzer::validate_gas_estimate(&estimate, gas_limit)?;
+        }
+
+        Ok(())
     }
 
     fn get_account_lock(&self, addr: &Address) -> Arc<Mutex<()>> {
@@ -327,6 +432,41 @@ impl EVMExecutor {
         value: U256,
         nonce: u64,
     ) -> CExecutionResult {
+
+   // SECURITY: Validate gas before execution
+        if let Err(e) = self.validate_gas_requirements(gas_limit, None) {
+            return CExecutionResult {
+                success: 0,
+                gas_used: 0,
+                return_data: CByteSlice {
+                    data: std::ptr::null(),
+                    len: 0,
+                },
+                error_message: CString::new(e).unwrap().into_raw(),
+                error_code: FFIErrorCode::InvalidInput as i32,
+            };
+        }
+
+        // Add calldata gas analysis
+        let calldata_gas = GasAnalyzer::analyze_calldata(data.as_ref());
+        if calldata_gas > gas_limit {
+            return CExecutionResult {
+                success: 0,
+                gas_used: 0,
+                return_data: CByteSlice {
+                    data: std::ptr::null(),
+                    len: 0,
+                },
+                error_message: CString::new(format!(
+                    "Calldata requires {} gas but limit is {}",
+                    calldata_gas, gas_limit
+                ))
+                .unwrap()
+                .into_raw(),
+                error_code: FFIErrorCode::OutOfGas as i32,
+            };
+        }
+
         let account_lock = self.get_account_lock(&caller);
         let _guard = account_lock.lock();
         
@@ -399,6 +539,20 @@ impl EVMExecutor {
         value: U256,
         nonce: u64,
     ) -> CExecutionResult {
+         // SECURITY: Validate gas with bytecode analysis
+        if let Err(e) = self.validate_gas_requirements(gas_limit, Some(&bytecode)) {
+            return CExecutionResult {
+                success: 0,
+                gas_used: 0,
+                return_data: CByteSlice {
+                    data: std::ptr::null(),
+                    len: 0,
+                },
+                error_message: CString::new(e).unwrap().into_raw(),
+                error_code: FFIErrorCode::InvalidInput as i32,
+            };
+        }
+
         let account_lock = self.get_account_lock(&deployer);
         let _guard = account_lock.lock();
         
