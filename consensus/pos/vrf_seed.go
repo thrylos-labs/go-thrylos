@@ -21,8 +21,8 @@ type VRFSeedGenerator struct {
 // NewVRFSeedGenerator creates a new seed generator
 func NewVRFSeedGenerator() *VRFSeedGenerator {
 	return &VRFSeedGenerator{
-		previousOutputs: make([][]byte, 0, 10),
-		maxHistory:      10, // Keep last 10 VRF outputs
+		previousOutputs: make([][]byte, 0, 100),
+		maxHistory:      100, // Keep last 100 VRF outputs (SECURITY FIX H-3)
 	}
 }
 
@@ -114,16 +114,6 @@ func (vsg *VRFSeedGenerator) Reset() {
 // ============================================================================
 // Commit-Reveal Scheme for VRF Protection
 // ============================================================================
-
-// VRFCommitment stores a commitment to a VRF proof before revealing
-type VRFCommitment struct {
-	ValidatorAddress string
-	Commitment       []byte // Hash of (VRF proof + nonce)
-	Nonce            []byte // Random nonce for hiding
-	Slot             uint64
-	Epoch            uint64
-	RevealDeadline   int64 // Timestamp when reveal must happen
-}
 
 // CommitToVRF creates a commitment to a VRF proof
 // This prevents grinding by forcing validators to commit before seeing others' values

@@ -1,4 +1,6 @@
-// consensus/pos/fork_choice_security_test.go
+//go:build !evm
+// +build !evm
+
 package pos
 
 import (

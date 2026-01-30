@@ -1,0 +1,7 @@
+cd revm_wrapper
+cargo clean
+cargo build --release
+cp target/release/libthrylos_revm.a ../lib/
+cp target/release/libthrylos_revm.dylib ../lib/
+cd ..
+go test -run TestForkChoice_ReorgDepthLimit ./consensus/pos -v

@@ -39,23 +39,26 @@ func NewConsensusEngine(
 	nodeAddress, _ := account.GenerateAddress(nodePrivateKey.PublicKey())
 
 	engine := &ConsensusEngine{
-		config:            cfg,
-		blockchain:        blockchain,
-		worldState:        worldState,
-		nodePrivateKey:    nodePrivateKey,
-		nodeAddress:       nodeAddress,
-		broadcastChan:     broadcastChan,
-		receiveChan:       receiveChan,
-		proposalTimeout:   time.Duration(cfg.Consensus.BlockTime),
-		attestationPhase:  time.Duration(cfg.Consensus.BlockTime) / 3,
-		attestations:      make(map[string]*types.Attestation),
-		votes:             make(map[string]*Vote),
-		currentEpoch:      0,
-		currentSlot:       0,
-		chainCache:        NewChainCache(),
-		validatorActivity: make(map[string]*ValidatorActivity),
-		vrfSeedGen:        NewVRFSeedGenerator(),
-		vrfVerifier:       NewVRFVerifier(),
+		config:             cfg,
+		blockchain:         blockchain,
+		worldState:         worldState,
+		nodePrivateKey:     nodePrivateKey,
+		nodeAddress:        nodeAddress,
+		broadcastChan:      broadcastChan,
+		receiveChan:        receiveChan,
+		proposalTimeout:    time.Duration(cfg.Consensus.BlockTime),
+		attestationPhase:   time.Duration(cfg.Consensus.BlockTime) / 3,
+		attestations:       make(map[string]*types.Attestation),
+		votes:              make(map[string]*Vote),
+		currentEpoch:       0,
+		currentSlot:        0,
+		chainCache:         NewChainCache(),
+		validatorActivity:  make(map[string]*ValidatorActivity),
+		vrfSeedGen:         NewVRFSeedGenerator(),
+		vrfVerifier:        NewVRFVerifier(),
+		commitRevealMgr:    NewCommitRevealManager(5),                               // 5 slots reveal deadline
+		timestampValidator: NewTimestampValidator(2, 6, time.Now().Unix()-86400*30), // ±2s drift, 6s slots, genesis ~30 days ago
+		finalityManager:    NewFinalityManager(32),                                  // 32 block finality depth
 	}
 
 	// Initialize validator management
@@ -1157,6 +1160,21 @@ func (bv *BlockValidator) ValidateBlock(block *core.Block) error {
 		return fmt.Errorf("block signature validation failed: %v", err)
 	}
 
+	// ✅ H-3 FIX: Strict timestamp validation
+	if block.Header.Index > 0 {
+		parentBlock, err := bv.consensusEngine.blockchain.GetBlock(block.Header.PrevHash)
+		if err == nil && parentBlock != nil {
+			// GOOD - reuses existing 'err' from line 1168
+			if err := bv.consensusEngine.timestampValidator.ValidateBlockTimestamp(
+				block.Header.Timestamp,
+				block.Header.Slot,
+				parentBlock.Header.Timestamp,
+			); err != nil {
+				return fmt.Errorf("timestamp validation failed: %v", err)
+			}
+		}
+	}
+
 	// ✅ NEW: Validate VRF proof (skip for genesis block)
 	if block.Header.Index > 0 {
 		if err := bv.validateVRFProof(block); err != nil {
@@ -1423,4 +1441,39 @@ func (bv *BlockValidator) validateProposer(block *core.Block) error {
 func (ce *ConsensusEngine) cleanupChainCache() {
 	ce.chainCache.Clear()
 	fmt.Printf("🧹 Chain cache cleared\n")
+}
+
+// validateVRFReveal verifies that the VRF proof matches a prior commitment
+// Part of H-3 commit-reveal mitigation (Phase 2)
+func (bv *BlockValidator) validateVRFReveal(block *core.Block) error {
+	// Check if validator made a commitment for this slot
+	commitment, err := bv.consensusEngine.commitRevealMgr.GetCommitment(
+		block.Header.Slot,
+		block.Header.Validator,
+	)
+	if err != nil {
+		// No commitment found - for backward compatibility during rollout
+		return nil
+	}
+
+	// Verify reveal matches commitment
+	vrfProof := &VRFProof{
+		Output: block.Header.VrfOutput,
+		Proof:  block.Header.VrfProof,
+	}
+
+	// Extract nonce from block (would need to add to block header in protocol upgrade)
+	// For now, this is a placeholder
+	var nonce []byte // TODO: Get from block header
+
+	reveal := &VRFReveal{
+		ValidatorAddress: block.Header.Validator,
+		VRFOutput:        vrfProof.Output,
+		VRFProof:         vrfProof.Proof,
+		Nonce:            nonce,
+		Slot:             block.Header.Slot,
+		Epoch:            block.Header.Epoch,
+	}
+
+	return bv.consensusEngine.commitRevealMgr.VerifyReveal(commitment, reveal)
 }

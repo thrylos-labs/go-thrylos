@@ -127,6 +127,10 @@ type ConsensusEngine struct {
 
 	vrfSeedGen  *VRFSeedGenerator
 	vrfVerifier *VRFVerifier
+
+	commitRevealMgr    *CommitRevealManager
+	timestampValidator *TimestampValidator
+	finalityManager    *FinalityManager
 }
 
 // ForkChoice implements fork choice with memory management
