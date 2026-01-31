@@ -5,8 +5,8 @@
 package pos
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -29,7 +29,9 @@ type CommitRevealManager struct {
 	revealDeadlineSlots int64 // Must reveal within N slots
 	maxPendingSlots     int   // Clean up old data after N slots
 
-	mu sync.RWMutex
+	mu                  sync.RWMutex
+	minRevealDelaySlots int64 // Minimum slots between commit and reveal
+
 }
 
 // VRFCommitment represents a commitment to a future VRF proof
@@ -77,7 +79,8 @@ func NewCommitRevealManager(revealDeadlineSlots int64) *CommitRevealManager {
 		commitments:         make(map[uint64]map[string]*VRFCommitment),
 		reveals:             make(map[uint64]map[string]*VRFReveal),
 		revealDeadlineSlots: revealDeadlineSlots,
-		maxPendingSlots:     1000, // Keep last 1000 slots worth of data
+		minRevealDelaySlots: 2, // MUST wait at least 2 slots (NEW)
+		maxPendingSlots:     1000,
 	}
 }
 
@@ -184,22 +187,27 @@ func (crm *CommitRevealManager) RevealVRF(
 	slot uint64,
 	epoch uint64,
 ) (*VRFReveal, error) {
-
 	crm.mu.Lock()
 	defer crm.mu.Unlock()
 
-	// 1. Check commitment exists
 	commitment, exists := crm.commitments[slot][validatorAddress]
 	if !exists {
 		return nil, fmt.Errorf("no commitment found for validator %s at slot %d",
 			validatorAddress, slot)
 	}
 
-	// 2. Check reveal deadline hasn't passed
 	currentTime := time.Now().Unix()
+
+	// NEW: Check minimum delay requirement
+	minRevealTime := commitment.CommittedAt + (crm.minRevealDelaySlots * 6)
+	if currentTime < minRevealTime {
+		return nil, fmt.Errorf("reveal too early: must wait %d more seconds",
+			minRevealTime-currentTime)
+	}
+
+	// Check reveal deadline hasn't passed
 	if currentTime > commitment.RevealDeadline {
-		return nil, fmt.Errorf("reveal deadline passed (deadline: %d, current: %d)",
-			commitment.RevealDeadline, currentTime)
+		return nil, fmt.Errorf("reveal deadline passed")
 	}
 
 	// 3. Verify commitment matches reveal
@@ -227,6 +235,27 @@ func (crm *CommitRevealManager) RevealVRF(
 	crm.reveals[slot][validatorAddress] = reveal
 
 	return reveal, nil
+}
+
+// Add new function to identify validators who should be slashed:
+func (crm *CommitRevealManager) GetSlashableValidators(currentTime int64) []string {
+	crm.mu.RLock()
+	defer crm.mu.RUnlock()
+
+	slashable := make([]string, 0)
+
+	for _, slotCommitments := range crm.commitments {
+		for validatorAddr, commitment := range slotCommitments {
+			// If deadline passed and no reveal exists
+			if currentTime > commitment.RevealDeadline {
+				if !crm.hasRevealUnsafe(commitment.Slot, validatorAddr) {
+					slashable = append(slashable, validatorAddr)
+				}
+			}
+		}
+	}
+
+	return slashable
 }
 
 // ============================================================================
@@ -484,19 +513,13 @@ func computeCommitmentHash(vrfProof *VRFProof, nonce []byte) []byte {
 
 // generateSecureNonce generates a cryptographically secure 32-byte nonce
 func generateSecureNonce() ([]byte, error) {
-	// Use timestamp + random entropy for nonce generation
 	nonce := make([]byte, 32)
 
-	// Add timestamp (8 bytes)
-	timestamp := time.Now().UnixNano()
-	binary.BigEndian.PutUint64(nonce[0:8], uint64(timestamp))
-
-	// Add random bytes (24 bytes)
-	// In production, use crypto/rand.Read()
-	h := sha256.New()
-	h.Write([]byte(fmt.Sprintf("nonce_%d", timestamp)))
-	randomPart := h.Sum(nil)
-	copy(nonce[8:], randomPart[:24])
+	// Use cryptographically secure random generator
+	_, err := rand.Read(nonce)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate secure random nonce: %w", err)
+	}
 
 	return nonce, nil
 }
