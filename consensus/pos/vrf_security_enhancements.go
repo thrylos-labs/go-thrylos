@@ -451,7 +451,7 @@ func NewEnhancedVRFProtocol(
 			slotDurationSeconds,
 			genesisTimestamp,
 		),
-		commitReveal:       NewCommitRevealManager(revealDeadlineSlots),
+		commitReveal:       NewCommitRevealManager(revealDeadlineSlots, nil),
 		timestampValidator: NewTimestampValidator(maxDriftSeconds, slotDurationSeconds, genesisTimestamp),
 		anomalyDetector:    NewTimestampAnomalyDetector(2.0),
 	}

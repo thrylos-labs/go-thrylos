@@ -7,6 +7,7 @@ package pos
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -23,7 +24,31 @@ const (
 	EvidenceInvalidProposal
 	EvidenceDowntime
 	EvidenceInvalidSignature
+	EvidenceMissedVRFReveal
 )
+
+type MissedVRFRevealEvidence struct {
+	Slot             uint64 `json:"slot"`
+	Epoch            uint64 `json:"epoch"`
+	CommitmentHash   []byte `json:"commitment_hash"`
+	CommittedAt      int64  `json:"committed_at"`
+	RevealDeadline   int64  `json:"reveal_deadline"`
+	CurrentTimestamp int64  `json:"current_timestamp"`
+}
+
+// Validate implements the Evidence interface
+func (e *MissedVRFRevealEvidence) Validate() error {
+	if e.Slot == 0 {
+		return errors.New("slot cannot be zero")
+	}
+	if len(e.CommitmentHash) != 32 {
+		return errors.New("commitment hash must be 32 bytes")
+	}
+	if e.CurrentTimestamp <= e.RevealDeadline {
+		return errors.New("deadline has not passed yet")
+	}
+	return nil
+}
 
 // String returns string representation of evidence type
 func (t SlashingEvidenceType) String() string {

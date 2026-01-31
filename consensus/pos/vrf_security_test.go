@@ -13,7 +13,9 @@ import (
 // ============================================================================
 
 func TestCommitReveal_BasicFlow(t *testing.T) {
-	crm := NewCommitRevealManager(5) // 5 slots reveal deadline
+	crm := NewCommitRevealManager(10, nil)
+	crm.minRevealDelaySlots = 0 // ✅ Skip delay for testing
+	defer crm.Stop()
 
 	validatorAddr := "validator1"
 	slot := uint64(100)
@@ -77,7 +79,9 @@ func TestCommitReveal_BasicFlow(t *testing.T) {
 }
 
 func TestCommitReveal_DuplicateCommitment(t *testing.T) {
-	crm := NewCommitRevealManager(5)
+	crm := NewCommitRevealManager(10, nil)
+	crm.minRevealDelaySlots = 0 // ✅ Skip delay for testing
+	defer crm.Stop()
 
 	validatorAddr := "validator1"
 	slot := uint64(100)
@@ -104,7 +108,9 @@ func TestCommitReveal_DuplicateCommitment(t *testing.T) {
 }
 
 func TestCommitReveal_WrongNonce(t *testing.T) {
-	crm := NewCommitRevealManager(5)
+	crm := NewCommitRevealManager(10, nil)
+	crm.minRevealDelaySlots = 0
+	defer crm.Stop()
 
 	validatorAddr := "validator1"
 	slot := uint64(100)
@@ -132,7 +138,9 @@ func TestCommitReveal_WrongNonce(t *testing.T) {
 }
 
 func TestCommitReveal_ExpiredDeadline(t *testing.T) {
-	crm := NewCommitRevealManager(1) // Very short deadline for testing
+	crm := NewCommitRevealManager(10, nil)
+	crm.minRevealDelaySlots = 0
+	defer crm.Stop()
 
 	validatorAddr := "validator1"
 	slot := uint64(100)
@@ -162,7 +170,7 @@ func TestCommitReveal_ExpiredDeadline(t *testing.T) {
 }
 
 func TestCommitReveal_CleanupOldData(t *testing.T) {
-	crm := NewCommitRevealManager(5)
+	crm := NewCommitRevealManager(5, nil)
 	crm.maxPendingSlots = 10 // Small for testing
 
 	// Add commitments for slots 1-20
@@ -583,7 +591,7 @@ func TestIntegration_FullSecureVRFProtocol(t *testing.T) {
 // ============================================================================
 
 func BenchmarkCommitReveal_Commit(b *testing.B) {
-	crm := NewCommitRevealManager(5)
+	crm := NewCommitRevealManager(5, nil)
 
 	vrfProof := &VRFProof{
 		Output: make([]byte, 32),

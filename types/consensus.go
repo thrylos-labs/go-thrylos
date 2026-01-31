@@ -20,6 +20,8 @@ const (
 	Downtime
 	// InvalidSignature: Validator signs with incorrect key or malformed signature
 	InvalidSignature
+
+	MissedVRFReveal
 )
 
 // Attestation represents a validator's vote on a block
@@ -125,6 +127,8 @@ func (sc SlashingCondition) String() string {
 		return "Downtime"
 	case InvalidSignature:
 		return "InvalidSignature"
+	case MissedVRFReveal:
+		return "MissedVRFReveal" // ✅ NEW: Add this
 	default:
 		return fmt.Sprintf("UnknownCondition(%d)", int(sc))
 	}

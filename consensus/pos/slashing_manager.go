@@ -181,6 +181,7 @@ func (sm *SlashingManager) ValidateEvidence(evidence *SlashingEvidence) error {
 }
 
 // ProcessEvidence processes validated slashing evidence
+// ProcessEvidence processes validated slashing evidence
 func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -225,7 +226,7 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 	// LAYER 6: Mark as Processed
 	sm.processedEvidence[evidenceHash] = true
 	if sm.storage != nil {
-		evidence.MarkProcessed() // M-2 FIX: Mark as processed
+		evidence.MarkProcessed()
 		if err := sm.storage.SaveProcessedEvidenceWithMetadata(
 			evidenceHash,
 			evidence.Type.String(),
@@ -239,7 +240,7 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 	sm.rateLimiter.RecordAcceptance(evidence.ReporterAddress)
 	sm.metrics.RecordValid()
 
-	// LAYER 8: Process Evidence by Type (EXISTING CODE)
+	// LAYER 8: Process Evidence by Type
 	var processErr error
 	switch evidence.Type {
 	case EvidenceDoubleVoting:
@@ -248,8 +249,10 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 			security.LogDoubleSign(evidence.ValidatorAddress, dvEvidence.Attestation1.Slot)
 		}
 		processErr = sm.processDoubleVoteEvidence(evidence)
+
 	case EvidenceSurroundVoting:
 		processErr = sm.processSurroundVoteEvidence(evidence)
+
 	case EvidenceInvalidProposal:
 		dvEvidence, ok := evidence.Evidence.(*InvalidProposalEvidence)
 		if !ok {
@@ -259,6 +262,51 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 			Proposer: evidence.ValidatorAddress,
 			Epoch:    dvEvidence.Proposal.Epoch,
 		}, "evidence submitted")
+
+		// ✅ NEW: VRF Missed Reveal Case
+		// ✅ NEW: VRF Missed Reveal Case
+	case EvidenceMissedVRFReveal:
+		missedRevealEvidence, ok := evidence.Evidence.(*MissedVRFRevealEvidence)
+		if !ok {
+			return fmt.Errorf("invalid evidence format for missed VRF reveal")
+		}
+
+		// Get current stake
+		validator, err := sm.worldState.GetValidator(evidence.ValidatorAddress)
+		if err != nil {
+			return fmt.Errorf("failed to get validator stake: %w", err)
+		}
+
+		// Use coremath.ParseBigInt instead of StringToBigInt
+		currentStake := coremath.ParseBigInt(validator.Stake)
+
+		// Calculate 5% penalty
+		penalty := new(big.Int).Set(currentStake)
+		penalty.Mul(penalty, big.NewInt(5))
+		penalty.Div(penalty, big.NewInt(100))
+
+		// ✅ FIX 1: Use time.Now() instead of evidence.Timestamp (which is int64)
+		// ✅ FIX 2: Don't assign Evidence field - it's already in the outer evidence
+		slashingRecord := &types.SlashingRecord{
+			ValidatorAddress: evidence.ValidatorAddress,
+			SlashedAmount:    penalty.Int64(),
+			Condition:        types.MissedVRFReveal,
+			Timestamp:        time.Now(), // ✅ Use time.Now() not int64
+			Reason:           fmt.Sprintf("Missed VRF reveal for slot %d", missedRevealEvidence.Slot),
+			// ✅ Don't include Evidence field here - applySlashing doesn't need it
+		}
+
+		// Apply slashing with the record
+		processErr = sm.applySlashing(slashingRecord)
+
+		if processErr == nil {
+			log.Printf("⚠️ Slashed validator %s for missed VRF reveal at slot %d (penalty: %s)",
+				evidence.ValidatorAddress,
+				missedRevealEvidence.Slot,
+				penalty.String(),
+			)
+		}
+
 	default:
 		processErr = fmt.Errorf("unsupported evidence type: %v", evidence.Type)
 	}

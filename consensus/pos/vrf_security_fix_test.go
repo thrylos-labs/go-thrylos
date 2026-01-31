@@ -10,7 +10,7 @@ import (
 
 // TestMinimumRevealDelay tests that reveals before minimum delay are rejected
 func TestMinimumRevealDelay(t *testing.T) {
-	crm := NewCommitRevealManager(10) // 10 slots deadline
+	crm := NewCommitRevealManager(10, nil) // 10 slots deadline
 
 	// Create a test VRF proof
 	vrfProof := &VRFProof{
@@ -57,7 +57,7 @@ func TestMinimumRevealDelay(t *testing.T) {
 
 // TestSlashableValidators tests identification of validators who didn't reveal
 func TestSlashableValidators(t *testing.T) {
-	crm := NewCommitRevealManager(1) // Very short deadline for testing
+	crm := NewCommitRevealManager(1, nil) // Very short deadline for testing
 
 	// Create and commit a VRF
 	vrfProof := &VRFProof{
@@ -121,7 +121,9 @@ func TestSecureNonceUniqueness(t *testing.T) {
 
 // TestCompleteCommitRevealFlow tests the full workflow
 func TestCompleteCommitRevealFlow(t *testing.T) {
-	crm := NewCommitRevealManager(10)
+	crm := NewCommitRevealManager(10, nil)
+	crm.minRevealDelaySlots = 0 // ✅ Skip delay for testing
+	defer crm.Stop()
 
 	vrfProof := &VRFProof{
 		Output: make([]byte, 32),

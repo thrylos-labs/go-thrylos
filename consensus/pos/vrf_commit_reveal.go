@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -32,6 +33,14 @@ type CommitRevealManager struct {
 	mu                  sync.RWMutex
 	minRevealDelaySlots int64 // Minimum slots between commit and reveal
 
+	// NEW: Timeout enforcement
+	timeoutMonitor  *time.Ticker
+	stopMonitor     chan bool
+	slashingManager *SlashingManager // Reference to slashing system
+
+	// NEW: Network partition protection
+	lastNetworkCheck   time.Time
+	networkPartitioned bool
 }
 
 // VRFCommitment represents a commitment to a future VRF proof
@@ -74,13 +83,186 @@ type CommitRevealResult struct {
 }
 
 // NewCommitRevealManager creates a new commit-reveal manager
-func NewCommitRevealManager(revealDeadlineSlots int64) *CommitRevealManager {
-	return &CommitRevealManager{
+// NewCommitRevealManager creates a new commit-reveal manager with timeout enforcement
+func NewCommitRevealManager(revealDeadlineSlots int64, slashingMgr *SlashingManager) *CommitRevealManager {
+	crm := &CommitRevealManager{
 		commitments:         make(map[uint64]map[string]*VRFCommitment),
 		reveals:             make(map[uint64]map[string]*VRFReveal),
 		revealDeadlineSlots: revealDeadlineSlots,
-		minRevealDelaySlots: 2, // MUST wait at least 2 slots (NEW)
+		minRevealDelaySlots: 2, // MUST wait at least 2 slots
 		maxPendingSlots:     1000,
+
+		// NEW: Initialize timeout monitoring
+		stopMonitor:      make(chan bool),
+		slashingManager:  slashingMgr,
+		lastNetworkCheck: time.Now(),
+	}
+
+	// Start automatic timeout monitoring
+	crm.startTimeoutMonitor()
+
+	return crm
+}
+
+// ============================================================================
+// TIMEOUT ENFORCEMENT & SLASHING
+// ============================================================================
+
+// startTimeoutMonitor runs a background goroutine to check for expired commitments
+func (crm *CommitRevealManager) startTimeoutMonitor() {
+	// Check every 30 seconds
+	crm.timeoutMonitor = time.NewTicker(30 * time.Second)
+
+	go func() {
+		for {
+			select {
+			case <-crm.timeoutMonitor.C:
+				crm.enforceTimeouts()
+			case <-crm.stopMonitor:
+				crm.timeoutMonitor.Stop()
+				return
+			}
+		}
+	}()
+}
+
+// enforceTimeouts checks for expired commitments and triggers slashing
+func (crm *CommitRevealManager) enforceTimeouts() {
+	currentTime := time.Now().Unix()
+	slashableValidators := crm.GetSlashableValidators(currentTime)
+
+	// Slash each validator that missed their reveal deadline
+	for _, validatorAddr := range slashableValidators {
+		crm.slashMissedReveal(validatorAddr, currentTime)
+	}
+}
+
+// slashMissedReveal applies slashing penalty for missed reveal
+func (crm *CommitRevealManager) slashMissedReveal(validatorAddr string, currentTime int64) {
+	crm.mu.Lock()
+	defer crm.mu.Unlock()
+
+	var missedCommitment *VRFCommitment
+	for _, slotCommitments := range crm.commitments {
+		if commitment, exists := slotCommitments[validatorAddr]; exists {
+			if currentTime > commitment.RevealDeadline {
+				if !crm.hasRevealUnsafe(commitment.Slot, validatorAddr) {
+					missedCommitment = commitment
+					break
+				}
+			}
+		}
+	}
+
+	if missedCommitment == nil {
+		return
+	}
+
+	// ✅ Create proper slashing evidence
+	if crm.slashingManager != nil {
+		missedEvidence := &MissedVRFRevealEvidence{
+			Slot:             missedCommitment.Slot,
+			Epoch:            missedCommitment.Epoch,
+			CommitmentHash:   missedCommitment.Commitment,
+			CommittedAt:      missedCommitment.CommittedAt,
+			RevealDeadline:   missedCommitment.RevealDeadline,
+			CurrentTimestamp: currentTime,
+		}
+
+		evidence := &SlashingEvidence{
+			Type:             EvidenceMissedVRFReveal,
+			ValidatorAddress: validatorAddr,
+			Evidence:         missedEvidence,
+			ReporterAddress:  "system", // System-generated evidence
+			Timestamp:        currentTime,
+		}
+
+		// Submit to slashing manager
+		if err := crm.slashingManager.ProcessEvidence(evidence); err != nil {
+			log.Printf("⚠️ Failed to process missed VRF reveal evidence: %v", err)
+		}
+	}
+
+	// Clean up the missed commitment
+	delete(crm.commitments[missedCommitment.Slot], validatorAddr)
+}
+
+// Stop stops the timeout monitor (call on shutdown)
+func (crm *CommitRevealManager) Stop() {
+	close(crm.stopMonitor)
+}
+
+// ============================================================================
+// DETERMINISTIC FALLBACK RANDOMNESS
+// ============================================================================
+
+// GetRandomnessWithFallback returns VRF randomness with fallback to block hash
+func (crm *CommitRevealManager) GetRandomnessWithFallback(
+	slot uint64,
+	blockHash string,
+) ([]byte, error) {
+	crm.mu.RLock()
+	defer crm.mu.RUnlock()
+
+	// First, try to get revealed VRF outputs
+	slotReveals, hasReveals := crm.reveals[slot]
+
+	if hasReveals && len(slotReveals) > 0 {
+		// Combine all revealed VRF outputs with XOR
+		// This prevents any single validator from controlling randomness
+		combined := make([]byte, 32)
+		count := 0
+
+		for _, reveal := range slotReveals {
+			if len(reveal.VRFOutput) == 32 {
+				for i := 0; i < 32; i++ {
+					combined[i] ^= reveal.VRFOutput[i]
+				}
+				count++
+			}
+		}
+
+		if count > 0 {
+			// Hash the combined output for additional mixing
+			h := sha256.New()
+			h.Write(combined)
+			h.Write([]byte(fmt.Sprintf("slot:%d", slot)))
+			return h.Sum(nil), nil
+		}
+	}
+
+	// FALLBACK: Use deterministic randomness from block hash
+	// This ensures the protocol never stalls
+	if blockHash != "" {
+		h := sha256.New()
+		h.Write([]byte(blockHash))
+		h.Write([]byte(fmt.Sprintf("slot:%d:fallback", slot)))
+		fallbackRandomness := h.Sum(nil)
+
+		log.Printf("⚠️ Using fallback randomness for slot %d (no VRF reveals available)", slot)
+		return fallbackRandomness, nil
+	}
+
+	return nil, fmt.Errorf("no randomness available for slot %d", slot)
+}
+
+// GetRandomnessSources returns information about randomness sources used
+func (crm *CommitRevealManager) GetRandomnessSources(slot uint64) map[string]interface{} {
+	crm.mu.RLock()
+	defer crm.mu.RUnlock()
+
+	slotReveals, hasReveals := crm.reveals[slot]
+
+	vrfCount := 0
+	if hasReveals {
+		vrfCount = len(slotReveals)
+	}
+
+	return map[string]interface{}{
+		"slot":           slot,
+		"vrf_reveals":    vrfCount,
+		"using_fallback": vrfCount == 0,
+		"source":         map[bool]string{true: "block_hash_fallback", false: "vrf_combined"}[vrfCount == 0],
 	}
 }
 
@@ -594,4 +776,75 @@ func (vcrf *ValidatorCommitRevealFlow) Step2_Reveal(
 ) (*VRFReveal, error) {
 
 	return vcrf.crm.RevealVRF(vrfProof, nonce, validatorAddress, slot, epoch)
+}
+
+// ============================================================================
+// NETWORK PARTITION PROTECTION
+// ============================================================================
+
+// checkNetworkPartition detects if network is partitioned
+func (crm *CommitRevealManager) checkNetworkPartition() bool {
+	crm.mu.RLock()
+	defer crm.mu.RUnlock()
+
+	// Check if we've seen recent activity from multiple validators
+	// Simple heuristic: if we have reveals from fewer than 3 validators
+	// in the last 10 slots, we might be partitioned
+
+	recentReveals := 0
+	recentValidators := make(map[string]bool)
+
+	// Count unique validators with reveals in recent slots
+	for _, slotReveals := range crm.reveals {
+		for validatorAddr := range slotReveals {
+			recentValidators[validatorAddr] = true
+		}
+	}
+
+	recentReveals = len(recentValidators)
+
+	// If fewer than 3 validators are revealing, possible partition
+	isPartitioned := recentReveals < 3
+
+	crm.networkPartitioned = isPartitioned
+	crm.lastNetworkCheck = time.Now()
+
+	return isPartitioned
+}
+
+// RevealVRFWithPartitionCheck wraps RevealVRF with partition detection
+func (crm *CommitRevealManager) RevealVRFWithPartitionCheck(
+	vrfProof *VRFProof,
+	nonce []byte,
+	validatorAddress string,
+	slot uint64,
+	epoch uint64,
+) (*VRFReveal, error) {
+
+	// Check for network partition every minute
+	if time.Since(crm.lastNetworkCheck) > time.Minute {
+		if crm.checkNetworkPartition() {
+			log.Printf("⚠️ Network partition detected - limiting VRF reveals")
+		}
+	}
+
+	// If partitioned, be more strict about timing
+	if crm.networkPartitioned {
+		crm.mu.RLock()
+		commitment, exists := crm.commitments[slot][validatorAddress]
+		crm.mu.RUnlock()
+
+		if exists {
+			// Require reveals to happen within a tighter window during partition
+			currentTime := time.Now().Unix()
+			maxRevealTime := commitment.CommittedAt + (crm.revealDeadlineSlots * 3) // 50% of normal window
+
+			if currentTime > maxRevealTime {
+				return nil, fmt.Errorf("reveal rejected: network partition detected and reveal window expired")
+			}
+		}
+	}
+
+	// Proceed with normal reveal
+	return crm.RevealVRF(vrfProof, nonce, validatorAddress, slot, epoch)
 }

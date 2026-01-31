@@ -39,24 +39,24 @@ func NewConsensusEngine(
 	nodeAddress, _ := account.GenerateAddress(nodePrivateKey.PublicKey())
 
 	engine := &ConsensusEngine{
-		config:             cfg,
-		blockchain:         blockchain,
-		worldState:         worldState,
-		nodePrivateKey:     nodePrivateKey,
-		nodeAddress:        nodeAddress,
-		broadcastChan:      broadcastChan,
-		receiveChan:        receiveChan,
-		proposalTimeout:    time.Duration(cfg.Consensus.BlockTime),
-		attestationPhase:   time.Duration(cfg.Consensus.BlockTime) / 3,
-		attestations:       make(map[string]*types.Attestation),
-		votes:              make(map[string]*Vote),
-		currentEpoch:       0,
-		currentSlot:        0,
-		chainCache:         NewChainCache(),
-		validatorActivity:  make(map[string]*ValidatorActivity),
-		vrfSeedGen:         NewVRFSeedGenerator(),
-		vrfVerifier:        NewVRFVerifier(),
-		commitRevealMgr:    NewCommitRevealManager(5),                               // 5 slots reveal deadline
+		config:            cfg,
+		blockchain:        blockchain,
+		worldState:        worldState,
+		nodePrivateKey:    nodePrivateKey,
+		nodeAddress:       nodeAddress,
+		broadcastChan:     broadcastChan,
+		receiveChan:       receiveChan,
+		proposalTimeout:   time.Duration(cfg.Consensus.BlockTime),
+		attestationPhase:  time.Duration(cfg.Consensus.BlockTime) / 3,
+		attestations:      make(map[string]*types.Attestation),
+		votes:             make(map[string]*Vote),
+		currentEpoch:      0,
+		currentSlot:       0,
+		chainCache:        NewChainCache(),
+		validatorActivity: make(map[string]*ValidatorActivity),
+		vrfSeedGen:        NewVRFSeedGenerator(),
+		vrfVerifier:       NewVRFVerifier(),
+		// ✅ DON'T initialize commitRevealMgr yet - needs slashingManager first
 		timestampValidator: NewTimestampValidator(2, 6, time.Now().Unix()-86400*30), // ±2s drift, 6s slots, genesis ~30 days ago
 		finalityManager:    NewFinalityManager(32),                                  // 32 block finality depth
 	}
@@ -78,7 +78,7 @@ func NewConsensusEngine(
 	// Pass SlashingManager placeholder
 	engine.forkChoice = NewForkChoiceWithConfig(cfg, worldState, &SlashingManager{}, fcConfig)
 
-	// Initialize slashing manager with persistent storage
+	// ✅ STEP 1: Initialize slashing manager FIRST (before commitRevealMgr)
 	slashingConfig := &storage.SlashingConfig{
 		DoubleVotingPenalty:     uint8(cfg.Consensus.SlashingDoubleVote),
 		SurroundVotingPenalty:   uint8(cfg.Consensus.SlashingSurroundVote),
@@ -108,8 +108,11 @@ func NewConsensusEngine(
 	// Update fork choice with real slashing manager
 	engine.forkChoice.slashingManager = engine.slashingManager
 
+	// ✅ STEP 2: NOW initialize commitRevealMgr with slashingManager
+	engine.commitRevealMgr = NewCommitRevealManager(10, engine.slashingManager)
+
 	// ============================================================
-	// ✅ NEW: Attach database and load checkpoint
+	// Database and checkpoint loading
 	// ============================================================
 	if badgerDB != nil {
 		// Wrap badger.DB to implement DatabaseStore interface
@@ -172,7 +175,12 @@ func (ce *ConsensusEngine) Start() error {
 
 // Stop halts the consensus process
 func (ce *ConsensusEngine) Stop() error {
-	// Implementation would gracefully stop all goroutines
+
+	// NEW: Stop commit-reveal monitor
+	if ce.commitRevealMgr != nil {
+		ce.commitRevealMgr.Stop()
+	}
+
 	return nil
 }
 
