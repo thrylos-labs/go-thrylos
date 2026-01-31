@@ -37,6 +37,7 @@ RUN chmod +x /app/entrypoint.sh
 RUN mkdir -p /app/data /app/config /app/keys
 
 # Expose ports (P2P, API, Metrics)
-EXPOSE 9000 8080 6060
+# REMOVED: 6060 (pprof debug) - Security Fix THRY-01
+EXPOSE 9000 8080
 
 ENTRYPOINT ["/app/entrypoint.sh"]
