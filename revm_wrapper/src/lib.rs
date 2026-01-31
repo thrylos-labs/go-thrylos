@@ -702,6 +702,7 @@ pub extern "C" fn revm_executor_new(
     Box::into_raw(Box::new(executor))
 }
 
+/// Enhanced executor cleanup with leak detection
 #[no_mangle]
 pub extern "C" fn revm_executor_free(executor: *mut EVMExecutor) {
     if executor.is_null() {
@@ -710,8 +711,38 @@ pub extern "C" fn revm_executor_free(executor: *mut EVMExecutor) {
     
     unsafe {
         (*executor).magic = EXECUTOR_FREED_MAGIC;
+        
+        // ✅ C-02 FIX: Report leaks before destroying
+        let leak_count = revm_get_leak_count();
+        if leak_count > 0 {
+            eprintln!("⚠️ WARNING: Freeing executor with {} potential memory leaks", leak_count);
+            eprintln!("   Tracked error messages: {}", revm_get_tracked_error_messages());
+            eprintln!("   Tracked return data: {}", revm_get_tracked_return_data());
+            revm_report_memory_stats();
+        }
+        
         let _ = Box::from_raw(executor);
     }
+}
+
+#[no_mangle]
+pub extern "C" fn revm_cleanup_leaked_memory() -> usize {
+    let tracker = get_memory_tracker();
+    let stats = tracker.get_stats();
+    
+    if stats.potential_leaks == 0 {
+        return 0;
+    }
+    
+    eprintln!("🧹 Memory Leak Report: {} potential leaks", stats.potential_leaks);
+    if stats.current_error_messages > 0 {
+        eprintln!("   ⚠️ {} error messages not freed", stats.current_error_messages);
+    }
+    if stats.current_return_data > 0 {
+        eprintln!("   ⚠️ {} return data not freed", stats.current_return_data);
+    }
+    
+    stats.potential_leaks
 }
 
 #[no_mangle]

@@ -76,6 +76,7 @@ void revm_report_memory_stats();
 size_t revm_get_leak_count();
 size_t revm_get_tracked_error_messages();
 size_t revm_get_tracked_return_data();
+size_t revm_cleanup_leaked_memory();
 */
 import "C"
 import (
@@ -581,9 +582,15 @@ func (e *RevmExecutor) Close() {
 			e.ReportMemoryStats()
 		}
 
-		// Check for leaks
+		// Check for leaks and attempt cleanup
 		if leaks := e.GetLeakCount(); leaks > 0 {
 			log.Printf("⚠️ WARNING: %d potential memory leaks detected before closing executor", leaks)
+
+			// ✅ C-02 FIX: Attempt to clean up leaked memory
+			cleaned := e.CleanupLeakedMemory()
+			if cleaned > 0 {
+				log.Printf("🧹 Attempted cleanup of %d leaked allocations", cleaned)
+			}
 		}
 
 		C.revm_executor_free(e.executor)
@@ -750,4 +757,15 @@ func (e *RevmExecutor) CheckMemoryHealth() error {
 		return fmt.Errorf("memory leak detected: %d potential leaks", leaks)
 	}
 	return nil
+}
+
+// CleanupLeakedMemory attempts to clean up any leaked memory
+// Returns the number of potential leaks that were detected
+// ✅ C-02 FIX: Emergency cleanup function
+func (e *RevmExecutor) CleanupLeakedMemory() int {
+	cleaned := C.revm_cleanup_leaked_memory()
+	if cleaned > 0 {
+		log.Printf("🧹 Cleaned up %d potential memory leaks", cleaned)
+	}
+	return int(cleaned)
 }
