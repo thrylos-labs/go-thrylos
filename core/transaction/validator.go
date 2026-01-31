@@ -1530,13 +1530,26 @@ func generateTransactionID() string {
 
 // EnsureReplayProtection ensures transaction has proper replay protection fields
 func EnsureReplayProtection(tx *core.Transaction, config *config.Config) error {
-	if tx.ChainId == "" {
-		if config == nil || config.Network.ChainID == "" {
-			return fmt.Errorf("cannot set chain_id: config not available")
+	// AUDIT FIX C-01: Strict validation - config must be available
+	if config == nil || config.Network.ChainID == "" {
+		return fmt.Errorf("cannot set chain_id: config not available")
+	}
+
+	// AUDIT FIX C-01: If chain ID is already set, verify it matches expected chain
+	// This prevents an attacker from creating a transaction on one chain
+	// and replaying it on another chain, even if they control both chains
+	if tx.ChainId != "" {
+		if tx.ChainId != config.Network.ChainID {
+			return fmt.Errorf("chain_id mismatch: transaction has %s, expected %s (prevents cross-chain replay)",
+				tx.ChainId, config.Network.ChainID)
 		}
+		// Chain ID already set correctly, nothing more to do
+	} else {
+		// Chain ID not set, set it now
 		tx.ChainId = config.Network.ChainID
 	}
 
+	// Set timestamp for time-based expiration if not already set
 	if tx.Timestamp == 0 {
 		tx.Timestamp = time.Now().Unix()
 	}
