@@ -1,10 +1,8 @@
 // thrylos-revm/src/lib.rs
 mod ffi_safety;
 mod bytecode_validation;
-mod gas_analyzer;
 mod memory_tracker;
 use memory_tracker::get_memory_tracker;
-use gas_analyzer::GasAnalyzer;
 
 use bytecode_validation::{validate_bytecode, MIN_DEPLOYMENT_GAS};
 use ffi_safety::{ffi_safe_exec, FFIResult, FFIErrorCode, revm_free_error_message};
@@ -29,7 +27,7 @@ const EXECUTOR_FREED_MAGIC: u64 = 0xDEADDEAD_DEADBEEF;
 use revm::{
     db::CacheDB,
     primitives::{
-        Address, Bytecode, Bytes, ExecutionResult, Output, TransactTo, TxEnv, B256, U256,
+        Address, Bytecode, Bytes, TransactTo, TxEnv, B256, U256,
     },
     Database, Evm,
 };
@@ -362,27 +360,6 @@ impl EVMExecutor {
         }
     }
 
-        // Add gas pre-validation method
-    fn validate_gas_requirements(&self, gas_limit: u64, bytecode: Option<&Bytes>) -> Result<(), String> {
-        // Check circuit breaker
-        self.circuit_breaker.check_and_record(gas_limit)?;
-
-        // If bytecode provided, do static analysis
-        if let Some(code) = bytecode {
-            let estimate = GasAnalyzer::analyze_bytecode(code);
-            GasAnalyzer::validate_gas_estimate(&estimate, gas_limit)?;
-        }
-
-        Ok(())
-    }
-
-    fn get_account_lock(&self, addr: &Address) -> Arc<Mutex<()>> {
-        self.account_locks
-            .entry(*addr)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
     pub fn reserve_nonce(&self, address: &Address) -> u64 {
         let mut reserved = self.reserved_nonces.write();
         let c_addr = CAddress {
@@ -465,14 +442,17 @@ impl EVMExecutor {
     let gas_used = result.result.gas_used();
 
    let return_data = if let Some(output) = result.result.output() {
-    let data = output.clone(); // Clone the Bytes
-    let len = data.len();
-    let ptr = data.as_ptr() as *mut u8;
-        
-        // ✅ Track the allocation before forgetting
+        // output is a Bytes (Arc-backed).  We need a pointer that
+        // Vec::from_raw_parts can later reclaim, so copy into an owned Vec
+        // and leak that — not the Arc.
+        let mut owned: Vec<u8> = output.to_vec();
+        let len = owned.len();
+        let ptr = owned.as_mut_ptr();
+        std::mem::forget(owned); // prevent Vec destructor; revm_free_bytes will reclaim
+
+        // ✅ Track the allocation before returning
         get_memory_tracker().track_return_data(ptr, len);
-        std::mem::forget(data);
-        
+
         CByteSlice { data: ptr, len }
     } else {
         CByteSlice {
@@ -494,7 +474,7 @@ impl EVMExecutor {
         let c_msg = CString::new(error_msg)
             .unwrap_or_else(|_| CString::new("Execution reverted").unwrap());
         let msg_ptr = c_msg.into_raw();
-        
+
         // ✅ Track error message
         get_memory_tracker().track_error_message(msg_ptr);
 
@@ -561,14 +541,14 @@ impl EVMExecutor {
     let gas_used = result.result.gas_used();
 
     let return_data = if let Some(output) = result.result.output() {
-    let data = output.clone(); // Clone the Bytes
-    let len = data.len();
-    let ptr = data.as_ptr() as *mut u8;
-        
-        // ✅ Track the allocation before forgetting
+        // Same fix as execute_call: copy into an owned Vec before leaking.
+        let mut owned: Vec<u8> = output.to_vec();
+        let len = owned.len();
+        let ptr = owned.as_mut_ptr();
+        std::mem::forget(owned);
+
         get_memory_tracker().track_return_data(ptr, len);
-        std::mem::forget(data);
-        
+
         CByteSlice { data: ptr, len }
     } else {
         CByteSlice {
@@ -604,63 +584,9 @@ impl EVMExecutor {
     }
 }
 
-    fn convert_result(result: ExecutionResult) -> CExecutionResult {
-        match result {
-            ExecutionResult::Success {
-                gas_used,
-                output,
-                ..
-            } => {
-                let return_data = match output {
-                    Output::Call(data) => data,
-                    Output::Create(data, _) => data,
-                };
-
-                let data_len = return_data.len();
-                let leaked = Box::leak(return_data.to_vec().into_boxed_slice());
-
-                CExecutionResult {
-                    success: 1,
-                    gas_used,
-                    return_data: CByteSlice {
-                        data: leaked.as_ptr(),
-                        len: data_len,
-                    },
-                    error_message: std::ptr::null(),
-                    error_code: FFIErrorCode::Success as i32,
-                }
-            }
-            ExecutionResult::Revert { gas_used, output } => {
-                let data_len = output.len();
-                let leaked = Box::leak(output.to_vec().into_boxed_slice());
-                
-                CExecutionResult {
-                    success: 0,
-                    gas_used,
-                    return_data: CByteSlice {
-                        data: leaked.as_ptr(),
-                        len: data_len,
-                    },
-                    error_message: CString::new("execution reverted")
-                        .unwrap()
-                        .into_raw(),
-                    error_code: FFIErrorCode::Revert as i32,
-                }
-            }
-            ExecutionResult::Halt { reason, gas_used } => CExecutionResult {
-                success: 0,
-                gas_used,
-                return_data: CByteSlice {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                error_message: CString::new(format!("execution halted: {:?}", reason))
-                    .unwrap()
-                    .into_raw(),
-                error_code: FFIErrorCode::ExecutionFailed as i32,
-            },
-        }
-    }
+    // convert_result removed: it used Box::leak and untracked CString::into_raw().
+    // All paths now go through execute_call / deploy_contract, which track every
+    // allocation via get_memory_tracker() before returning.
 
     pub fn is_account_locked(&self, addr: &Address) -> bool {
         if let Some(lock) = self.account_locks.get(addr) {
@@ -819,11 +745,17 @@ fn execute_call_impl(
     let result = executor.execute_call(caller_addr, to_addr, data_bytes, gas_limit, value_u256, nonce);
     
     if result.success == 0 {
+        // Read the error string while the pointer is still valid.
         let msg = if !result.error_message.is_null() {
             unsafe { CStr::from_ptr(result.error_message).to_string_lossy().to_string() }
         } else {
             "Execution failed".to_string()
         };
+        // The CExecutionResult is about to be dropped.  Its error_message and
+        // return_data pointers are tracked by MemoryTracker but nothing will
+        // ever call revm_free_result on this local value, so we must free them
+        // here or they leak permanently.
+        revm_free_result(result);
         return Err(msg);
     }
     
@@ -879,6 +811,9 @@ fn deploy_contract_impl(
         } else {
             "Deployment failed".to_string()
         };
+        // Same as execute_call_impl: free tracked pointers before this local
+        // CExecutionResult is dropped, or they leak permanently.
+        revm_free_result(result);
         return Err(msg);
     }
     

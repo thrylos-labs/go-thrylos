@@ -8,22 +8,6 @@ use std::collections::HashSet;
 use parking_lot::Mutex;
 use std::os::raw::c_char;
 
-/// Memory allocation types for tracking
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AllocationType {
-    ErrorMessage,
-    ReturnData,
-}
-
-/// Individual allocation record
-#[derive(Debug, Clone)]
-struct AllocationRecord {
-    ptr: usize,
-    alloc_type: AllocationType,
-    size: usize,
-    timestamp: u64,
-}
-
 /// Global memory tracker for FFI allocations
 pub struct MemoryTracker {
     // Track allocated pointers by type

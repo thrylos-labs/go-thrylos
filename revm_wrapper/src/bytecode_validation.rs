@@ -42,10 +42,12 @@ pub enum BytecodeValidationError {
     TooSmall,
     TooLarge,
     OnlyStops,
+    #[allow(dead_code)]
     InvalidInitcode,
     SuspiciousPattern,
     StackUnderflow,
     StackOverflow,
+    #[allow(dead_code)]
     InvalidJumpDest,
     TruncatedPush,
     ComplexityLimitExceeded, // Gas bomb protection
@@ -257,23 +259,6 @@ fn is_only_stops(bytecode: &Bytes) -> bool {
     false
 }
 
-/// Check if bytecode has a valid structure (looks like EVM bytecode)
-fn has_valid_structure(bytecode: &Bytes) -> bool {
-    // Valid contracts typically:
-    // 1. Have at least one PUSH operation (to push data onto stack)
-    // 2. End with RETURN or REVERT (to return deployed code)
-    // 3. Don't consist entirely of invalid opcodes
-    
-    let has_push = bytecode.iter().any(|&b| (opcodes::PUSH1..=opcodes::PUSH32).contains(&b));
-    let has_terminator = bytecode.iter().any(|&b| {
-        b == opcodes::RETURN || b == opcodes::REVERT || b == opcodes::STOP
-    });
-    
-    // At minimum, we expect PUSH and a terminator
-    // This is a very loose check - real validation happens in REVM
-    has_push && has_terminator
-}
-
 /// Check for known suspicious patterns
 fn has_suspicious_patterns(bytecode: &Bytes) -> bool {
     // Pattern 1: Excessive SELFDESTRUCT opcodes (> 10)
@@ -352,28 +337,6 @@ pub fn calculate_complexity_score(bytecode: &Bytes) -> u32 {
     score += (call_count * 5).min(20);
     
     score.min(100)
-}
-
-/// Returns (min_stack_required, inputs_popped, outputs_pushed)
-fn get_stack_impact_details(op: u8) -> (i32, i32, i32) {
-    match op {
-        // DUPx (0x80..0x8f): Needs depth x, pops 0, pushes 1
-        0x80..=0x8f => {
-            let n = (op - 0x80 + 1) as i32;
-            (n, 0, 1)
-        },
-        // SWAPx (0x90..0x9f): Needs depth x+1, pops 0, pushes 0 (net)
-        0x90..=0x9f => {
-            let n = (op - 0x90 + 1) as i32;
-            (n + 1, 0, 0)
-        },
-        // Standard ops mapping to (inputs, inputs, outputs)
-        // usage: let (in, out) = old_get_stack_impact(op); (in, in, out)
-        _ => {
-            let (inputs, outputs) = get_stack_impact(op); // your existing function
-            (inputs, inputs, outputs)
-        }
-    }
 }
 
 #[cfg(test)]
