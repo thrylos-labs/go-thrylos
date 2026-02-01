@@ -152,13 +152,16 @@ type VRFVerifier struct {
 	seedGenerator *VRFSeedGenerator
 	// Track seen VRF outputs to detect duplicates
 	seenOutputs map[string]bool
+	// SECURITY FIX: Queue to maintain insertion order for sliding window pruning
+	seenOutputsQueue []string
 }
 
 // NewVRFVerifier creates a new VRF verifier
 func NewVRFVerifier() *VRFVerifier {
 	return &VRFVerifier{
-		seedGenerator: NewVRFSeedGenerator(),
-		seenOutputs:   make(map[string]bool),
+		seedGenerator:    NewVRFSeedGenerator(),
+		seenOutputs:      make(map[string]bool),
+		seenOutputsQueue: make([]string, 0, 10001), // Pre-allocate capacity
 	}
 }
 
@@ -186,10 +189,21 @@ func (vv *VRFVerifier) VerifyVRFWithContext(
 	vv.seenOutputs[outputKey] = true
 	vv.seedGenerator.RecordOutput(vrfProof.Output)
 
-	// Step 4: Cleanup old outputs (prevent memory growth)
-	if len(vv.seenOutputs) > 10000 {
-		// Keep only recent outputs (simple cleanup)
-		vv.seenOutputs = make(map[string]bool)
+	// SECURITY FIX: Sliding Window implementation
+	// Instead of wiping the entire map when full, we track order and remove only the oldest.
+	vv.seenOutputsQueue = append(vv.seenOutputsQueue, outputKey)
+
+	// Step 4: Cleanup old outputs (Sliding Window)
+	if len(vv.seenOutputsQueue) > 10000 {
+		// Identify the oldest element
+		oldestKey := vv.seenOutputsQueue[0]
+
+		// Remove from map (Lookup protection)
+		delete(vv.seenOutputs, oldestKey)
+
+		// Remove from queue (Order tracking)
+		// Note: slicing [1:] is efficient in Go
+		vv.seenOutputsQueue = vv.seenOutputsQueue[1:]
 	}
 
 	return nil
