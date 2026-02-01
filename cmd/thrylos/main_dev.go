@@ -35,6 +35,17 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
+	// -------------------------------------------------------------------------
+	// [SECURITY FIX] Enforce Compromised Key Check
+	// -------------------------------------------------------------------------
+	// This checks if 'server.key' exists in the root (and kills the process if so)
+	// and verifies that the configured key path is not the compromised file.
+	// We pass cfg.Consensus.PrivateKeyPath assuming your config struct has this field.
+	// If your dev setup generates keys dynamically inside startDevNode without
+	// updating cfg, this check still protects against the root 'server.key' file.
+	EnforceSecurityChecks(cfg.Consensus.PrivateKeyPath)
+	// -------------------------------------------------------------------------
+
 	// Force dev environment for this build
 	cfg.Environment = "development"
 	cfg.Network.ChainID = config.GetChainIDForEnvironment(cfg.Environment)

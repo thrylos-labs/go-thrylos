@@ -18,8 +18,8 @@ import (
 )
 
 func main() {
-	EnforceSecurityChecks()
-	// CLI flags for production
+	// 1. Define flags (including -config, even if just for compatibility)
+	configPath := flag.String("config", "", "Path to configuration file (custom paths not supported by current config loader)")
 	dataDir := flag.String("data", "", "Data directory (default from config)")
 	p2pPort := flag.Int("p2p-port", 9000, "P2P listen port")
 	bootstrapStr := flag.String("bootstrap", "", "Comma-separated bootstrap peers")
@@ -29,13 +29,20 @@ func main() {
 
 	flag.Parse()
 
-	// Load base config
+	// 2. Load Config
+	// Note: We call Load() without args because your config package doesn't support paths.
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	// Decide environment: CLI > env var > default
+	// [Fix for Unused Variable Error]
+	// We log the config path if the user provided one, just so the variable 'configPath' is used.
+	if *configPath != "" {
+		log.Printf("ℹ️ Note: -config flag passed as '%s', but using default config location due to loader limitations.", *configPath)
+	}
+
+	// 3. Environment Setup
 	env := strings.ToLower(strings.TrimSpace(*envFlag))
 	if env == "" {
 		env = strings.ToLower(strings.TrimSpace(os.Getenv("THRYLOS_ENVIRONMENT")))
@@ -44,18 +51,15 @@ func main() {
 		env = "production"
 	}
 	cfg.Environment = env
-
-	// Derive chain ID from environment
 	cfg.Network.ChainID = config.GetChainIDForEnvironment(env)
 
 	log.Printf("Starting Thrylos in %q environment (chain-id=%s)", env, cfg.Network.ChainID)
 
-	// Override data dir if provided
 	if *dataDir != "" {
 		cfg.DataDir = *dataDir
 	}
 
-	// Prepare bootstrap peers
+	// 4. Bootstrap Peers
 	var bootstrapPeers []string
 	if *bootstrapStr != "" {
 		for _, p := range strings.Split(*bootstrapStr, ",") {
@@ -68,16 +72,15 @@ func main() {
 		bootstrapPeers = append(bootstrapPeers, cfg.P2P.BootstrapPeers...)
 	}
 
-	// Enforce safe API settings in production-like environments
+	// 5. API Safety Check
 	if isProductionLikeEnvironment(env) {
 		if cfg.API.EnableAPI && !cfg.API.EnableTLS {
 			log.Fatalf("API is enabled but TLS is disabled in %q environment; aborting startup", env)
 		}
-		// Never enable faucet in production-like env
 		cfg.API.EnableFaucet = false
 	}
 
-	// Decide validator key path: CLI flag wins, then config.Validator
+	// 6. Determine Validator Key Path
 	keyPath := strings.TrimSpace(*validatorKeyPath)
 	if keyPath == "" && cfg.Validator.Enabled {
 		keyPath = strings.TrimSpace(cfg.Validator.KeyFilePath)
@@ -86,15 +89,22 @@ func main() {
 		log.Fatalf("no validator key provided; use -validator-key or config.validator.key_file_path")
 	}
 
-	// Load validator/node private key
+	// -------------------------------------------------------------------------
+	// [SECURITY FIX] Enforce Security Checks
+	// -------------------------------------------------------------------------
+	// 1. Verify we aren't using the compromised key.
+	// 2. Ensure the dead code in security_check.go is now used.
+	EnforceSecurityChecks(keyPath)
+	// -------------------------------------------------------------------------
+
+	// 7. Load Private Key
 	privKey, err := loadPrivateKeyFromFile(keyPath)
 	if err != nil {
 		log.Fatalf("failed to load validator private key: %v", err)
 	}
-
 	log.Printf("Loaded validator private key from %s", keyPath)
 
-	// Build NodeConfig for production (no deterministic keys, no built-in faucet)
+	// 8. Configure Node
 	nodeConfig := &node.NodeConfig{
 		Config:            cfg,
 		PrivateKey:        privKey,
@@ -103,23 +113,17 @@ func main() {
 		IsValidator:       *isValidator,
 		DataDir:           cfg.DataDir,
 		CrossShardEnabled: false,
-
-		// Genesis configuration: use config-based genesis; no shared deterministic validators
 		GenesisAccount:    cfg.Genesis.Accounts[0].Address,
 		GenesisSupply:     cfg.Genesis.TotalGenesis,
-		GenesisValidators: nil, // Node.initializeGenesis will create a validator ONLY if IsValidatorNode==true
-
-		// P2P
-		EnableP2P:      cfg.P2P.Enabled,
-		P2PListenPort:  *p2pPort,
-		BootstrapPeers: bootstrapPeers,
-
-		// API (TLS enforced above)
-		EnableAPI: cfg.API.EnableAPI,
-		APIPort:   0, // let node.parsePortFromAddr derive it from cfg.API.RESTAddr
+		GenesisValidators: nil,
+		EnableP2P:         cfg.P2P.Enabled,
+		P2PListenPort:     *p2pPort,
+		BootstrapPeers:    bootstrapPeers,
+		EnableAPI:         cfg.API.EnableAPI,
+		APIPort:           0,
 	}
 
-	// Create node
+	// 9. Start Node
 	thrylosNode, err := node.NewNode(nodeConfig)
 	if err != nil {
 		log.Fatalf("failed to create node: %v", err)
@@ -127,16 +131,14 @@ func main() {
 
 	log.Printf("Node created; starting event loop (validator=%v)", *isValidator)
 
-	// Start node
 	if err := thrylosNode.Start(); err != nil {
 		log.Fatalf("node failed to start: %v", err)
 	}
 
 	log.Printf("Node started successfully")
-	select {} // keep process alive; node manages shutdown via signals internally if implemented
+	select {}
 }
 
-// loadPrivateKeyFromFile expects a hex-encoded ed25519 private key (64 bytes raw).
 func loadPrivateKeyFromFile(path string) (crypto.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
