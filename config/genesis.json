@@ -1,43 +1,23 @@
 {
+  "chain_id": "thrylos-local-1337",
+  "genesis_time": "2026-02-02T19:50:00Z",
   "total_genesis": "15000000000000000000000000",
+  "consensus": {
+    "block_time": 3,
+    "epoch_length": 32,
+    "max_validators": 10,
+    "min_stake": "0"
+  },
   "accounts": [
     {
-      "address": "0xYourColdWalletAddress1...",
-      "balance": "5000000000000000000000000",
-      "purpose": "Foundation Cold Storage (5M Tokens)",
-      "locked": true,
-      "unlock_blocks": 100000
+      "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+      "balance": "14000000000000000000000000",
+      "comment": "Faucet account (14M)"
     },
     {
-      "address": "0xYourBootnodeAddress1...",
-      "balance": "5000000000000000000000000",
-      "purpose": "Bootnode 1 Stake (5M Tokens)",
-      "locked": false,
-      "unlock_blocks": 0
-    },
-    {
-      "address": "0xYourBootnodeAddress2...",
-      "balance": "5000000000000000000000000",
-      "purpose": "Bootnode 2 Stake (5M Tokens)",
-      "locked": false,
-      "unlock_blocks": 0
-    },
-    {
-  "staking": {
-    "max_slashing_events": 3,
-    "min_stake_retention": 0.5,
-    "auto_remove_double_sign": true
-  }
-},
-{
-  "consensus": {
-    "fork_choice": {
-      "max_reorg_depth": 100,
-      "finalization_epochs": 2,
-      "min_stake_for_reorg": 0.66,
-      "checkpoint_interval": 10
+      "address": "0x350b9f27991d9ddd2bc4a41b790bcdfb027bf964",
+      "balance": "1000000000000000000000000",
+      "comment": "Validator Node 1 (1M)"
     }
-  }
-}
   ]
 }

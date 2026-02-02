@@ -57,7 +57,7 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 		},
 	}
 
-	for nodeID := 1; nodeID <= 3; nodeID++ {
+	for nodeID := 1; nodeID <= 1; nodeID++ {
 		priv, err := getNodeSpecificPrivateKey(nodeID)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to derive dev private key for node %d: %w", nodeID, err)
@@ -74,12 +74,12 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 		validator := &core.Validator{
 			Address:        addr,
 			Pubkey:         priv.PublicKey().Bytes(),
-			Stake:          cfg.Staking.MinValidatorStake * 10,
-			SelfStake:      cfg.Staking.MinValidatorStake * 10,
-			DelegatedStake: 0,
+			Stake:          "3000000000000000000000",
+			SelfStake:      "3000000000000000000000",
+			DelegatedStake: "0", // Fix: String "0" instead of int 0
 			Commission:     meta.Commission,
 			Active:         true,
-			Delegators:     make(map[string]int64),
+			Delegators:     make(map[string]string), // Fix: map[string]string instead of int64
 			Name:           meta.Name,
 			Description:    meta.Description,
 			Website:        meta.Website,

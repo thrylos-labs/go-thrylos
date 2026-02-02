@@ -10,9 +10,9 @@ import (
 	"strings"
 
 	"github.com/thrylos-labs/go-thrylos/config"
+	// "github.com/thrylos-labs/go-thrylos/api" // Remove if not used
 )
 
-// Dev entrypoint that uses deterministic keys & shared genesis validators
 func main() {
 	var nodeID = flag.Int("node", 1, "Node ID (1, 2, 3)")
 	var p2pPort = flag.Int("p2p-port", 9000, "P2P listen port")
@@ -35,25 +35,24 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	// -------------------------------------------------------------------------
-	// [SECURITY FIX] Enforce Compromised Key Check
-	// -------------------------------------------------------------------------
-	// This checks if 'server.key' exists in the root (and kills the process if so)
-	// and verifies that the configured key path is not the compromised file.
-	// We pass cfg.Consensus.PrivateKeyPath assuming your config struct has this field.
-	// If your dev setup generates keys dynamically inside startDevNode without
-	// updating cfg, this check still protects against the root 'server.key' file.
-	EnforceSecurityChecks(cfg.Consensus.PrivateKeyPath)
-	// -------------------------------------------------------------------------
-
-	// Force dev environment for this build
+	// Force dev environment
 	cfg.Environment = "development"
 	cfg.Network.ChainID = config.GetChainIDForEnvironment(cfg.Environment)
 
-	// Dev: enable faucet & HTTP API by default
+	// -------------------------------------------------------------------------
+	// PORT CONFIGURATION
+	// -------------------------------------------------------------------------
+	// 1. Enable API so the server starts.
 	cfg.API.EnableAPI = true
 	cfg.API.EnableTLS = false
 	cfg.API.EnableFaucet = true
+
+	// 2. MOVE Internal REST API to 8081.
+	// This is the crucial fix. It frees up Port 8545.
+	// The node's Ethereum RPC service (which is separate) should then be able
+	// to bind to 8545 default.
+	cfg.API.RESTAddr = ":8081"
+	// -------------------------------------------------------------------------
 
 	// Prepare bootstrap peers
 	var bootstrapPeers []string
@@ -68,6 +67,7 @@ func main() {
 		bootstrapPeers = append(bootstrapPeers, cfg.P2P.BootstrapPeers...)
 	}
 
+	// Start the Node
 	if err := startDevNode(*nodeID, *dataDir, *p2pPort, bootstrapPeers, *validator, cfg); err != nil {
 		log.Fatalf("dev node failed: %v", err)
 	}

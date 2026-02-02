@@ -13,8 +13,10 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -56,6 +58,7 @@ type Server struct {
 	rateLimiter     *RateLimiter
 	rateLimitConfig *RateLimitConfig
 	endpointLimiter *EndpointLimiter
+	ethHandler      *EthereumRPCHandler
 }
 
 // ServerConfig represents server configuration
@@ -173,6 +176,72 @@ func NewServerWithConfig(
 	return server
 }
 
+// Add "io" and "bytes" to imports if missing!
+
+func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
+	// 1. Read the body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.writeError(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+	// Restore body so the underlying handlers can read it again
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	// 2. Decode just the Method
+	var req struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		s.writeError(w, "Invalid JSON-RPC", http.StatusBadRequest)
+		return
+	}
+
+	// 3. Dispatch to the correct handler based on the method string
+	switch req.Method {
+	case "eth_chainId":
+		s.ethHandler.ChainId(w, r)
+	case "net_version":
+		s.ethHandler.NetworkId(w, r)
+	case "web3_clientVersion":
+		s.ethHandler.ClientVersion(w, r)
+	case "eth_blockNumber":
+		s.ethHandler.BlockNumber(w, r)
+	case "eth_getBalance":
+		s.ethHandler.GetBalance(w, r)
+	case "eth_getTransactionCount":
+		s.ethHandler.GetTransactionCount(w, r)
+	case "eth_getCode":
+		s.ethHandler.GetCode(w, r)
+	case "eth_sendRawTransaction":
+		s.ethHandler.SendRawTransaction(w, r)
+	case "eth_call":
+		s.ethHandler.Call(w, r)
+	case "eth_estimateGas":
+		s.ethHandler.EstimateGas(w, r)
+	case "eth_gasPrice":
+		s.ethHandler.GasPrice(w, r)
+	case "eth_maxPriorityFeePerGas":
+		s.ethHandler.MaxPriorityFeePerGas(w, r)
+	case "eth_getBlockByNumber":
+		s.ethHandler.GetBlockByNumber(w, r)
+	case "eth_getBlockByHash":
+		s.ethHandler.GetBlockByHash(w, r)
+	case "eth_getTransactionByHash":
+		s.ethHandler.GetTransactionByHash(w, r)
+	case "eth_getTransactionReceipt":
+		s.ethHandler.GetTransactionReceipt(w, r)
+	case "eth_coinbase":
+		s.ethHandler.Coinbase(w, r)
+	case "eth_mining":
+		s.ethHandler.Mining(w, r)
+	case "eth_syncing":
+		s.ethHandler.Syncing(w, r)
+	default:
+		s.writeError(w, fmt.Sprintf("Method %s not supported", req.Method), http.StatusNotFound)
+	}
+}
+
 // Helper to extract port from config address
 func extractPortFromConfig(addr string) int {
 	switch addr {
@@ -228,14 +297,13 @@ func (s *Server) setupRoutes() {
 		}
 	}
 
-	// Initialize the handler defined in ethereum_rpc.go
-	ethAPI := NewEthereumRPCHandler(s.blockchain, s.evmExecutor, chainID)
+	// ✅ FIX: Assign to struct field so the Dispatcher can use it
+	s.ethHandler = NewEthereumRPCHandler(s.blockchain, s.evmExecutor, chainID)
 
-	// ---------------------------------------------------------
-	// 2. Define Subrouters & Middleware
-	// ---------------------------------------------------------
+	// Local variable for existing routes below
+	ethAPI := s.ethHandler
 
-	// API version prefix for Thrylos Native Routes
+	// 2. Define Subrouters
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 
 	// ========== STRICT RATE LIMITING (1 req/sec) ==========
@@ -339,6 +407,9 @@ func (s *Server) setupRoutes() {
 
 	// Storage
 	permissiveRoot.HandleFunc("/eth_getStorageAt", ethAPI.GetStorageAt).Methods("POST", "OPTIONS")
+
+	// This catches standard JSON-RPC requests sent to "/"
+	s.router.HandleFunc("/", s.handleJSONRPC).Methods("POST", "OPTIONS")
 
 	// ---------------------------------------------------------
 	// 4. CORS Configuration
