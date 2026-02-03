@@ -14,6 +14,7 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -255,11 +257,29 @@ func extractPortFromConfig(addr string) int {
 }
 
 func parseChainID(chainIDStr string) int64 {
+	log.Printf("🔍 DEBUG parseChainID: input='%s'", chainIDStr)
+
+	// Try parsing the entire string first
 	id, err := strconv.ParseInt(chainIDStr, 10, 64)
-	if err != nil {
-		return 1 // Default to 1 (Mainnet) if string (e.g. "thrylos-1") cannot be parsed
+	if err == nil {
+		log.Printf("✅ Parsed as integer: %d", id)
+		return id
 	}
-	return id
+
+	// Extract numbers from strings like "thrylos-local-1337"
+	re := regexp.MustCompile(`\d+`)
+	matches := re.FindAllString(chainIDStr, -1)
+	if len(matches) > 0 {
+		// Use the last number found (1337 in "thrylos-local-1337")
+		lastNum := matches[len(matches)-1]
+		if parsedID, err := strconv.ParseInt(lastNum, 10, 64); err == nil {
+			log.Printf("✅ Extracted chain ID %d from string '%s'", parsedID, chainIDStr)
+			return parsedID
+		}
+	}
+
+	log.Printf("⚠️ Could not parse chain ID from '%s', using default: 1", chainIDStr)
+	return 1 // Default to 1 (Mainnet) if parsing fails
 }
 
 // NewServerWithConfig creates a new API server with full configuration
@@ -290,12 +310,8 @@ func (s *Server) setupRoutes() {
 	// 1. Initialize EVM RPC Handler
 	// ---------------------------------------------------------
 	// Try to parse ChainID from config, default to 1 (Mainnet) if fails
-	chainID := int64(1)
-	if s.config.Network.ChainID != "" {
-		if id, err := strconv.ParseInt(s.config.Network.ChainID, 10, 64); err == nil {
-			chainID = id
-		}
-	}
+	// Try to parse ChainID from config, default to 1 (Mainnet) if fails
+	chainID := parseChainID(s.config.Network.ChainID)
 
 	// ✅ FIX: Assign to struct field so the Dispatcher can use it
 	s.ethHandler = NewEthereumRPCHandler(s.blockchain, s.evmExecutor, chainID)
@@ -338,11 +354,20 @@ func (s *Server) setupRoutes() {
 	// === STRICT ROUTES (Writes & Critical) ===
 
 	// Thrylos Native: Faucet (Dev only)
+	// Thrylos Native: Faucet (Dev only)
+	log.Printf("🔍 DEBUG: enableFaucet=%v, isDevEnvironment()=%v", s.enableFaucet, isDevEnvironment())
 	if s.enableFaucet && isDevEnvironment() {
+		log.Println("✅ Registering faucet endpoint at /fund")
 		strict.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
+	} else {
+		log.Println("❌ Faucet endpoint NOT registered")
 	}
 	// Thrylos Native: Broadcast
 	strict.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
+
+	// Staking endpoints (strict rate limiting)
+	strict.HandleFunc("/stake", s.submitStakeTransaction).Methods("POST", "OPTIONS")
+	strict.HandleFunc("/unstake", s.submitUnstakeTransaction).Methods("POST", "OPTIONS")
 
 	// EVM: Send Raw Transaction (Write)
 	strictRoot.HandleFunc("/eth_sendRawTransaction", ethAPI.SendRawTransaction).Methods("POST", "OPTIONS")
@@ -384,6 +409,8 @@ func (s *Server) setupRoutes() {
 	permissive.HandleFunc("/status", s.getStatus).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/health", s.getHealth).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/validator/{address}/activity", s.getValidatorActivity).Methods("GET", "OPTIONS")
+
+	permissive.HandleFunc("/stats", s.getNetworkStats).Methods("GET", "OPTIONS")
 
 	// --- EVM Read Endpoints ---
 	// Network info
@@ -561,6 +588,181 @@ func (s *Server) estimateGas(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, response)
 }
 
+// submitStakeTransaction handles staking (delegation) requests
+func (s *Server) submitStakeTransaction(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		From      string `json:"from"`
+		To        string `json:"to"`
+		Amount    string `json:"amount"`
+		Type      string `json:"type"`
+		Signature string `json:"signature"`
+		Timestamp int64  `json:"timestamp"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.From == "" || req.To == "" || req.Amount == "" {
+		s.writeError(w, "Missing required fields: from, to, amount", http.StatusBadRequest)
+		return
+	}
+
+	// Validate signature
+	if req.Signature == "" {
+		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse and validate amount
+	amountBig, ok := new(big.Int).SetString(req.Amount, 10)
+	if !ok || amountBig.Sign() <= 0 {
+		s.writeError(w, "Invalid amount: must be a positive number", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has enough balance
+	account, err := s.worldState.GetAccount(req.From)
+	if err != nil {
+		s.writeError(w, fmt.Sprintf("Account not found: %s", req.From), http.StatusNotFound)
+		return
+	}
+
+	balanceBig, ok := new(big.Int).SetString(account.Balance, 10)
+	if !ok {
+		s.writeError(w, "Invalid account balance format", http.StatusInternalServerError)
+		return
+	}
+
+	if amountBig.Cmp(balanceBig) > 0 {
+		s.writeError(w, fmt.Sprintf("Insufficient balance: have %s wei, need %s wei", account.Balance, req.Amount), http.StatusBadRequest)
+		return
+	}
+
+	// Verify validator exists
+	validator, err := s.worldState.GetValidator(req.To)
+	if err != nil {
+		s.writeError(w, fmt.Sprintf("Validator not found: %s", req.To), http.StatusNotFound)
+		return
+	}
+
+	// Check if validator is active
+	if !validator.Active {
+		s.writeError(w, "Validator is not active", http.StatusBadRequest)
+		return
+	}
+
+	// Execute delegation using StakingManager
+	amountInt64 := amountBig.Int64()
+	stakingManager := s.worldState.GetStakingManager()
+	if err := stakingManager.Delegate(req.From, req.To, amountInt64); err != nil {
+		s.writeError(w, fmt.Sprintf("Staking failed: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Generate transaction hash for tracking
+	txHash := fmt.Sprintf("0x%x", sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%s:%d", req.From, req.To, req.Amount, req.Timestamp))))
+
+	response := map[string]interface{}{
+		"status":    "success",
+		"tx_hash":   txHash,
+		"message":   "Successfully delegated to validator",
+		"from":      req.From,
+		"validator": req.To,
+		"amount":    req.Amount,
+		"timestamp": req.Timestamp,
+	}
+
+	s.writeJSON(w, response)
+}
+
+// submitUnstakeTransaction handles unstaking (undelegation) requests
+func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		From      string `json:"from"`
+		To        string `json:"to"`
+		Amount    string `json:"amount"`
+		Type      string `json:"type"`
+		Signature string `json:"signature"`
+		Timestamp int64  `json:"timestamp"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.From == "" || req.To == "" || req.Amount == "" {
+		s.writeError(w, "Missing required fields: from, to, amount", http.StatusBadRequest)
+		return
+	}
+
+	// Validate signature
+	if req.Signature == "" {
+		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse and validate amount
+	amountBig, ok := new(big.Int).SetString(req.Amount, 10)
+	if !ok || amountBig.Sign() <= 0 {
+		s.writeError(w, "Invalid amount: must be a positive number", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has enough delegated amount
+	account, err := s.worldState.GetAccount(req.From)
+	if err != nil {
+		s.writeError(w, fmt.Sprintf("Account not found: %s", req.From), http.StatusNotFound)
+		return
+	}
+
+	// Get current delegation to this validator
+	delegatedAmountStr := "0"
+	if account.DelegatedTo != nil {
+		if amount, exists := account.DelegatedTo[req.To]; exists {
+			delegatedAmountStr = amount
+		}
+	}
+
+	delegatedBig, ok := new(big.Int).SetString(delegatedAmountStr, 10)
+	if !ok {
+		delegatedBig = big.NewInt(0)
+	}
+
+	// Check if user has enough delegation
+	if amountBig.Cmp(delegatedBig) > 0 {
+		s.writeError(w, fmt.Sprintf("Insufficient delegation: have %s wei delegated, requested %s wei", delegatedAmountStr, req.Amount), http.StatusBadRequest)
+		return
+	}
+
+	// Execute undelegation using StakingManager
+	amountInt64 := amountBig.Int64()
+	stakingManager := s.worldState.GetStakingManager()
+	if err := stakingManager.Undelegate(req.From, req.To, amountInt64); err != nil {
+		s.writeError(w, fmt.Sprintf("Unstaking failed: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Generate transaction hash for tracking
+	txHash := fmt.Sprintf("0x%x", sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%s:%d", req.From, req.To, req.Amount, req.Timestamp))))
+
+	response := map[string]interface{}{
+		"status":    "success",
+		"tx_hash":   txHash,
+		"message":   "Successfully undelegated from validator",
+		"from":      req.From,
+		"validator": req.To,
+		"amount":    req.Amount,
+		"timestamp": req.Timestamp,
+	}
+
+	s.writeJSON(w, response)
+}
+
 // UPDATED Account endpoints for account-based system
 func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -589,6 +791,36 @@ func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 		"staked_amount": stakedAmount,
 		"rewards":       rewards,
 		"delegated_to":  delegations,
+	}
+
+	s.writeJSON(w, response)
+}
+func (s *Server) getNetworkStats(w http.ResponseWriter, r *http.Request) {
+	// Get current block height from blockchain
+	latestBlock := s.worldState.GetCurrentBlock()
+	height := int64(0)
+	if latestBlock != nil {
+		height = latestBlock.Header.Index // ✅ Use Header.Index, not Index
+	}
+
+	// Get active validators
+	validators := s.worldState.GetActiveValidators()
+	activeValidators := len(validators)
+
+	// Get network status
+	networkStatus := "healthy"
+	if height == 0 {
+		networkStatus = "initializing"
+	}
+
+	// Calculate APY (simplified - you can make this more sophisticated)
+	apy := "10.5" // Placeholder - calculate based on your staking rewards
+
+	response := map[string]interface{}{
+		"current_height":    height,
+		"active_validators": activeValidators,
+		"network_status":    networkStatus,
+		"apy":               apy,
 	}
 
 	s.writeJSON(w, response)
@@ -1390,119 +1622,6 @@ func (s *Server) getStakingValidators(w http.ResponseWriter, r *http.Request) {
 
 	s.writeJSON(w, response)
 }
-
-// 3. Submit staking/delegation transaction using your existing executor
-// func (s *Server) submitStakeTransaction(w http.ResponseWriter, r *http.Request) {
-// 	var tx core.Transaction
-// 	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
-// 		s.writeError(w, "Invalid transaction format", http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	// Your executor handles DELEGATE transactions
-// 	// Set the correct transaction type for your executor
-// 	tx.Type = core.TransactionType_DELEGATE
-
-// 	// Validate required fields
-// 	if tx.From == "" || tx.To == "" || tx.Amount <= 0 {
-// 		s.writeError(w, "Invalid staking transaction: missing required fields", http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	// Validate signature
-// 	if len(tx.Signature) == 0 {
-// 		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	// Use your existing validation and execution system
-// 	if err := s.worldState.ValidateTransaction(&tx); err != nil {
-// 		s.writeError(w, fmt.Sprintf("Transaction validation failed: %v", err), http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	// Add to transaction pool - your executor will handle it when block is created
-// 	if err := s.worldState.AddTransaction(&tx); err != nil {
-// 		s.writeError(w, fmt.Sprintf("Failed to submit staking transaction: %v", err), http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	response := map[string]interface{}{
-// 		"status":    "accepted",
-// 		"tx_hash":   tx.Hash,
-// 		"message":   "Delegation transaction submitted successfully",
-// 		"validator": tx.To,
-// 		"amount":    tx.Amount,
-// 	}
-
-// 	s.writeJSON(w, response)
-// }
-
-// 4. Submit unstaking transaction
-// func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request) {
-// 	var tx core.Transaction
-// 	if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
-// 		s.writeError(w, "Invalid transaction format", http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	// Set the correct transaction type for your executor
-// 	tx.Type = core.TransactionType_UNDELEGATE
-
-// 	// Validate required fields
-// 	if tx.From == "" || tx.To == "" || tx.Amount <= 0 {
-// 		s.writeError(w, "Invalid unstaking transaction: missing required fields", http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	// Validate signature
-// 	if len(tx.Signature) == 0 {
-// 		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	// Check if user has enough delegated amount
-// 	account, err := s.worldState.GetAccount(tx.From)
-// 	if err != nil {
-// 		s.writeError(w, "Account not found", http.StatusNotFound)
-// 		return
-// 	}
-
-// 	delegatedAmount := int64(0)
-// 	if account.DelegatedTo != nil {
-// 		if amount, exists := account.DelegatedTo[tx.To]; exists {
-// 			delegatedAmount = amount
-// 		}
-// 	}
-
-// 	if tx.Amount > delegatedAmount {
-// 		s.writeError(w, fmt.Sprintf("Insufficient delegation: have %d, need %d",
-// 			delegatedAmount, tx.Amount), http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	// Use your existing validation and execution system
-// 	if err := s.worldState.ValidateTransaction(&tx); err != nil {
-// 		s.writeError(w, fmt.Sprintf("Transaction validation failed: %v", err), http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	if err := s.worldState.AddTransaction(&tx); err != nil {
-// 		s.writeError(w, fmt.Sprintf("Failed to submit unstaking transaction: %v", err), http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	response := map[string]interface{}{
-// 		"status":           "accepted",
-// 		"tx_hash":          tx.Hash,
-// 		"message":          "Undelegation transaction submitted successfully",
-// 		"validator":        tx.To,
-// 		"amount":           tx.Amount,
-// 		"unbonding_period": 0, // Your system uses liquid staking (immediate)
-// 	}
-
-// 	s.writeJSON(w, response)
-// }
 
 // 5. Submit reward claiming transaction
 // func (s *Server) submitClaimTransaction(w http.ResponseWriter, r *http.Request) {

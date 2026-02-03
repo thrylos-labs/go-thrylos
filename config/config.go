@@ -16,7 +16,7 @@ var (
 	// Chain IDs
 	MainnetChainID = "thrylos-1"
 	TestnetChainID = "thrylos-testnet-1"
-	DevnetChainID  = "thrylos-devnet-1"
+	DevnetChainID  = "thrylos-devnet-1337"
 
 	// Base Unit (1 THRYLOS = 10^18 Wei)
 	BaseUnit = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)

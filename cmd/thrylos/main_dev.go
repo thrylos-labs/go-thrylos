@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/thrylos-labs/go-thrylos/config"
-	// "github.com/thrylos-labs/go-thrylos/api" // Remove if not used
 )
 
 func main() {
@@ -42,16 +41,14 @@ func main() {
 	// -------------------------------------------------------------------------
 	// PORT CONFIGURATION
 	// -------------------------------------------------------------------------
-	// 1. Enable API so the server starts.
 	cfg.API.EnableAPI = true
 	cfg.API.EnableTLS = false
 	cfg.API.EnableFaucet = true
-
-	// 2. MOVE Internal REST API to 8081.
-	// This is the crucial fix. It frees up Port 8545.
-	// The node's Ethereum RPC service (which is separate) should then be able
-	// to bind to 8545 default.
 	cfg.API.RESTAddr = ":8081"
+
+	// ✅ REMOVED: cfg.Consensus.MinStake = "0"
+	// The minimum stake is controlled by cfg.Staking.MinValidatorStake
+	// which is already set in config.go and genesis.json
 	// -------------------------------------------------------------------------
 
 	// Prepare bootstrap peers

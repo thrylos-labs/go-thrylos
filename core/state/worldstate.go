@@ -156,7 +156,9 @@ func (ws *WorldState) InitializeFromConfig() error {
 	ws.totalSupply = totalGenesisBalanceBig.String()
 
 	// Genesis block uses fixed timestamp for deterministic hash
-	genesisTimestamp := int64(1700000000) // Nov 14, 2023 22:13:20 GMT
+	// Align genesis to current slot boundary (6-second slots)
+	currentTime := time.Now().Unix()
+	genesisTimestamp := (currentTime / 6) * 6 // Round down to nearest 6-second boundary
 
 	// Initialize genesis block (block 0)
 	genesisBlock := &core.Block{
@@ -298,14 +300,13 @@ func (ws *WorldState) GetBadgerDB() *badger.DB {
 
 // InitializeGenesis initializes the world state with genesis data
 // ✅ UPDATE: initialSupply changed from int64 -> string
+// InitializeGenesis initializes the world state with genesis data
 func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply string, genesisValidators []*core.Validator) error {
 	// 1. Acquire Global Locks
 	ws.chainMu.Lock()
 	defer ws.chainMu.Unlock()
-
 	ws.validatorMu.Lock()
 	defer ws.validatorMu.Unlock()
-
 	ws.stateRootMu.Lock()
 	defer ws.stateRootMu.Unlock()
 
@@ -315,20 +316,45 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply str
 	}
 
 	// Use config supply if not specified
-	// ✅ Check for empty string or "0" instead of integer <= 0
 	if initialSupply == "" || initialSupply == "0" {
 		initialSupply = ws.config.Economics.GenesisSupply
 	}
 
-	// Create genesis account
-	ws.accountMu.Lock(genesisAccount)
+	// ✅ NEW: Load ALL genesis accounts from config instead of just one
+	if len(ws.config.Genesis.Accounts) > 0 {
+		fmt.Printf("💰 Loading %d genesis accounts from config...\n", len(ws.config.Genesis.Accounts))
 
-	// ✅ Pass string directly (CreateGenesisAccount must also accept string now)
-	err := ws.accountManager.CreateGenesisAccount(genesisAccount, initialSupply)
-	ws.accountMu.Unlock(genesisAccount)
+		for _, genesisAcct := range ws.config.Genesis.Accounts {
+			ws.accountMu.Lock(genesisAcct.Address)
+			err := ws.accountManager.CreateGenesisAccount(genesisAcct.Address, genesisAcct.Balance)
+			ws.accountMu.Unlock(genesisAcct.Address)
 
-	if err != nil {
-		return fmt.Errorf("failed to create genesis account: %v", err)
+			if err != nil {
+				fmt.Printf("⚠️  Failed to create genesis account %s: %v\n", genesisAcct.Address, err)
+				continue
+			}
+
+			// Display balance in THRYLOS
+			balance := math.ParseBigInt(genesisAcct.Balance)
+			if balance != nil {
+				thrylosBalance := new(big.Float).Quo(
+					new(big.Float).SetInt(balance),
+					new(big.Float).SetInt(config.BaseUnit),
+				)
+				fmt.Printf("✅ Created genesis account %s with %s THRYLOS\n",
+					genesisAcct.Address, thrylosBalance.Text('f', 2))
+			}
+		}
+	} else {
+		// Fallback: Create single genesis account (backward compatibility)
+		fmt.Printf("💰 Creating single genesis account (no accounts in genesis.json)\n")
+		ws.accountMu.Lock(genesisAccount)
+		err := ws.accountManager.CreateGenesisAccount(genesisAccount, initialSupply)
+		ws.accountMu.Unlock(genesisAccount)
+
+		if err != nil {
+			return fmt.Errorf("failed to create genesis account: %v", err)
+		}
 	}
 
 	// Initialize validators
@@ -339,7 +365,6 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply str
 	}
 
 	// Set initial state
-	// ✅ Assign string directly
 	ws.totalSupply = initialSupply
 	ws.height = 0
 

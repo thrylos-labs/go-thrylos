@@ -237,6 +237,7 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		cancelFunc:        cancelFunc,
 		genesisValidators: nodeConfig.GenesisValidators,
 	}
+
 	if nodeConfig.EnableAPI {
 		apiPort := nodeConfig.APIPort
 		if apiPort == 0 {
@@ -260,13 +261,21 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 				apiConfig,
 			)
 		} else {
-			// PASS bc AND revmExecutor HERE
-			node.apiManager = api.NewAPIManager(
+			// ✅ FIX: Use NewAPIManagerWithConfig for HTTP mode too to enable faucet
+			apiConfig := &api.APIManagerConfig{
+				Port:         apiPort,
+				EnableTLS:    false,
+				CertFile:     "",
+				KeyFile:      "",
+				EnableFaucet: nodeConfig.Config.API.EnableFaucet,
+			}
+
+			node.apiManager = api.NewAPIManagerWithConfig(
 				worldState,
 				bc,
 				revmExecutor,
 				nodeConfig.Config,
-				apiPort,
+				apiConfig,
 			)
 		}
 	}
@@ -943,61 +952,62 @@ func (n *Node) storeGenesisConfig(config *NodeConfig) {
 }
 
 func (n *Node) initializeGenesis() error {
-	// Check if validators already exist instead of just checking height
-	existingValidators := n.blockchain.GetActiveValidators()
-	if len(existingValidators) >= len(n.genesisValidators) && len(n.genesisValidators) > 0 {
-		fmt.Printf("🏛️  Genesis validators already initialized (%d active validators)\n", len(existingValidators))
+	// Check if genesis block already exists
+	if n.blockchain.GetGenesisBlock() != nil {
+		fmt.Printf("🏛️  Genesis block already exists, skipping initialization\n")
 		return nil
 	}
 
-	// Use ALL genesis validators from config, not just this node's validator
+	// ✅ NEW: Initialize the blockchain genesis with accounts and validators
+	fmt.Printf("🏗️  Initializing blockchain genesis...\n")
+
+	// Get genesis data from stored config
+	genesisAccount := ""
+	genesisSupply := n.config.Economics.GenesisSupply
+
+	// Use first genesis account if available
+	if len(n.config.Genesis.Accounts) > 0 {
+		genesisAccount = n.config.Genesis.Accounts[0].Address
+	}
+
+	// Prepare genesis validators
 	genesisValidators := n.genesisValidators
 
 	// If no genesis validators provided, create one for this node (backward compatibility)
 	if len(genesisValidators) == 0 && n.isValidatorNode {
 		genesisValidators = []*core.Validator{
 			{
-				Address: n.nodeAddress,
-				Pubkey:  n.nodePrivateKey.PublicKey().Bytes(),
-
-				// ✅ Now works: Assigning String to String
-				Stake:     n.config.Staking.MinValidatorStake,
-				SelfStake: n.config.Staking.MinValidatorStake,
-
-				// ⚠️ Update: Use "0" string instead of int 0
+				Address:        n.nodeAddress,
+				Pubkey:         n.nodePrivateKey.PublicKey().Bytes(),
+				Stake:          n.config.Staking.MinValidatorStake,
+				SelfStake:      n.config.Staking.MinValidatorStake,
 				DelegatedStake: "0",
-
-				Commission: 0.1,
-				Active:     true,
-
-				// ⚠️ Update: Map now takes string values
-				Delegators: make(map[string]string),
-
-				CreatedAt: time.Now().Unix(),
-				UpdatedAt: time.Now().Unix(),
+				Commission:     0.1,
+				Active:         true,
+				Delegators:     make(map[string]string),
+				CreatedAt:      time.Now().Unix(),
+				UpdatedAt:      time.Now().Unix(),
 			},
 		}
 	}
 
-	fmt.Printf("🏛️  Initializing genesis with %d validators\n", len(genesisValidators))
-
-	// Print all validator addresses being initialized
-	for i, validator := range genesisValidators {
-		fmt.Printf("   Validator %d: %s\n", i+1, validator.Address)
-	}
-
-	// Instead of calling blockchain.InitializeGenesis (which might be skipped),
-	// directly add all validators to the blockchain
-	for _, validator := range genesisValidators {
-		if err := n.blockchain.AddValidator(validator); err != nil {
-			fmt.Printf("⚠️  Failed to add genesis validator %s: %v\n", validator.Address, err)
-			// Don't return error - continue with other validators
-		} else {
-			fmt.Printf("✅ Added genesis validator: %s\n", validator.Address)
+	// ✅ CRITICAL: Call blockchain.InitializeGenesis() to load accounts and create genesis block
+	if err := n.blockchain.InitializeGenesis(
+		genesisAccount,
+		n.nodeAddress, // genesis validator
+		genesisSupply,
+		genesisValidators,
+		n.nodePrivateKey,
+	); err != nil {
+		// If genesis already initialized, that's okay
+		if err.Error() == "genesis block already exists" {
+			fmt.Printf("✅ Genesis already initialized\n")
+			return nil
 		}
+		return fmt.Errorf("failed to initialize blockchain genesis: %v", err)
 	}
 
-	fmt.Printf("🏛️  Genesis initialization completed with %d validators\n", len(genesisValidators))
+	fmt.Printf("✅ Blockchain genesis initialized successfully\n")
 	return nil
 }
 

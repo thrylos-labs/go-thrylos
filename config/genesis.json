@@ -1,6 +1,6 @@
 {
   "chain_id": "thrylos-local-1337",
-  "genesis_time": "2026-02-02T19:50:00Z",
+  "genesis_time": "2026-02-03T08:35:00Z",
   "total_genesis": "15000000000000000000000000",
   "consensus": {
     "block_time": 3,
@@ -10,7 +10,7 @@
   },
   "accounts": [
     {
-      "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+      "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
       "balance": "14000000000000000000000000",
       "comment": "Faucet account (14M)"
     },

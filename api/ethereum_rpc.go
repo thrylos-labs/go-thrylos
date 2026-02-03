@@ -6,6 +6,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"time"
@@ -75,22 +76,50 @@ func (h *EthereumRPCHandler) Syncing(w http.ResponseWriter, r *http.Request) {
 // ===== Account Information =====
 
 func (h *EthereumRPCHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Address     string `json:"address"`
-		BlockNumber string `json:"blockNumber"`
-	}
+	var params []interface{}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Decode the JSON-RPC params array
+	var rpcReq struct {
+		Params []interface{} `json:"params"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&rpcReq); err != nil {
+		log.Printf("❌ Failed to decode request: %v", err)
 		respondError(w, -32700, "Parse error")
 		return
 	}
 
-	address := common.HexToAddress(req.Address)
+	params = rpcReq.Params
+
+	if len(params) < 1 {
+		respondError(w, -32602, "Invalid params")
+		return
+	}
+
+	// First param is the address
+	addressStr, ok := params[0].(string)
+	if !ok {
+		respondError(w, -32602, "Invalid address parameter")
+		return
+	}
+
+	address := common.HexToAddress(addressStr)
+	addressHex := address.Hex()
+
+	// 🔍 DEBUG: Log what we're querying
+	log.Printf("🔍 eth_getBalance request: input='%s', normalized='%s'", addressStr, addressHex)
 
 	// GetBalance returns (*big.Int, error)
-	balance, err := h.blockchain.GetBalance(address.Hex())
-	if err != nil || balance == nil {
+	balance, err := h.blockchain.GetBalance(addressHex)
+
+	// 🔍 DEBUG: Log the result
+	if err != nil {
+		log.Printf("❌ GetBalance error: %v", err)
 		balance = big.NewInt(0)
+	} else if balance == nil {
+		log.Printf("⚠️ GetBalance returned nil, using 0")
+		balance = big.NewInt(0)
+	} else {
+		log.Printf("✅ GetBalance result: %s wei", balance.String())
 	}
 
 	// Cast *big.Int directly to *hexutil.Big
