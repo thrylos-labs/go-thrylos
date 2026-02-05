@@ -1476,11 +1476,9 @@ func (ws *WorldState) GetStakingManager() *StakingManager {
 	return &StakingManager{worldState: ws}
 }
 
-// Delegate stakes tokens to a validator
-// Delegate stakes tokens to a validator
-// Delegate stakes tokens to a validator
-// In worldstate.go, update the Delegate method:
-func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount int64) error {
+// Around line 1450 in worldstate.go
+func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount *big.Int) error {
+
 	ws := sm.worldState
 
 	// ✅ FIX: Use atomic batch instead of manual locking
@@ -1488,7 +1486,8 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 
 	// Use AtomicUpdateAccounts wrapper
 	return ws.ExecuteInTransaction(addresses, func() error {
-		amountBig := big.NewInt(amount)
+		// ✅ REMOVED: amountBig := big.NewInt(amount)
+		// Amount is already a *big.Int
 
 		// Validation
 		minDelegationBig, _ := new(big.Int).SetString(ws.config.Staking.MinDelegation, 10)
@@ -1496,8 +1495,9 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 			minDelegationBig = big.NewInt(0)
 		}
 
-		if amountBig.Cmp(minDelegationBig) < 0 {
-			return fmt.Errorf("delegation amount %d below minimum %s", amount, ws.config.Staking.MinDelegation)
+		// ✅ FIX: Compare amount directly (it's already a *big.Int)
+		if amount.Cmp(minDelegationBig) < 0 {
+			return fmt.Errorf("delegation amount %s below minimum %s", amount.String(), ws.config.Staking.MinDelegation)
 		}
 
 		// Get accounts (no manual locking needed - ExecuteInTransaction handles it)
@@ -1521,17 +1521,18 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 			delBalance = big.NewInt(0)
 		}
 
-		if delBalance.Cmp(amountBig) < 0 {
-			return fmt.Errorf("insufficient balance: have %s, need %d", delegator.Balance, amount)
+		// ✅ FIX: Compare with amount (already *big.Int)
+		if delBalance.Cmp(amount) < 0 {
+			return fmt.Errorf("insufficient balance: have %s, need %s", delegator.Balance, amount.String())
 		}
 
-		// Perform calculations
-		newBalance := new(big.Int).Sub(delBalance, amountBig)
+		// Perform calculations using amount directly
+		newBalance := new(big.Int).Sub(delBalance, amount)
 		currentStaked, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
 		if currentStaked == nil {
 			currentStaked = big.NewInt(0)
 		}
-		newStakedAmount := new(big.Int).Add(currentStaked, amountBig)
+		newStakedAmount := new(big.Int).Add(currentStaked, amount)
 
 		// Update delegator maps
 		if delegator.DelegatedTo == nil {
@@ -1542,7 +1543,7 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		if currentDelegationBig == nil {
 			currentDelegationBig = big.NewInt(0)
 		}
-		newDelegationBig := new(big.Int).Add(currentDelegationBig, amountBig)
+		newDelegationBig := new(big.Int).Add(currentDelegationBig, amount)
 		delegator.DelegatedTo[validatorAddr] = newDelegationBig.String()
 
 		// Update delegator account
@@ -1570,20 +1571,20 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		if currentValDelBig == nil {
 			currentValDelBig = big.NewInt(0)
 		}
-		newValDelBig := new(big.Int).Add(currentValDelBig, amountBig)
+		newValDelBig := new(big.Int).Add(currentValDelBig, amount)
 		validator.Delegators[delegatorAddr] = newValDelBig.String()
 
 		valDelegated, _ := new(big.Int).SetString(validator.DelegatedStake, 10)
 		if valDelegated == nil {
 			valDelegated = big.NewInt(0)
 		}
-		newValDelegated := new(big.Int).Add(valDelegated, amountBig)
+		newValDelegated := new(big.Int).Add(valDelegated, amount)
 
 		valStake, _ := new(big.Int).SetString(validator.Stake, 10)
 		if valStake == nil {
 			valStake = big.NewInt(0)
 		}
-		newValStake := new(big.Int).Add(valStake, amountBig)
+		newValStake := new(big.Int).Add(valStake, amount)
 
 		validator.DelegatedStake = newValDelegated.String()
 		validator.Stake = newValStake.String()
@@ -1595,7 +1596,7 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		if totalStaked == nil {
 			totalStaked = big.NewInt(0)
 		}
-		newTotalStaked := new(big.Int).Add(totalStaked, amountBig)
+		newTotalStaked := new(big.Int).Add(totalStaked, amount)
 		ws.totalStaked = newTotalStaked.String()
 		ws.chainMu.Unlock()
 
@@ -1604,7 +1605,8 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount i
 }
 
 // Undelegate unstakes tokens from a validator
-func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount int64) error {
+// Around line 1550
+func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount *big.Int) error {
 	ws := sm.worldState
 
 	// ✅ FIX: Correct lock order
@@ -1618,10 +1620,9 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 	defer ws.accountMu.Unlock(delegatorAddr)
 
 	// --- 1. Validation ---
-	if amount <= 0 {
+	if amount.Sign() <= 0 {
 		return fmt.Errorf("undelegation amount must be positive")
 	}
-	amountBig := big.NewInt(amount) // Convert input to BigInt
 
 	delegator, err := ws.accountManager.GetAccount(delegatorAddr)
 	if err != nil {
@@ -1632,21 +1633,19 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return fmt.Errorf("no delegations found")
 	}
 
-	// Retrieve current delegation (expecting map[string]string)
 	delegatedAmountStr, exists := delegator.DelegatedTo[validatorAddr]
 	if !exists {
 		return fmt.Errorf("delegation not found for validator %s", validatorAddr)
 	}
 
-	// Parse delegated amount string to BigInt
 	delegatedAmountBig, success := new(big.Int).SetString(delegatedAmountStr, 10)
 	if !success {
 		return fmt.Errorf("invalid delegation data format")
 	}
 
-	// Check sufficiency: delegatedAmount < amount
-	if delegatedAmountBig.Cmp(amountBig) < 0 {
-		return fmt.Errorf("insufficient delegation: have %s, want %d", delegatedAmountStr, amount)
+	// ✅ FIX: Compare with amount (already *big.Int)
+	if delegatedAmountBig.Cmp(amount) < 0 {
+		return fmt.Errorf("insufficient delegation: have %s, want %s", delegatedAmountStr, amount.String())
 	}
 
 	validator, exists := ws.validators[validatorAddr]
@@ -1655,60 +1654,49 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 	}
 
 	// --- 2. Math Operations (Using BigInt) ---
+	newDelegatedToValBig := new(big.Int).Sub(delegatedAmountBig, amount)
 
-	// Calculate New Delegated Amount for this specific validator
-	newDelegatedToValBig := new(big.Int).Sub(delegatedAmountBig, amountBig)
-
-	// delegator.StakedAmount -= amount
 	stakedAmountBig, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
 	if stakedAmountBig == nil {
 		stakedAmountBig = big.NewInt(0)
 	}
-	newStakedAmount := new(big.Int).Sub(stakedAmountBig, amountBig)
+	newStakedAmount := new(big.Int).Sub(stakedAmountBig, amount)
 
-	// validator.DelegatedStake -= amount
 	valDelegatedStakeBig, _ := new(big.Int).SetString(validator.DelegatedStake, 10)
 	if valDelegatedStakeBig == nil {
 		valDelegatedStakeBig = big.NewInt(0)
 	}
-	newValDelegatedStake := new(big.Int).Sub(valDelegatedStakeBig, amountBig)
+	newValDelegatedStake := new(big.Int).Sub(valDelegatedStakeBig, amount)
 
-	// validator.Stake -= amount
 	valStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
 	if valStakeBig == nil {
 		valStakeBig = big.NewInt(0)
 	}
-	newValStake := new(big.Int).Sub(valStakeBig, amountBig)
+	newValStake := new(big.Int).Sub(valStakeBig, amount)
 
-	// validator.Delegators[delegatorAddr] -= amount
-	// Note: Assuming validator.Delegators is also map[string]string
 	currentValDelegationStr := validator.Delegators[delegatorAddr]
 	currentValDelegationBig, _ := new(big.Int).SetString(currentValDelegationStr, 10)
 	if currentValDelegationBig == nil {
 		currentValDelegationBig = big.NewInt(0)
 	}
-	newValDelegationBig := new(big.Int).Sub(currentValDelegationBig, amountBig)
+	newValDelegationBig := new(big.Int).Sub(currentValDelegationBig, amount)
 
-	// ws.totalStaked -= amount
 	totalStakedBig, _ := new(big.Int).SetString(ws.totalStaked, 10)
 	if totalStakedBig == nil {
 		totalStakedBig = big.NewInt(0)
 	}
-	newTotalStaked := new(big.Int).Sub(totalStakedBig, amountBig)
+	newTotalStaked := new(big.Int).Sub(totalStakedBig, amount)
 
-	// delegator.Balance += amount (Refund to balance)
 	balanceBig, _ := new(big.Int).SetString(delegator.Balance, 10)
 	if balanceBig == nil {
 		balanceBig = big.NewInt(0)
 	}
-	newBalance := new(big.Int).Add(balanceBig, amountBig)
+	newBalance := new(big.Int).Add(balanceBig, amount)
 
-	// --- 3. Update State (Convert back to String) ---
-
+	// --- 3. Update State ---
 	delegator.StakedAmount = newStakedAmount.String()
 	delegator.Balance = newBalance.String()
 
-	// Update Delegator Map
 	if newDelegatedToValBig.Sign() == 0 {
 		delete(delegator.DelegatedTo, validatorAddr)
 	} else {
@@ -1718,7 +1706,6 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 	validator.DelegatedStake = newValDelegatedStake.String()
 	validator.Stake = newValStake.String()
 
-	// Update Validator Map
 	if newValDelegationBig.Sign() == 0 {
 		delete(validator.Delegators, delegatorAddr)
 	} else {
@@ -1728,16 +1715,9 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 
 	ws.totalStaked = newTotalStaked.String()
 
-	// --- 4. Persist ---
 	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
 		return err
 	}
-
-	// Assuming you have a method to update validators similar to UpdateAccount
-	// or if ws.validators is pointers and in-memory, just the map update above is enough for memory,
-	// but you likely need a DB save:
-	// if err := ws.state.SaveValidator(validator); err != nil { return err }
-	// (Use whatever existing method you have here)
 
 	return nil
 }

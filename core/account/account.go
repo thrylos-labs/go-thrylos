@@ -14,6 +14,7 @@ import (
 	"math/big" // ✅ Added for BigInt support
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/storage"
 
 	"github.com/thrylos-labs/go-thrylos/crypto"
@@ -35,7 +36,6 @@ const (
 const (
 	MinimumStakeAmount    = int64(1000000000)  // 1 THRYLOS minimum stake
 	MinimumBalance        = int64(1000000)     // 0.001 THRYLOS minimum balance
-	MinimumDelegation     = int64(100000000)   // 0.1 THRYLOS minimum delegation
 	MinimumTransfer       = int64(10000000)    // 0.01 THRYLOS minimum transfer
 	MinimumValidatorStake = int64(32000000000) // 32 THRYLOS minimum validator stake
 )
@@ -330,9 +330,11 @@ func (am *AccountManager) Unstake(addr string, amount int64) error {
 }
 
 // Delegate stakes tokens to a validator
-func (am *AccountManager) Delegate(delegatorAddr, validatorAddr string, amount int64) error {
-	if amount < MinimumDelegation {
-		return fmt.Errorf("delegation amount %d below minimum %d", amount, MinimumDelegation)
+func (am *AccountManager) Delegate(delegatorAddr, validatorAddr string, amount *big.Int) error {
+	minDelegationBig := config.MinimumDelegation
+
+	if amount.Cmp(minDelegationBig) < 0 {
+		return fmt.Errorf("delegation amount %s below minimum %s", amount.String(), minDelegationBig.String())
 	}
 
 	if delegatorAddr == validatorAddr {
@@ -348,7 +350,8 @@ func (am *AccountManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		return fmt.Errorf("failed to get delegator account: %v", err)
 	}
 
-	amountBig := big.NewInt(amount)
+	// ✅ FIX: No need to convert - amount is already *big.Int
+	// REMOVED: amountBig := big.NewInt(amount)
 
 	// Balance Check
 	balBig, _ := new(big.Int).SetString(delegator.Balance, 10)
@@ -356,18 +359,19 @@ func (am *AccountManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		balBig = big.NewInt(0)
 	}
 
-	if balBig.Cmp(amountBig) < 0 {
+	// ✅ FIX: Use amount directly instead of amountBig
+	if balBig.Cmp(amount) < 0 {
 		return fmt.Errorf("insufficient balance for delegation")
 	}
 
 	// Math updates
-	newBalance := new(big.Int).Sub(balBig, amountBig)
+	newBalance := new(big.Int).Sub(balBig, amount)
 
 	stakedBig, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
 	if stakedBig == nil {
 		stakedBig = big.NewInt(0)
 	}
-	newStaked := new(big.Int).Add(stakedBig, amountBig)
+	newStaked := new(big.Int).Add(stakedBig, amount)
 
 	if delegator.DelegatedTo == nil {
 		delegator.DelegatedTo = make(map[string]string)
@@ -380,7 +384,7 @@ func (am *AccountManager) Delegate(delegatorAddr, validatorAddr string, amount i
 		currentDelegationBig = big.NewInt(0)
 	}
 
-	newDelegation := new(big.Int).Add(currentDelegationBig, amountBig)
+	newDelegation := new(big.Int).Add(currentDelegationBig, amount)
 
 	// Commit strings
 	delegator.Balance = newBalance.String()

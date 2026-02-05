@@ -74,12 +74,12 @@ type ServerConfig struct {
 
 // Response structures for account-based system
 type AccountResponse struct {
-	Address      string           `json:"address"`
-	Balance      int64            `json:"balance"`
-	Nonce        uint64           `json:"nonce"`
-	StakedAmount int64            `json:"staked_amount"`
-	Rewards      int64            `json:"rewards"`
-	DelegatedTo  map[string]int64 `json:"delegated_to"`
+	Address      string            `json:"address"`
+	Balance      int64             `json:"balance"`
+	Nonce        uint64            `json:"nonce"`
+	StakedAmount int64             `json:"staked_amount"`
+	Rewards      int64             `json:"rewards"`
+	DelegatedTo  map[string]string `json:"delegated_to"`
 }
 
 type DelegationsResponse struct {
@@ -590,6 +590,20 @@ func (s *Server) estimateGas(w http.ResponseWriter, r *http.Request) {
 
 // submitStakeTransaction handles staking (delegation) requests
 func (s *Server) submitStakeTransaction(w http.ResponseWriter, r *http.Request) {
+	// ✅ ADD THIS: Import these at the top if not already imported
+	// import "io"
+	// import "bytes"
+
+	// Read and log raw body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.writeError(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	// Restore body
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
 	var req struct {
 		From      string `json:"from"`
 		To        string `json:"to"`
@@ -600,28 +614,37 @@ func (s *Server) submitStakeTransaction(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("❌ JSON decode error: %v", err)
 		s.writeError(w, "Invalid request format", http.StatusBadRequest)
 		return
 	}
 
-	// Validate required fields
+	// ✅ ADD THIS: Log decoded values
+	log.Printf("🔍 DECODED: From=%s, To=%s, Amount='%s', Type=%s",
+		req.From, req.To, req.Amount, req.Type)
+
+	// Rest of your existing validation...
 	if req.From == "" || req.To == "" || req.Amount == "" {
 		s.writeError(w, "Missing required fields: from, to, amount", http.StatusBadRequest)
 		return
 	}
 
-	// Validate signature
 	if req.Signature == "" {
 		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
 		return
 	}
 
-	// Parse and validate amount
 	amountBig, ok := new(big.Int).SetString(req.Amount, 10)
 	if !ok || amountBig.Sign() <= 0 {
+		log.Printf("❌ Parse failed: ok=%v, sign=%d", ok, amountBig.Sign())
 		s.writeError(w, "Invalid amount: must be a positive number", http.StatusBadRequest)
 		return
 	}
+
+	// ✅ ADD: Log after parsing
+	log.Printf("✅ AFTER PARSING BigInt: %s", amountBig.String())
+	log.Printf("   BigInt sign: %d", amountBig.Sign())
+	log.Printf("   BigInt bits: %d", amountBig.BitLen())
 
 	// Check if user has enough balance
 	account, err := s.worldState.GetAccount(req.From)
@@ -654,13 +677,16 @@ func (s *Server) submitStakeTransaction(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Execute delegation using StakingManager
-	amountInt64 := amountBig.Int64()
+	log.Printf("🔍 CALLING stakingManager.Delegate with amount: %s", amountBig.String())
+
 	stakingManager := s.worldState.GetStakingManager()
-	if err := stakingManager.Delegate(req.From, req.To, amountInt64); err != nil {
+	if err := stakingManager.Delegate(req.From, req.To, amountBig); err != nil {
+		log.Printf("❌ DELEGATE FAILED: %v", err)
 		s.writeError(w, fmt.Sprintf("Staking failed: %v", err), http.StatusBadRequest)
 		return
 	}
+
+	log.Printf("✅ DELEGATE SUCCEEDED")
 
 	// Generate transaction hash for tracking
 	txHash := fmt.Sprintf("0x%x", sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%s:%d", req.From, req.To, req.Amount, req.Timestamp))))
@@ -740,9 +766,8 @@ func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request
 	}
 
 	// Execute undelegation using StakingManager
-	amountInt64 := amountBig.Int64()
 	stakingManager := s.worldState.GetStakingManager()
-	if err := stakingManager.Undelegate(req.From, req.To, amountInt64); err != nil {
+	if err := stakingManager.Undelegate(req.From, req.To, amountBig); err != nil {
 		s.writeError(w, fmt.Sprintf("Unstaking failed: %v", err), http.StatusBadRequest)
 		return
 	}

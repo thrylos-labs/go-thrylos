@@ -584,7 +584,7 @@ func (n *Node) RegisterValidator(stake string, commission float64) error {
 	return nil
 }
 
-func (n *Node) Stake(validatorAddr string, amount int64) error {
+func (n *Node) Stake(validatorAddr string, amount *big.Int) error {
 	stakingManager := n.blockchain.GetStakingManager()
 	if stakingManager == nil {
 		return fmt.Errorf("staking manager not available")
@@ -597,13 +597,13 @@ func (n *Node) Stake(validatorAddr string, amount int64) error {
 	n.triggerEvent("tokens_staked", map[string]interface{}{
 		"delegator": n.nodeAddress,
 		"validator": validatorAddr,
-		"amount":    amount,
+		"amount":    amount.String(), // ✅ Convert to string for event
 	})
 
 	return nil
 }
 
-func (n *Node) Unstake(validatorAddr string, amount int64) error {
+func (n *Node) Unstake(validatorAddr string, amount *big.Int) error {
 	stakingManager := n.blockchain.GetStakingManager()
 	if stakingManager == nil {
 		return fmt.Errorf("staking manager not available")
@@ -616,7 +616,7 @@ func (n *Node) Unstake(validatorAddr string, amount int64) error {
 	n.triggerEvent("tokens_unstaked", map[string]interface{}{
 		"delegator": n.nodeAddress,
 		"validator": validatorAddr,
-		"amount":    amount,
+		"amount":    amount.String(), // ✅ Convert to string for event
 	})
 
 	return nil

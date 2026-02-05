@@ -10,6 +10,7 @@ vm/:memory
 thrylos-dev
 thrylos-prod
 thrylos
+thrylos-node    
 
 # API info
 server.crt
