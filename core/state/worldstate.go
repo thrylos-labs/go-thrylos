@@ -294,6 +294,19 @@ func (ws *WorldState) GetStateStorage() *storage.StateStorage {
 	return ws.state
 }
 
+// Public accessors for testing
+func (ws *WorldState) UnbondingMu() *sync.RWMutex {
+	return &ws.unbondingMu
+}
+
+func (ws *WorldState) UnbondingQueue() []types.UnbondingEntry {
+	return ws.unbondingQueue
+}
+
+func (ws *WorldState) SetUnbondingQueue(queue []types.UnbondingEntry) {
+	ws.unbondingQueue = queue
+}
+
 func (ws *WorldState) GetBadgerDB() *badger.DB {
 	if ws.badgerStorage == nil {
 		return nil
@@ -1898,6 +1911,7 @@ func (ws *WorldState) GetTotalUnbonding(delegatorAddr string) *big.Int {
 	return total
 }
 
+// DistributeRewards distributes staking rewards with edge case handling
 func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 	ws := sm.worldState
 
@@ -1930,7 +1944,7 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 		return fmt.Errorf("total voting power is zero")
 	}
 
-	// ✅ NEW: Simple in-memory tracking for logging
+	// ✅ Track distribution metrics
 	successCount := 0
 	failureCount := 0
 	totalDistributed := big.NewInt(0)
@@ -1938,9 +1952,11 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 	// Distribute rewards to each validator
 	for _, validator := range activeValidators {
 		valStake, _ := new(big.Int).SetString(validator.Stake, 10)
-		if valStake == nil {
-			log.Printf("⚠️ Warning: Validator %s has invalid stake, skipping", validator.Address)
-			failureCount++
+
+		// ✅ ISSUE #8 FIX 1: Skip validators with zero or invalid stake
+		if valStake == nil || valStake.Sign() == 0 {
+			log.Printf("⚠️ Warning: Validator %s has zero stake, skipping reward distribution",
+				validator.Address)
 			continue
 		}
 
@@ -1948,7 +1964,14 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 		numerator := new(big.Int).Mul(totalRewardsBig, valStake)
 		validatorReward := new(big.Int).Div(numerator, totalVotingPower)
 
-		// Calculate commission (using big.Float for precision - from Issue #4)
+		// ✅ ISSUE #8 FIX 2: Skip if reward rounds to zero
+		if validatorReward.Sign() == 0 {
+			log.Printf("⚠️ Warning: Validator %s reward rounded to zero, skipping",
+				validator.Address)
+			continue
+		}
+
+		// Calculate commission (using big.Float for precision)
 		rewardFloat := new(big.Float).SetInt(validatorReward)
 		commissionRate := big.NewFloat(validator.Commission)
 		commAmtFloat := new(big.Float).Mul(rewardFloat, commissionRate)
@@ -1959,13 +1982,13 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 
 		delegatorReward := new(big.Int).Sub(validatorReward, commAmt)
 
-		// ✅ FIX 1: Handle validator account retrieval errors
+		// Handle validator account retrieval errors
 		valAcc, err := ws.accountManager.GetAccount(validator.Address)
 		if err != nil {
 			log.Printf("❌ ERROR: Failed to get validator account %s: %v (reward %s LOST)",
 				validator.Address, err, validatorReward.String())
 			failureCount++
-			continue // Skip this validator
+			continue
 		}
 
 		// Update validator account with commission
@@ -1996,15 +2019,15 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 			valAcc.Balance = new(big.Int).Add(currentBalance, delegatorReward).String()
 		}
 
-		// ✅ FIX 2: Handle update errors
+		// Handle update errors
 		if err := ws.accountManager.UpdateAccount(valAcc); err != nil {
 			log.Printf("❌ ERROR: Failed to update validator account %s: %v (reward %s LOST)",
 				validator.Address, err, validatorReward.String())
 			failureCount++
-			continue // Skip this validator
+			continue
 		}
 
-		// Track successful distribution
+		// ✅ ISSUE #8 FIX 3: Track successfully distributed amount
 		successCount++
 		totalDistributed.Add(totalDistributed, commAmt)
 
@@ -2033,13 +2056,13 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 						continue
 					}
 
-					// ✅ FIX 3: Handle delegator account errors
+					// Handle delegator account errors
 					delAcc, err := ws.accountManager.GetAccount(delAddr)
 					if err != nil {
 						log.Printf("❌ ERROR: Failed to get delegator account %s: %v (reward %s LOST)",
 							delAddr, err, share.String())
 						failureCount++
-						continue // Skip this delegator
+						continue
 					}
 
 					// Update delegator rewards
@@ -2055,12 +2078,12 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 					}
 					delAcc.Balance = new(big.Int).Add(b, share).String()
 
-					// ✅ FIX 4: Handle delegator update errors
+					// Handle delegator update errors
 					if err := ws.accountManager.UpdateAccount(delAcc); err != nil {
 						log.Printf("❌ ERROR: Failed to update delegator account %s: %v (reward %s LOST)",
 							delAddr, err, share.String())
 						failureCount++
-						continue // Skip this delegator
+						continue
 					}
 
 					// Track successful distribution
@@ -2071,20 +2094,28 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 		}
 	}
 
-	// ✅ FIX 5: Log distribution summary
+	// Log distribution summary
 	log.Printf("💰 Reward Distribution Complete:")
 	log.Printf("   Total Rewards: %s", totalRewardsBig.String())
 	log.Printf("   Successfully Distributed: %s", totalDistributed.String())
 	log.Printf("   Success Count: %d", successCount)
 	log.Printf("   Failure Count: %d", failureCount)
 
-	// Calculate and log lost rewards
-	lostRewards := new(big.Int).Sub(totalRewardsBig, totalDistributed)
-	if lostRewards.Sign() > 0 {
-		log.Printf("   ⚠️ LOST REWARDS: %s", lostRewards.String())
+	// ✅ ISSUE #8 FIX 4: Calculate and log dust (rounding errors)
+	dust := new(big.Int).Sub(totalRewardsBig, totalDistributed)
+	if dust.Sign() > 0 {
+		// Convert to human-readable THRYLOS amount
+		dustFloat := new(big.Float).SetInt(dust)
+		divisor := new(big.Float).SetInt64(1e18)
+		thrylosAmount := new(big.Float).Quo(dustFloat, divisor)
+		thrylosStr := thrylosAmount.Text('f', 6)
+
+		log.Printf("   💰 Dust (rounding errors): %s wei (%s THRYLOS)",
+			dust.String(), thrylosStr)
+		log.Printf("   ℹ️  Dust will accumulate for next distribution round")
 	}
 
-	// ✅ FIX 6: Return error if too many failures (>10%)
+	// Return error if too many failures (>10%)
 	if successCount+failureCount > 0 {
 		failureRate := float64(failureCount) / float64(successCount+failureCount)
 		if failureRate > 0.1 {

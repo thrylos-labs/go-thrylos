@@ -391,7 +391,6 @@ func (vm *Manager) DeactivateValidator(address string, reason string) error {
 }
 
 // SlashValidator slashes a validator for misbehavior
-// SlashValidator slashes a validator for misbehavior
 func (vm *Manager) SlashValidator(
 	address string,
 	reason SlashingReason,
@@ -403,6 +402,12 @@ func (vm *Manager) SlashValidator(
 	validator, err := vm.worldState.GetValidator(address)
 	if err != nil {
 		return fmt.Errorf("validator not found: %v", err)
+	}
+
+	// ✅ ISSUE #7 FIX: Check if validator is already inactive
+	if !validator.Active {
+		log.Printf("⚠️ Warning: Attempted to slash inactive validator %s (reason: %v)", address, reason)
+		return fmt.Errorf("cannot slash validator %s: validator is not active", address)
 	}
 
 	// Get config values (with defaults if not set)
