@@ -11,6 +11,7 @@ thrylos-dev
 thrylos-prod
 thrylos
 thrylos-node    
+**/thrylos-node
 
 # API info
 server.crt
