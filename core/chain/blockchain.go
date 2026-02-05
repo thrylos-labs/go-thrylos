@@ -4,6 +4,7 @@ package chain
 
 import (
 	"fmt"
+	"log"
 	"math/big"
 	"sync"
 	"time"
@@ -287,12 +288,19 @@ func (bc *Blockchain) addBlockUnsafe(block *core.Block) error {
 		return fmt.Errorf("world state block addition failed: %v", err)
 	}
 
+	// ✅ EXISTING: Process validator unbondings
 	if bc.validatorManager != nil {
 		if err := bc.validatorManager.ProcessUnbondings(); err != nil {
 			// Log warning but don't fail block addition
-			// This is defensive - unbonding processing shouldn't block chain progress
-			fmt.Printf("Warning: failed to process unbondings at block %d: %v\n", block.Header.Index, err)
+			fmt.Printf("Warning: failed to process validator unbondings at block %d: %v\n", block.Header.Index, err)
 		}
+	}
+
+	// ✅ NEW: Process staking unbonding queue (delegator unstaking)
+	if err := bc.worldState.ProcessUnbondingQueue(); err != nil {
+		// Log warning but don't fail block addition
+		// This is defensive - unbonding processing shouldn't block chain progress
+		log.Printf("⚠️ Warning: Failed to process staking unbonding queue at block %d: %v", block.Header.Index, err)
 	}
 
 	// Update blockchain metrics

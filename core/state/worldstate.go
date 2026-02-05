@@ -11,6 +11,7 @@ package state
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"sync"
@@ -83,6 +84,18 @@ type WorldState struct {
 	stateRootMu sync.RWMutex
 
 	badgerStorage *storage.BadgerStorage
+
+	unbondingQueue []UnbondingEntry
+	unbondingMu    sync.RWMutex
+}
+
+// UnbondingEntry represents tokens that are being unstaked
+type UnbondingEntry struct {
+	DelegatorAddr  string `json:"delegator_addr"`
+	ValidatorAddr  string `json:"validator_addr"`
+	Amount         string `json:"amount"`
+	CreationTime   int64  `json:"creation_time"`   // Unix timestamp
+	CompletionTime int64  `json:"completion_time"` // When funds will be released
 }
 
 func (ws *WorldState) calculateBlockHash(b *core.Block) string {
@@ -1478,130 +1491,179 @@ func (ws *WorldState) GetStakingManager() *StakingManager {
 
 // Around line 1450 in worldstate.go
 func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount *big.Int) error {
-
 	ws := sm.worldState
 
-	// ✅ FIX: Use atomic batch instead of manual locking
-	addresses := []string{delegatorAddr}
+	// Lock order
+	ws.chainMu.Lock()
+	defer ws.chainMu.Unlock()
 
-	// Use AtomicUpdateAccounts wrapper
-	return ws.ExecuteInTransaction(addresses, func() error {
-		// ✅ REMOVED: amountBig := big.NewInt(amount)
-		// Amount is already a *big.Int
+	ws.validatorMu.Lock()
+	defer ws.validatorMu.Unlock()
 
-		// Validation
-		minDelegationBig, _ := new(big.Int).SetString(ws.config.Staking.MinDelegation, 10)
-		if minDelegationBig == nil {
-			minDelegationBig = big.NewInt(0)
+	ws.accountMu.Lock(delegatorAddr)
+	defer ws.accountMu.Unlock(delegatorAddr)
+
+	// --- VALIDATION PHASE ---
+
+	// ✅ Check minimum delegation
+	minDelegationBig, _ := new(big.Int).SetString(ws.config.Staking.MinDelegation, 10)
+	if minDelegationBig == nil {
+		minDelegationBig = big.NewInt(0)
+	}
+
+	if amount.Cmp(minDelegationBig) < 0 {
+		return fmt.Errorf("delegation amount %s below minimum %s",
+			amount.String(), ws.config.Staking.MinDelegation)
+	}
+
+	// ✅ Get delegator account
+	delegator, err := ws.accountManager.GetAccount(delegatorAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get delegator account: %v", err)
+	}
+
+	// ✅ Get validator
+	validator, exists := ws.validators[validatorAddr]
+	if !exists {
+		return fmt.Errorf("validator %s not found", validatorAddr)
+	}
+
+	// ✅ Check validator is active
+	if !validator.Active {
+		return fmt.Errorf("validator %s is not active", validatorAddr)
+	}
+
+	// ✅ Check balance
+	delBalance, _ := new(big.Int).SetString(delegator.Balance, 10)
+	if delBalance == nil {
+		delBalance = big.NewInt(0)
+	}
+
+	if delBalance.Cmp(amount) < 0 {
+		return fmt.Errorf("insufficient balance: have %s, need %s",
+			delegator.Balance, amount.String())
+	}
+
+	// ✅ NEW CHECK 1: Maximum delegations per validator
+	if len(validator.Delegators) >= ws.config.Staking.MaxDelegationsPerValidator {
+		return fmt.Errorf("validator has reached maximum delegations (%d)",
+			ws.config.Staking.MaxDelegationsPerValidator)
+	}
+
+	// ✅ NEW CHECK 2: Maximum stake per validator (absolute limit)
+	currentStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
+	if currentStakeBig == nil {
+		currentStakeBig = big.NewInt(0)
+	}
+	newStakeBig := new(big.Int).Add(currentStakeBig, amount)
+
+	maxStakeBig, _ := new(big.Int).SetString(ws.config.Staking.MaxValidatorStake, 10)
+	if maxStakeBig == nil {
+		// Fallback to a very large number if not configured
+		maxStakeBig = new(big.Int).Mul(big.NewInt(10000000), big.NewInt(1e18)) // 10M tokens
+	}
+
+	if newStakeBig.Cmp(maxStakeBig) > 0 {
+		return fmt.Errorf("delegation would exceed validator maximum stake of %s (current: %s, trying to add: %s, would be: %s)",
+			ws.config.Staking.MaxValidatorStake,
+			currentStakeBig.String(),
+			amount.String(),
+			newStakeBig.String())
+	}
+
+	// ✅ NEW CHECK 3: Maximum stake percentage (concentration limit)
+	totalNetworkStakeBig, _ := new(big.Int).SetString(ws.totalStaked, 10)
+	if totalNetworkStakeBig != nil && totalNetworkStakeBig.Sign() > 0 {
+		// Calculate: (newValidatorStake / totalNetworkStake)
+		newStakeFloat := new(big.Float).SetInt(newStakeBig)
+		totalStakeFloat := new(big.Float).SetInt(totalNetworkStakeBig)
+		percentageFloat := new(big.Float).Quo(newStakeFloat, totalStakeFloat)
+		percentage, _ := percentageFloat.Float64()
+
+		maxPercentage := ws.config.Staking.MaxStakePercentage
+		if maxPercentage == 0 {
+			maxPercentage = 0.15 // Default to 15% if not configured
 		}
 
-		// ✅ FIX: Compare amount directly (it's already a *big.Int)
-		if amount.Cmp(minDelegationBig) < 0 {
-			return fmt.Errorf("delegation amount %s below minimum %s", amount.String(), ws.config.Staking.MinDelegation)
+		if percentage > maxPercentage {
+			return fmt.Errorf("delegation would exceed network stake concentration limit: validator would have %.2f%% of total stake (max: %.2f%%)",
+				percentage*100, maxPercentage*100)
 		}
+	}
 
-		// Get accounts (no manual locking needed - ExecuteInTransaction handles it)
-		delegator, err := ws.accountManager.GetAccount(delegatorAddr)
-		if err != nil {
-			return fmt.Errorf("failed to get delegator account: %v", err)
-		}
+	// --- CALCULATION PHASE ---
 
-		// Acquire validator lock separately (different lock domain)
-		ws.validatorMu.Lock()
-		validator, exists := ws.validators[validatorAddr]
-		if !exists {
-			ws.validatorMu.Unlock()
-			return fmt.Errorf("validator %s not found", validatorAddr)
-		}
-		ws.validatorMu.Unlock()
+	// Calculate new delegator balances
+	newBalance := new(big.Int).Sub(delBalance, amount)
+	currentStaked, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
+	if currentStaked == nil {
+		currentStaked = big.NewInt(0)
+	}
+	newStakedAmount := new(big.Int).Add(currentStaked, amount)
 
-		// Parse balances
-		delBalance, _ := new(big.Int).SetString(delegator.Balance, 10)
-		if delBalance == nil {
-			delBalance = big.NewInt(0)
-		}
+	// Update delegator delegation map
+	if delegator.DelegatedTo == nil {
+		delegator.DelegatedTo = make(map[string]string)
+	}
 
-		// ✅ FIX: Compare with amount (already *big.Int)
-		if delBalance.Cmp(amount) < 0 {
-			return fmt.Errorf("insufficient balance: have %s, need %s", delegator.Balance, amount.String())
-		}
+	currentDelegationStr := delegator.DelegatedTo[validatorAddr]
+	currentDelegationBig, _ := new(big.Int).SetString(currentDelegationStr, 10)
+	if currentDelegationBig == nil {
+		currentDelegationBig = big.NewInt(0)
+	}
+	newDelegationBig := new(big.Int).Add(currentDelegationBig, amount)
 
-		// Perform calculations using amount directly
-		newBalance := new(big.Int).Sub(delBalance, amount)
-		currentStaked, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
-		if currentStaked == nil {
-			currentStaked = big.NewInt(0)
-		}
-		newStakedAmount := new(big.Int).Add(currentStaked, amount)
+	// Calculate new validator stakes
+	valDelegated, _ := new(big.Int).SetString(validator.DelegatedStake, 10)
+	if valDelegated == nil {
+		valDelegated = big.NewInt(0)
+	}
+	newValDelegated := new(big.Int).Add(valDelegated, amount)
 
-		// Update delegator maps
-		if delegator.DelegatedTo == nil {
-			delegator.DelegatedTo = make(map[string]string)
-		}
-		currentDelegationStr := delegator.DelegatedTo[validatorAddr]
-		currentDelegationBig, _ := new(big.Int).SetString(currentDelegationStr, 10)
-		if currentDelegationBig == nil {
-			currentDelegationBig = big.NewInt(0)
-		}
-		newDelegationBig := new(big.Int).Add(currentDelegationBig, amount)
-		delegator.DelegatedTo[validatorAddr] = newDelegationBig.String()
+	// Calculate new validator delegator amount
+	if validator.Delegators == nil {
+		validator.Delegators = make(map[string]string)
+	}
 
-		// Update delegator account
-		delegator.Balance = newBalance.String()
-		delegator.StakedAmount = newStakedAmount.String()
+	currentValDelStr := validator.Delegators[delegatorAddr]
+	currentValDelBig, _ := new(big.Int).SetString(currentValDelStr, 10)
+	if currentValDelBig == nil {
+		currentValDelBig = big.NewInt(0)
+	}
+	newValDelBig := new(big.Int).Add(currentValDelBig, amount)
 
-		if err := ws.accountManager.UpdateAccount(delegator); err != nil {
-			return fmt.Errorf("failed to update delegator account: %v", err)
-		}
+	// Calculate new total staked
+	totalStaked, _ := new(big.Int).SetString(ws.totalStaked, 10)
+	if totalStaked == nil {
+		totalStaked = big.NewInt(0)
+	}
+	newTotalStaked := new(big.Int).Add(totalStaked, amount)
 
-		if err := ws.state.SaveAccount(delegator); err != nil {
-			return fmt.Errorf("failed to save delegator account: %v", err)
-		}
+	// --- UPDATE PHASE ---
 
-		// Now update validator (with proper locking)
-		ws.validatorMu.Lock()
-		defer ws.validatorMu.Unlock()
+	// Update delegator
+	delegator.Balance = newBalance.String()
+	delegator.StakedAmount = newStakedAmount.String()
+	delegator.DelegatedTo[validatorAddr] = newDelegationBig.String()
 
-		if validator.Delegators == nil {
-			validator.Delegators = make(map[string]string)
-		}
+	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
+		return fmt.Errorf("failed to update delegator account: %v", err)
+	}
 
-		currentValDelStr := validator.Delegators[delegatorAddr]
-		currentValDelBig, _ := new(big.Int).SetString(currentValDelStr, 10)
-		if currentValDelBig == nil {
-			currentValDelBig = big.NewInt(0)
-		}
-		newValDelBig := new(big.Int).Add(currentValDelBig, amount)
-		validator.Delegators[delegatorAddr] = newValDelBig.String()
+	if err := ws.state.SaveAccount(delegator); err != nil {
+		return fmt.Errorf("failed to save delegator account: %v", err)
+	}
 
-		valDelegated, _ := new(big.Int).SetString(validator.DelegatedStake, 10)
-		if valDelegated == nil {
-			valDelegated = big.NewInt(0)
-		}
-		newValDelegated := new(big.Int).Add(valDelegated, amount)
+	// Update validator
+	validator.Delegators[delegatorAddr] = newValDelBig.String()
+	validator.DelegatedStake = newValDelegated.String()
+	validator.Stake = newStakeBig.String() // Use the validated newStakeBig
+	validator.UpdatedAt = time.Now().Unix()
 
-		valStake, _ := new(big.Int).SetString(validator.Stake, 10)
-		if valStake == nil {
-			valStake = big.NewInt(0)
-		}
-		newValStake := new(big.Int).Add(valStake, amount)
+	// Update global state
+	ws.totalStaked = newTotalStaked.String()
 
-		validator.DelegatedStake = newValDelegated.String()
-		validator.Stake = newValStake.String()
-		validator.UpdatedAt = time.Now().Unix()
-
-		// Update global state (requires chain lock)
-		ws.chainMu.Lock()
-		totalStaked, _ := new(big.Int).SetString(ws.totalStaked, 10)
-		if totalStaked == nil {
-			totalStaked = big.NewInt(0)
-		}
-		newTotalStaked := new(big.Int).Add(totalStaked, amount)
-		ws.totalStaked = newTotalStaked.String()
-		ws.chainMu.Unlock()
-
-		return nil
-	})
+	return nil
 }
 
 // Undelegate unstakes tokens from a validator
@@ -1609,7 +1671,7 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount *
 func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount *big.Int) error {
 	ws := sm.worldState
 
-	// ✅ FIX: Correct lock order
+	// Lock order
 	ws.chainMu.Lock()
 	defer ws.chainMu.Unlock()
 
@@ -1643,9 +1705,9 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return fmt.Errorf("invalid delegation data format")
 	}
 
-	// ✅ FIX: Compare with amount (already *big.Int)
 	if delegatedAmountBig.Cmp(amount) < 0 {
-		return fmt.Errorf("insufficient delegation: have %s, want %s", delegatedAmountStr, amount.String())
+		return fmt.Errorf("insufficient delegation: have %s, want %s",
+			delegatedAmountStr, amount.String())
 	}
 
 	validator, exists := ws.validators[validatorAddr]
@@ -1653,7 +1715,7 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return fmt.Errorf("validator not found")
 	}
 
-	// --- 2. Math Operations (Using BigInt) ---
+	// --- 2. Math Operations ---
 	newDelegatedToValBig := new(big.Int).Sub(delegatedAmountBig, amount)
 
 	stakedAmountBig, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
@@ -1687,15 +1749,12 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 	}
 	newTotalStaked := new(big.Int).Sub(totalStakedBig, amount)
 
-	balanceBig, _ := new(big.Int).SetString(delegator.Balance, 10)
-	if balanceBig == nil {
-		balanceBig = big.NewInt(0)
-	}
-	newBalance := new(big.Int).Add(balanceBig, amount)
+	// ✅ FIX: Do NOT add to balance immediately!
+	// Funds will be added after unbonding period completes
 
-	// --- 3. Update State ---
+	// --- 3. Update State (No balance change yet) ---
 	delegator.StakedAmount = newStakedAmount.String()
-	delegator.Balance = newBalance.String()
+	// ✅ Balance stays the same (funds in unbonding)
 
 	if newDelegatedToValBig.Sign() == 0 {
 		delete(delegator.DelegatedTo, validatorAddr)
@@ -1719,12 +1778,136 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return err
 	}
 
+	// ✅ FIX: Create unbonding entry instead of immediate return
+	creationTime := time.Now()
+	completionTime := creationTime.Add(ws.config.Staking.UnbondingPeriod)
+
+	unbondingEntry := UnbondingEntry{
+		DelegatorAddr:  delegatorAddr,
+		ValidatorAddr:  validatorAddr,
+		Amount:         amount.String(),
+		CreationTime:   creationTime.Unix(),
+		CompletionTime: completionTime.Unix(),
+	}
+
+	// Add to unbonding queue
+	ws.unbondingMu.Lock()
+	ws.unbondingQueue = append(ws.unbondingQueue, unbondingEntry)
+	ws.unbondingMu.Unlock()
+
+	log.Printf("🔓 Unbonding started: %s withdrawing %s from %s (complete at %s)",
+		delegatorAddr, amount.String(), validatorAddr, completionTime.Format("2006-01-02 15:04:05"))
+
 	return nil
 }
 
-// DistributeRewards distributes staking rewards
-// Fix: Updated signature to accept string amount, and fixed internal math
-// DistributeRewards distributes staking rewards
+// Add to worldstate.go
+
+// ProcessUnbondingQueue checks for completed unbonding entries and releases funds
+// Call this in your block processing logic (e.g., at the end of each block)
+func (ws *WorldState) ProcessUnbondingQueue() error {
+	ws.unbondingMu.Lock()
+	defer ws.unbondingMu.Unlock()
+
+	currentTime := time.Now().Unix()
+	remaining := []UnbondingEntry{}
+	processedCount := 0
+
+	for _, entry := range ws.unbondingQueue {
+		if entry.CompletionTime <= currentTime {
+			// Unbonding period complete - return funds
+			if err := ws.completeUnbonding(entry); err != nil {
+				log.Printf("❌ ERROR: Failed to complete unbonding for %s: %v",
+					entry.DelegatorAddr, err)
+				// Keep in queue to retry later
+				remaining = append(remaining, entry)
+			} else {
+				processedCount++
+				log.Printf("✅ Unbonding complete: %s received %s from %s",
+					entry.DelegatorAddr, entry.Amount, entry.ValidatorAddr)
+			}
+		} else {
+			// Not ready yet, keep in queue
+			remaining = append(remaining, entry)
+		}
+	}
+
+	ws.unbondingQueue = remaining
+
+	if processedCount > 0 {
+		log.Printf("🔓 Processed %d unbonding completions", processedCount)
+	}
+
+	return nil
+}
+
+// completeUnbonding returns funds to the delegator after unbonding period
+func (ws *WorldState) completeUnbonding(entry UnbondingEntry) error {
+	// Lock for account update
+	ws.accountMu.Lock(entry.DelegatorAddr)
+	defer ws.accountMu.Unlock(entry.DelegatorAddr)
+
+	// Get delegator account
+	delegator, err := ws.accountManager.GetAccount(entry.DelegatorAddr)
+	if err != nil {
+		return fmt.Errorf("failed to get delegator account: %w", err)
+	}
+
+	// Parse amount
+	amountBig, success := new(big.Int).SetString(entry.Amount, 10)
+	if !success {
+		return fmt.Errorf("invalid amount format: %s", entry.Amount)
+	}
+
+	// Add to balance
+	balanceBig, _ := new(big.Int).SetString(delegator.Balance, 10)
+	if balanceBig == nil {
+		balanceBig = big.NewInt(0)
+	}
+	newBalance := new(big.Int).Add(balanceBig, amountBig)
+	delegator.Balance = newBalance.String()
+
+	// Update account
+	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
+		return fmt.Errorf("failed to update account: %w", err)
+	}
+
+	return nil
+}
+
+// GetUnbondingEntries returns all unbonding entries for a delegator
+func (ws *WorldState) GetUnbondingEntries(delegatorAddr string) []UnbondingEntry {
+	ws.unbondingMu.RLock()
+	defer ws.unbondingMu.RUnlock()
+
+	var entries []UnbondingEntry
+	for _, entry := range ws.unbondingQueue {
+		if entry.DelegatorAddr == delegatorAddr {
+			entries = append(entries, entry)
+		}
+	}
+
+	return entries
+}
+
+// GetTotalUnbonding returns total amount currently unbonding for a delegator
+func (ws *WorldState) GetTotalUnbonding(delegatorAddr string) *big.Int {
+	ws.unbondingMu.RLock()
+	defer ws.unbondingMu.RUnlock()
+
+	total := big.NewInt(0)
+	for _, entry := range ws.unbondingQueue {
+		if entry.DelegatorAddr == delegatorAddr {
+			amount, success := new(big.Int).SetString(entry.Amount, 10)
+			if success {
+				total.Add(total, amount)
+			}
+		}
+	}
+
+	return total
+}
+
 func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 	ws := sm.worldState
 
@@ -1744,7 +1927,7 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 		return fmt.Errorf("no active validators")
 	}
 
-	// Calculate Total Voting Power (Sum of all validator stakes)
+	// Calculate Total Voting Power
 	totalVotingPower := big.NewInt(0)
 	for _, v := range activeValidators {
 		vStake, _ := new(big.Int).SetString(v.Stake, 10)
@@ -1757,110 +1940,167 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 		return fmt.Errorf("total voting power is zero")
 	}
 
-	// Distribute
+	// ✅ NEW: Simple in-memory tracking for logging
+	successCount := 0
+	failureCount := 0
+	totalDistributed := big.NewInt(0)
+
+	// Distribute rewards to each validator
 	for _, validator := range activeValidators {
 		valStake, _ := new(big.Int).SetString(validator.Stake, 10)
 		if valStake == nil {
+			log.Printf("⚠️ Warning: Validator %s has invalid stake, skipping", validator.Address)
+			failureCount++
 			continue
 		}
 
-		// Formula: Reward = (TotalRewards * ValidatorStake) / TotalVotingPower
+		// Calculate validator's share
 		numerator := new(big.Int).Mul(totalRewardsBig, valStake)
 		validatorReward := new(big.Int).Div(numerator, totalVotingPower)
 
-		// Calculate Commission (basis points)
-		commRate := big.NewInt(int64(validator.Commission))
-		commAmt := new(big.Int).Mul(validatorReward, commRate)
-		commAmt.Div(commAmt, big.NewInt(10000))
+		// Calculate commission (using big.Float for precision - from Issue #4)
+		rewardFloat := new(big.Float).SetInt(validatorReward)
+		commissionRate := big.NewFloat(validator.Commission)
+		commAmtFloat := new(big.Float).Mul(rewardFloat, commissionRate)
+		commAmt, _ := commAmtFloat.Int(nil)
+		if commAmt == nil {
+			commAmt = big.NewInt(0)
+		}
 
 		delegatorReward := new(big.Int).Sub(validatorReward, commAmt)
 
-		// Update Validator Account
+		// ✅ FIX 1: Handle validator account retrieval errors
 		valAcc, err := ws.accountManager.GetAccount(validator.Address)
-		if err == nil {
-			// --- 1. Add Commission ---
-
-			// Fix: Parse safely before adding
-			currRew, _ := new(big.Int).SetString(valAcc.Rewards, 10)
-			if currRew == nil {
-				currRew = big.NewInt(0)
-			}
-			valAcc.Rewards = new(big.Int).Add(currRew, commAmt).String()
-
-			currBal, _ := new(big.Int).SetString(valAcc.Balance, 10)
-			if currBal == nil {
-				currBal = big.NewInt(0)
-			}
-			valAcc.Balance = new(big.Int).Add(currBal, commAmt).String()
-
-			// --- 2. If no delegators, Validator takes the rest ---
-			if len(validator.Delegators) == 0 {
-				// Fix: Parse Rewards again to add delegatorReward
-				currentRewards, _ := new(big.Int).SetString(valAcc.Rewards, 10)
-				if currentRewards == nil {
-					currentRewards = big.NewInt(0)
-				}
-				valAcc.Rewards = new(big.Int).Add(currentRewards, delegatorReward).String()
-
-				// Fix: Parse Balance again to add delegatorReward
-				currentBalance, _ := new(big.Int).SetString(valAcc.Balance, 10)
-				if currentBalance == nil {
-					currentBalance = big.NewInt(0)
-				}
-				valAcc.Balance = new(big.Int).Add(currentBalance, delegatorReward).String()
-			}
-
-			ws.accountManager.UpdateAccount(valAcc)
+		if err != nil {
+			log.Printf("❌ ERROR: Failed to get validator account %s: %v (reward %s LOST)",
+				validator.Address, err, validatorReward.String())
+			failureCount++
+			continue // Skip this validator
 		}
+
+		// Update validator account with commission
+		currRew, _ := new(big.Int).SetString(valAcc.Rewards, 10)
+		if currRew == nil {
+			currRew = big.NewInt(0)
+		}
+		valAcc.Rewards = new(big.Int).Add(currRew, commAmt).String()
+
+		currBal, _ := new(big.Int).SetString(valAcc.Balance, 10)
+		if currBal == nil {
+			currBal = big.NewInt(0)
+		}
+		valAcc.Balance = new(big.Int).Add(currBal, commAmt).String()
+
+		// If no delegators, validator gets everything
+		if len(validator.Delegators) == 0 {
+			currentRewards, _ := new(big.Int).SetString(valAcc.Rewards, 10)
+			if currentRewards == nil {
+				currentRewards = big.NewInt(0)
+			}
+			valAcc.Rewards = new(big.Int).Add(currentRewards, delegatorReward).String()
+
+			currentBalance, _ := new(big.Int).SetString(valAcc.Balance, 10)
+			if currentBalance == nil {
+				currentBalance = big.NewInt(0)
+			}
+			valAcc.Balance = new(big.Int).Add(currentBalance, delegatorReward).String()
+		}
+
+		// ✅ FIX 2: Handle update errors
+		if err := ws.accountManager.UpdateAccount(valAcc); err != nil {
+			log.Printf("❌ ERROR: Failed to update validator account %s: %v (reward %s LOST)",
+				validator.Address, err, validatorReward.String())
+			failureCount++
+			continue // Skip this validator
+		}
+
+		// Track successful distribution
+		successCount++
+		totalDistributed.Add(totalDistributed, commAmt)
 
 		// Distribute to Delegators
 		if len(validator.Delegators) > 0 {
 			valDelegatedStake, _ := new(big.Int).SetString(validator.DelegatedStake, 10)
-			// Safety check for division by zero
 			if valDelegatedStake != nil && valDelegatedStake.Sign() > 0 {
 
-				// Fix: Loop variable type is string (delAmountStr)
 				for delAddr, delAmountStr := range validator.Delegators {
-					// Fix: Parse string to BigInt
 					delAmount, _ := new(big.Int).SetString(delAmountStr, 10)
 					if delAmount == nil {
+						log.Printf("⚠️ Warning: Delegator %s has invalid stake amount", delAddr)
 						continue
 					}
 
-					// Share = (TotalDelegatorReward * YourStake) / TotalDelegatedStake
-					shareNum := new(big.Int).Mul(delegatorReward, delAmount)
-					share := new(big.Int).Div(shareNum, valDelegatedStake)
+					// Calculate delegator's share using big.Float for precision
+					delStakeFloat := new(big.Float).SetInt(delAmount)
+					totalDelegatedFloat := new(big.Float).SetInt(valDelegatedStake)
+					shareRatio := new(big.Float).Quo(delStakeFloat, totalDelegatedFloat)
 
-					if share.Sign() > 0 {
-						delAcc, err := ws.accountManager.GetAccount(delAddr)
-						if err == nil {
-							// Add Share to Rewards
-							r, _ := new(big.Int).SetString(delAcc.Rewards, 10)
-							if r == nil {
-								r = big.NewInt(0)
-							}
-							delAcc.Rewards = new(big.Int).Add(r, share).String()
+					rewardFloat := new(big.Float).SetInt(delegatorReward)
+					shareFloat := new(big.Float).Mul(shareRatio, rewardFloat)
+					share, _ := shareFloat.Int(nil)
 
-							// Add Share to Balance
-							b, _ := new(big.Int).SetString(delAcc.Balance, 10)
-							if b == nil {
-								b = big.NewInt(0)
-							}
-							delAcc.Balance = new(big.Int).Add(b, share).String()
-
-							ws.accountManager.UpdateAccount(delAcc)
-						}
+					if share == nil || share.Sign() <= 0 {
+						continue
 					}
+
+					// ✅ FIX 3: Handle delegator account errors
+					delAcc, err := ws.accountManager.GetAccount(delAddr)
+					if err != nil {
+						log.Printf("❌ ERROR: Failed to get delegator account %s: %v (reward %s LOST)",
+							delAddr, err, share.String())
+						failureCount++
+						continue // Skip this delegator
+					}
+
+					// Update delegator rewards
+					r, _ := new(big.Int).SetString(delAcc.Rewards, 10)
+					if r == nil {
+						r = big.NewInt(0)
+					}
+					delAcc.Rewards = new(big.Int).Add(r, share).String()
+
+					b, _ := new(big.Int).SetString(delAcc.Balance, 10)
+					if b == nil {
+						b = big.NewInt(0)
+					}
+					delAcc.Balance = new(big.Int).Add(b, share).String()
+
+					// ✅ FIX 4: Handle delegator update errors
+					if err := ws.accountManager.UpdateAccount(delAcc); err != nil {
+						log.Printf("❌ ERROR: Failed to update delegator account %s: %v (reward %s LOST)",
+							delAddr, err, share.String())
+						failureCount++
+						continue // Skip this delegator
+					}
+
+					// Track successful distribution
+					successCount++
+					totalDistributed.Add(totalDistributed, share)
 				}
 			}
 		}
+	}
 
-		// Update Total Supply
-		ts, _ := new(big.Int).SetString(ws.totalSupply, 10)
-		if ts == nil {
-			ts = big.NewInt(0)
+	// ✅ FIX 5: Log distribution summary
+	log.Printf("💰 Reward Distribution Complete:")
+	log.Printf("   Total Rewards: %s", totalRewardsBig.String())
+	log.Printf("   Successfully Distributed: %s", totalDistributed.String())
+	log.Printf("   Success Count: %d", successCount)
+	log.Printf("   Failure Count: %d", failureCount)
+
+	// Calculate and log lost rewards
+	lostRewards := new(big.Int).Sub(totalRewardsBig, totalDistributed)
+	if lostRewards.Sign() > 0 {
+		log.Printf("   ⚠️ LOST REWARDS: %s", lostRewards.String())
+	}
+
+	// ✅ FIX 6: Return error if too many failures (>10%)
+	if successCount+failureCount > 0 {
+		failureRate := float64(failureCount) / float64(successCount+failureCount)
+		if failureRate > 0.1 {
+			return fmt.Errorf("reward distribution had %d failures (%.1f%% failure rate)",
+				failureCount, failureRate*100)
 		}
-		ws.totalSupply = new(big.Int).Add(ts, validatorReward).String()
 	}
 
 	return nil
