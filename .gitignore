@@ -10,8 +10,12 @@ vm/:memory
 thrylos-dev
 thrylos-prod
 thrylos
-thrylos-node    
-**/thrylos-node
+
+# Go build outputs
+thrylos-node
+thrylos-*
+*.exe
+*.out
 
 # API info
 server.crt
