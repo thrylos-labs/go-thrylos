@@ -27,9 +27,8 @@ import (
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
+	"github.com/thrylos-labs/go-thrylos/types"
 )
-
-const BaseUnit = int64(1000000000) // 1 THRYLOS
 
 // WorldState manages the global state for a shard
 type WorldState struct {
@@ -85,17 +84,8 @@ type WorldState struct {
 
 	badgerStorage *storage.BadgerStorage
 
-	unbondingQueue []UnbondingEntry
+	unbondingQueue []types.UnbondingEntry
 	unbondingMu    sync.RWMutex
-}
-
-// UnbondingEntry represents tokens that are being unstaked
-type UnbondingEntry struct {
-	DelegatorAddr  string `json:"delegator_addr"`
-	ValidatorAddr  string `json:"validator_addr"`
-	Amount         string `json:"amount"`
-	CreationTime   int64  `json:"creation_time"`   // Unix timestamp
-	CompletionTime int64  `json:"completion_time"` // When funds will be released
 }
 
 func (ws *WorldState) calculateBlockHash(b *core.Block) string {
@@ -1782,7 +1772,7 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 	creationTime := time.Now()
 	completionTime := creationTime.Add(ws.config.Staking.UnbondingPeriod)
 
-	unbondingEntry := UnbondingEntry{
+	unbondingEntry := types.UnbondingEntry{
 		DelegatorAddr:  delegatorAddr,
 		ValidatorAddr:  validatorAddr,
 		Amount:         amount.String(),
@@ -1810,7 +1800,7 @@ func (ws *WorldState) ProcessUnbondingQueue() error {
 	defer ws.unbondingMu.Unlock()
 
 	currentTime := time.Now().Unix()
-	remaining := []UnbondingEntry{}
+	remaining := []types.UnbondingEntry{}
 	processedCount := 0
 
 	for _, entry := range ws.unbondingQueue {
@@ -1842,7 +1832,7 @@ func (ws *WorldState) ProcessUnbondingQueue() error {
 }
 
 // completeUnbonding returns funds to the delegator after unbonding period
-func (ws *WorldState) completeUnbonding(entry UnbondingEntry) error {
+func (ws *WorldState) completeUnbonding(entry types.UnbondingEntry) error {
 	// Lock for account update
 	ws.accountMu.Lock(entry.DelegatorAddr)
 	defer ws.accountMu.Unlock(entry.DelegatorAddr)
@@ -1876,11 +1866,11 @@ func (ws *WorldState) completeUnbonding(entry UnbondingEntry) error {
 }
 
 // GetUnbondingEntries returns all unbonding entries for a delegator
-func (ws *WorldState) GetUnbondingEntries(delegatorAddr string) []UnbondingEntry {
+func (ws *WorldState) GetUnbondingEntries(delegatorAddr string) []types.UnbondingEntry {
 	ws.unbondingMu.RLock()
 	defer ws.unbondingMu.RUnlock()
 
-	var entries []UnbondingEntry
+	var entries []types.UnbondingEntry
 	for _, entry := range ws.unbondingQueue {
 		if entry.DelegatorAddr == delegatorAddr {
 			entries = append(entries, entry)
