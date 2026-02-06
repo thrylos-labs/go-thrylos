@@ -38,26 +38,25 @@ func NewConsensusEngine(
 	nodeAddress, _ := account.GenerateAddress(nodePrivateKey.PublicKey())
 
 	engine := &ConsensusEngine{
-		config:            cfg,
-		blockchain:        blockchain,
-		worldState:        worldState,
-		nodePrivateKey:    nodePrivateKey,
-		nodeAddress:       nodeAddress,
-		broadcastChan:     broadcastChan,
-		receiveChan:       receiveChan,
-		proposalTimeout:   time.Duration(cfg.Consensus.BlockTime),
-		attestationPhase:  time.Duration(cfg.Consensus.BlockTime) / 3,
-		attestations:      make(map[string]*types.Attestation),
-		votes:             make(map[string]*Vote),
-		currentEpoch:      0,
-		currentSlot:       0,
-		chainCache:        NewChainCache(),
-		validatorActivity: make(map[string]*ValidatorActivity),
-		vrfSeedGen:        NewVRFSeedGenerator(),
-		vrfVerifier:       NewVRFVerifier(),
-		// ✅ DON'T initialize commitRevealMgr yet - needs slashingManager first
-		timestampValidator: NewTimestampValidator(5, 6, time.Now().Unix()), // 5s drift for dev
-		finalityManager:    NewFinalityManager(32),                         // 32 block finality depth
+		config:             cfg,
+		blockchain:         blockchain,
+		worldState:         worldState,
+		nodePrivateKey:     nodePrivateKey,
+		nodeAddress:        nodeAddress,
+		broadcastChan:      broadcastChan,
+		receiveChan:        receiveChan,
+		proposalTimeout:    time.Duration(cfg.Consensus.BlockTime),
+		attestationPhase:   time.Duration(cfg.Consensus.BlockTime) / 3,
+		attestations:       make(map[string]*types.Attestation),
+		votes:              make(map[string]*Vote),
+		currentEpoch:       0,
+		currentSlot:        0,
+		chainCache:         NewChainCache(),
+		validatorActivity:  make(map[string]*ValidatorActivity),
+		vrfSeedGen:         NewVRFSeedGenerator(),
+		vrfVerifier:        NewVRFVerifier(),
+		timestampValidator: NewTimestampValidator(15, 3, time.Now().Unix()),
+		finalityManager:    NewFinalityManager(32), // 32 block finality depth
 	}
 
 	// Initialize validator management
@@ -188,18 +187,19 @@ func (ce *ConsensusEngine) consensusLoop() {
 	slotTicker := time.NewTicker(ce.proposalTimeout)
 	defer slotTicker.Stop()
 
-	cleanupTicker := time.NewTicker(ce.proposalTimeout * 32)
-	defer cleanupTicker.Stop()
+	// 🔍 ADD THIS
+	fmt.Printf("🔍 consensusLoop started, timeout=%v\n", ce.proposalTimeout)
 
 	for {
 		select {
 		case <-slotTicker.C:
+			// 🔍 ADD THIS
+			fmt.Printf("\n⏰ TICK - calling processSlot\n")
+
 			ce.processSlot()
 
-		case <-cleanupTicker.C:
-			// Cleanup old epoch data to prevent memory leaks
-			ce.forkChoice.CleanupOldEpochs()
-			ce.cleanupChainCache()
+			// 🔍 ADD THIS
+			fmt.Printf("✅ processSlot returned\n")
 		}
 	}
 }
@@ -215,53 +215,47 @@ func (ce *ConsensusEngine) ValidateBlock(block *core.Block) error {
 // processSlot handles consensus for a single slot
 func (ce *ConsensusEngine) processSlot() {
 	ce.mu.Lock()
-	defer ce.mu.Unlock()
 
 	// Check previous slot for withholding
 	if ce.currentSlot > 0 {
 		previousSlot := ce.currentSlot
-
-		// 1. Get the expected proposer for the previous slot
 		expectedProposer, err := ce.getSlotProposer(previousSlot)
 		if err == nil {
-			// 2. Check if a block was actually produced for that slot
 			currentBlock := ce.worldState.GetCurrentBlock()
 			wasBlockProduced := currentBlock != nil && currentBlock.Header.Slot == previousSlot
-
-			// 3. Update activity (Testable Logic)
 			ce.updateValidatorActivity(expectedProposer, wasBlockProduced)
 		}
 	}
 
 	ce.currentSlot++
-
-	// Calculate epoch (32 slots per epoch)
 	ce.currentEpoch = ce.currentSlot / 32
 
 	// Get the proposer for this slot
 	proposer, err := ce.getSlotProposer(ce.currentSlot)
 	if err != nil {
-		fmt.Printf("Failed to get slot proposer: %v\n", err)
+		fmt.Printf("❌ Failed to get slot proposer: %v\n", err)
+		ce.mu.Unlock()
 		return
 	}
 
-	// ✅ SAFETY CHECK: Verify proposer is still active (not jailed since selection)
+	// Check if proposer is still active
 	if !ce.slashingManager.IsValidatorActive(proposer) {
-		fmt.Printf("⚠️  Selected proposer %s is no longer active (jailed/slashed), skipping slot\n", proposer)
+		fmt.Printf("⚠️  Proposer %s is not active\n", proposer)
+		ce.mu.Unlock()
 		return
 	}
 
-	// If we are the proposer, create and broadcast block
+	// If we are the proposer, create block
 	if proposer == ce.nodeAddress {
 		if err := ce.proposeBlock(); err != nil {
-			fmt.Printf("Failed to propose block: %v\n", err)
+			fmt.Printf("❌ Failed to propose block: %v\n", err)
 			ce.blocksMissed++
 		} else {
 			ce.blocksProposed++
 		}
 	}
 
-	// Always create attestation if we're a validator
+	// Create attestation if we're a validator
 	if ce.isCurrentNodeValidator() {
 		if err := ce.createAttestation(); err != nil {
 			fmt.Printf("Failed to create attestation: %v\n", err)
@@ -270,11 +264,33 @@ func (ce *ConsensusEngine) processSlot() {
 		}
 	}
 
-	// Process any received attestations
-	ce.processAttestations()
+	// Copy attestations while holding lock
+	attestationsCopy := make(map[string]*types.Attestation)
+	for k, v := range ce.attestations {
+		attestationsCopy[k] = v
+	}
 
-	// Update fork choice
-	ce.updateForkChoice()
+	ce.mu.Unlock()
+
+	// ✅ Process attestations and fork choice ASYNC
+	go func() {
+		ce.processAttestationsAsync(attestationsCopy)
+		ce.updateForkChoice()
+	}()
+}
+
+func (ce *ConsensusEngine) processAttestationsAsync(attestations map[string]*types.Attestation) {
+	for _, attestation := range attestations {
+		if err := ce.validateAttestation(attestation); err != nil {
+			continue
+		}
+
+		if err := ce.slashingManager.ProcessAttestation(attestation); err != nil {
+			continue
+		}
+
+		ce.forkChoice.ProcessAttestation(attestation)
+	}
 }
 
 // updateForkChoice updates the fork choice rule with safety checks and Reorg logic
@@ -466,7 +482,12 @@ func (ce *ConsensusEngine) proposeBlock() error {
 		return fmt.Errorf("failed to sign block proposal: %v", err)
 	}
 
-	ce.broadcastChan <- proposal
+	select {
+	case ce.broadcastChan <- proposal:
+		fmt.Printf("✅ Broadcast queued\n")
+	default:
+		fmt.Printf("⚠️ Broadcast channel full, dropping\n")
+	}
 
 	fmt.Printf("✅ Proposed block %s by validator %s with %d txs, gas: %d, fees: %s, VRF included\n",
 		result.Block.Hash[:8],
@@ -489,6 +510,7 @@ func (ce *ConsensusEngine) getPreviousBlockHash() string {
 	return ""
 }
 
+// createAttestation creates an attestation for the current head
 // createAttestation creates an attestation for the current head
 func (ce *ConsensusEngine) createAttestation() error {
 	currentHead := ce.worldState.GetCurrentBlock()
@@ -516,8 +538,13 @@ func (ce *ConsensusEngine) createAttestation() error {
 	attestationKey := fmt.Sprintf("%s-%d", ce.nodeAddress, ce.currentSlot)
 	ce.attestations[attestationKey] = attestation
 
-	// Broadcast attestation
-	ce.broadcastChan <- attestation
+	// ✅ FIX: Broadcast attestation (non-blocking)
+	select {
+	case ce.broadcastChan <- attestation:
+		fmt.Printf("✅ Attestation broadcast queued\n")
+	default:
+		fmt.Printf("⚠️ Attestation broadcast channel full, dropping\n")
+	}
 
 	return nil
 }
@@ -526,28 +553,46 @@ func (ce *ConsensusEngine) createAttestation() error {
 // getSlotProposer determines which validator should propose for a given slot using VRF
 func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 	activeValidators := ce.validatorSet.GetActiveValidators()
+
+	// 🔍 DEBUG LOG
+	fmt.Printf("🔍 DEBUG getSlotProposer: slot=%d, active validators count=%d\n",
+		slot, len(activeValidators))
+
 	if len(activeValidators) == 0 {
+		fmt.Printf("❌ DEBUG: No active validators in validator set!\n")
 		return "", fmt.Errorf("no active validators")
 	}
 
-	// Filter out jailed and slashed validators
+	for i, val := range activeValidators {
+		fmt.Printf("   Validator %d: %s (Active=%v, Stake=%s)\n",
+			i, val.Address, val.Active, val.Stake)
+	}
+
 	eligibleValidators := make([]*core.Validator, 0)
 	for _, validator := range activeValidators {
-		if ce.slashingManager.IsValidatorActive(validator.Address) {
+		isActive := ce.slashingManager.IsValidatorActive(validator.Address)
+		fmt.Printf("   Checking %s: slashing active=%v\n", validator.Address, isActive)
+
+		if isActive {
 			eligibleValidators = append(eligibleValidators, validator)
 		}
 	}
 
+	fmt.Printf("🔍 DEBUG: Eligible validators count=%d\n", len(eligibleValidators))
+
 	if len(eligibleValidators) == 0 {
+		fmt.Printf("❌ DEBUG: No eligible validators (all jailed/slashed)\n")
 		return "", fmt.Errorf("no eligible validators (all are jailed or slashed)")
 	}
 
-	// ✅ NEW: Use VRF-based selection instead of simple seed
+	// Use VRF-based selection
 	selectedValidator, err := ce.selectValidatorWithVRF(eligibleValidators, slot)
 	if err != nil {
-		return "", fmt.Errorf("failed to select validator with VRF: %v", err)
+		fmt.Printf("❌ DEBUG: VRF selection failed: %v\n", err)
+		return "", fmt.Errorf("failed to select validator: %v", err)
 	}
 
+	fmt.Printf("✅ DEBUG: Selected validator %s for slot %d\n", selectedValidator.Address, slot)
 	return selectedValidator.Address, nil
 }
 
