@@ -216,6 +216,11 @@ func (ce *ConsensusEngine) ValidateBlock(block *core.Block) error {
 func (ce *ConsensusEngine) processSlot() {
 	ce.mu.Lock()
 
+	// Process completed unbondings
+	if err := ce.worldState.ProcessUnbondingQueue(); err != nil {
+		log.Printf("⚠️ Failed to process unbonding queue: %v", err)
+	}
+
 	// Check previous slot for withholding
 	if ce.currentSlot > 0 {
 		previousSlot := ce.currentSlot

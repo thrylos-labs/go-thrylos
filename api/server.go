@@ -393,6 +393,7 @@ func (s *Server) setupRoutes() {
 	permissive.HandleFunc("/account/{address}/stake", s.getAccountStake).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/account/{address}/rewards", s.getAccountRewards).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/staking/stats", s.getStakingStats).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/account/{address}/unbonding", s.getAccountUnbonding).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/staking/validators", s.getStakingValidators).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/staking/delegations/{address}", s.getDelegationHistory).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/staking/rewards/{address}", s.getDetailedRewards).Methods("GET", "OPTIONS")
@@ -1574,6 +1575,36 @@ func (s *Server) getStakingStats(w http.ResponseWriter, r *http.Request) {
 		ActiveValidators:      activeValidatorCount,
 		TotalDelegators:       totalDelegators,
 		AverageCommission:     averageCommission,
+	}
+
+	s.writeJSON(w, response)
+}
+
+// getAccountUnbonding returns the unbonding queue for an account
+// In server.go - Update the handler to use WorldState directly
+func (s *Server) getAccountUnbonding(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	address := vars["address"]
+
+	// ✅ Use the existing WorldState method
+	unbondingEntries := s.worldState.GetUnbondingEntries(address)
+
+	// Format for frontend
+	var formattedQueue []map[string]interface{}
+	for _, entry := range unbondingEntries {
+		formattedQueue = append(formattedQueue, map[string]interface{}{
+			"validator":   entry.ValidatorAddr,
+			"amount":      entry.Amount,
+			"created_at":  entry.CreationTime,
+			"complete_at": entry.CompletionTime,
+			"delegator":   entry.DelegatorAddr,
+		})
+	}
+
+	response := map[string]interface{}{
+		"address":         address,
+		"unbonding_queue": formattedQueue,
+		"count":           len(formattedQueue),
 	}
 
 	s.writeJSON(w, response)
