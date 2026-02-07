@@ -324,6 +324,7 @@ func Load() (*Config, error) {
 			MaxCommission:              0.20,
 			CommissionChangeMax:        0.01,
 			UnbondingTime:              21 * 24 * time.Hour,
+			UnbondingPeriod:            7 * 24 * time.Hour,
 			MaxDelegationsPerValidator: 1000,
 			SlashFractionDoubleSign:    0.05,
 			SlashFractionDowntime:      0.001,

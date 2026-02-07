@@ -1494,6 +1494,9 @@ func (ws *WorldState) GetStakingManager() *StakingManager {
 
 // Around line 1450 in worldstate.go
 func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount *big.Int) error {
+	// ✅ ADD THIS DEBUG LINE
+	log.Printf("🔍 DEBUG: UnbondingPeriod = %v (should be 168h0m0s for 7 days)", sm.worldState.config.Staking.UnbondingPeriod)
+
 	ws := sm.worldState
 
 	// Lock order
