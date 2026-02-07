@@ -306,7 +306,7 @@ func Load() (*Config, error) {
 			MaxTimestampAge:    1 * time.Hour,
 			MaxTxDataSize:      1024 * 1024,
 			StakeCacheTTL:      30 * time.Second,
-			SlashingEnabled:    false,
+			SlashingEnabled:    true,
 
 			SlashingDoubleVote:      50,
 			SlashingSurroundVote:    30,

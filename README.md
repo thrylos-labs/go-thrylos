@@ -87,6 +87,7 @@ Prerequisites: Docker and Docker Compose installed.
 Bash
 
 docker-compose up --build -d
+
 2. Verify Connectivity Node 1 exposes the JSON-RPC API on port 8080. Check the status to see block height increasing:
 
 curl http://localhost:8080/api/v1/status
