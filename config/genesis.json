@@ -16,10 +16,18 @@
   "accounts": [
     {
       "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
-      "balance": "14000000000000000000000000"
+      "balance": "12000000000000000000000000"
     },
     {
       "address": "0x350b9f27991d9ddd2bc4a41b790bcdfb027bf964",
+      "balance": "1000000000000000000000000"
+    },
+    {
+      "address": "0x8b5c58f0e12ab31c5e3f1c9ab4729d51e0b2c8a3",
+      "balance": "1000000000000000000000000"
+    },
+    {
+      "address": "0x9c6d69g1f23bc42d6f4g2d0bc5830e62f1c3d9b4",
       "balance": "1000000000000000000000000"
     }
   ],
@@ -27,7 +35,19 @@
     {
       "address": "0x350b9f27991d9ddd2bc4a41b790bcdfb027bf964",
       "stake": "3000000000000000000000",
-      "name": "Local Dev Validator",
+      "name": "Iron Peak",
+      "commission": 0.05
+    },
+    {
+      "address": "0x8b5c58f0e12ab31c5e3f1c9ab4729d51e0b2c8a3",
+      "stake": "3000000000000000000000",
+      "name": "Storm Rider",
+      "commission": 0.08
+    },
+    {
+      "address": "0x9c6d69g1f23bc42d6f4g2d0bc5830e62f1c3d9b4",
+      "stake": "3000000000000000000000",
+      "name": "Crystal Weaver",
       "commission": 0.10
     }
   ]

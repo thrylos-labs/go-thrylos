@@ -1,32 +1,26 @@
-version: '3.8'
+version: "3.8"
 
 services:
   node-1:
-    build: 
-      context: .
-      platform: linux/amd64  # Force x86_64 build
+    build: .
     container_name: thrylos-node-1
     hostname: node-1
-    platform: linux/amd64
     environment:
-      - THRYLOS_ENVIRONMENT=testnet
-      - IS_VALIDATOR=true
+      - NODE_ID=1
       - P2P_PORT=9000
-      - API_PORT=8080
       - DATA_DIR=/app/data
-      - VALIDATOR_KEY_PATH=/app/keys/validator.key
+      - THRYLOS_ENVIRONMENT=development
     ports:
-      - "8080:8080"
+      - "8080:8081"
       - "9001:9000"
     volumes:
       - node1-data:/app/data
       - node1-keys:/app/keys
-      - shared-network:/app/network-config
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.10
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -34,27 +28,21 @@ services:
     restart: unless-stopped
 
   node-2:
-    build:
-      context: .
-      platform: linux/amd64
+    build: .
     container_name: thrylos-node-2
     hostname: node-2
-    platform: linux/amd64
     environment:
-      - THRYLOS_ENVIRONMENT=testnet
-      - IS_VALIDATOR=true
+      - NODE_ID=2
       - P2P_PORT=9000
-      - API_PORT=8080
       - DATA_DIR=/app/data
       - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000
-      - VALIDATOR_KEY_PATH=/app/keys/validator.key
+      - THRYLOS_ENVIRONMENT=development
     ports:
-      - "8081:8080"
+      - "8081:8081"
       - "9002:9000"
     volumes:
       - node2-data:/app/data
       - node2-keys:/app/keys
-      - shared-network:/app/network-config
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.11
@@ -62,7 +50,7 @@ services:
       node-1:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -70,27 +58,21 @@ services:
     restart: unless-stopped
 
   node-3:
-    build:
-      context: .
-      platform: linux/amd64
+    build: .
     container_name: thrylos-node-3
     hostname: node-3
-    platform: linux/amd64
     environment:
-      - THRYLOS_ENVIRONMENT=testnet
-      - IS_VALIDATOR=true
+      - NODE_ID=3
       - P2P_PORT=9000
-      - API_PORT=8080
       - DATA_DIR=/app/data
       - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000,/ip4/172.25.0.11/tcp/9000
-      - VALIDATOR_KEY_PATH=/app/keys/validator.key
+      - THRYLOS_ENVIRONMENT=development
     ports:
-      - "8082:8080"
+      - "8082:8081"
       - "9003:9000"
     volumes:
       - node3-data:/app/data
       - node3-keys:/app/keys
-      - shared-network:/app/network-config
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.12
@@ -100,7 +82,7 @@ services:
       node-2:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -108,37 +90,30 @@ services:
     restart: unless-stopped
 
   node-4:
-    build:
-      context: .
-      platform: linux/amd64
+    build: .
+    platform: linux/amd64
     container_name: thrylos-node-4
     hostname: node-4
-    platform: linux/amd64
     environment:
-      - THRYLOS_ENVIRONMENT=testnet
-      - IS_VALIDATOR=false
+      - NODE_ID=4
       - P2P_PORT=9000
-      - API_PORT=8080
       - DATA_DIR=/app/data
-      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000,/ip4/172.25.0.11/tcp/9000,/ip4/172.25.0.12/tcp/9000
+      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000
+      - THRYLOS_ENVIRONMENT=development
     ports:
-      - "8083:8080"
+      - "8083:8081"
       - "9004:9000"
     volumes:
       - node4-data:/app/data
-      - shared-network:/app/network-config
+      - node4-keys:/app/keys
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.13
     depends_on:
       node-1:
         condition: service_healthy
-      node-2:
-        condition: service_healthy
-      node-3:
-        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -147,21 +122,13 @@ services:
 
 volumes:
   node1-data:
-    driver: local
   node1-keys:
-    driver: local
   node2-data:
-    driver: local
   node2-keys:
-    driver: local
   node3-data:
-    driver: local
   node3-keys:
-    driver: local
   node4-data:
-    driver: local
-  shared-network:
-    driver: local
+  node4-keys:
 
 networks:
   thrylos-net:

@@ -4,7 +4,7 @@
 package evm
 
 /*
-#cgo LDFLAGS: -L${SRCDIR}/../../lib -lthrylos_revm
+#cgo LDFLAGS: ${SRCDIR}/../../lib/libthrylos_revm.a -lpthread -ldl -lm
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
