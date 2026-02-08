@@ -55,9 +55,15 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 			Website:     "https://thrylos.org",
 			Commission:  0.10,
 		},
+		4: {
+			Name:        "Shadow Walker",
+			Description: "Ensuring network resilience from the edges",
+			Website:     "https://thrylos.org",
+			Commission:  0.05,
+		},
 	}
 
-	for nodeID := 1; nodeID <= 3; nodeID++ {
+	for nodeID := 1; nodeID <= 4; nodeID++ {
 		priv, err := getNodeSpecificPrivateKey(nodeID)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to derive dev private key for node %d: %w", nodeID, err)

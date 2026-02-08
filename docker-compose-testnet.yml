@@ -16,6 +16,7 @@ services:
     volumes:
       - node1-data:/app/data
       - node1-keys:/app/keys
+      - shared-config:/app/config  # <--- ADDED: Shared config volume
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.10
@@ -43,6 +44,7 @@ services:
     volumes:
       - node2-data:/app/data
       - node2-keys:/app/keys
+      - shared-config:/app/config  # <--- ADDED: Shared config volume
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.11
@@ -73,6 +75,7 @@ services:
     volumes:
       - node3-data:/app/data
       - node3-keys:/app/keys
+      - shared-config:/app/config  # <--- ADDED: Shared config volume
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.12
@@ -106,6 +109,7 @@ services:
     volumes:
       - node4-data:/app/data
       - node4-keys:/app/keys
+      - shared-config:/app/config  # <--- ADDED: Shared config volume
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.13
@@ -129,6 +133,7 @@ volumes:
   node3-keys:
   node4-data:
   node4-keys:
+  shared-config: # <--- ADDED: Volume definition
 
 networks:
   thrylos-net:

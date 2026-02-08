@@ -21,7 +21,7 @@ func main() {
 
 	flag.Parse()
 
-	if *nodeID < 1 || *nodeID > 3 {
+	if *nodeID < 1 || *nodeID > 4 { // <--- Changed 3 to 4
 		log.Fatalf("Node ID must be 1, 2, or 3 in dev mode")
 	}
 

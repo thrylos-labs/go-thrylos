@@ -1,7 +1,7 @@
 {
-  "chain_id": "thrylos-local-1337",
-  "genesis_time": "2026-02-03T08:35:00Z",
-  "total_genesis": "15000000000000000000000000",
+  "chain_id": "thrylos-devnet-1337",
+  "genesis_time": "2026-02-08T12:00:00Z",
+  "total_genesis": "25000000000000000000000000",
   "consensus": {
     "block_time": 3,
     "epoch_length": 32,
@@ -16,19 +16,7 @@
   "accounts": [
     {
       "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
-      "balance": "12000000000000000000000000"
-    },
-    {
-      "address": "0x350b9f27991d9ddd2bc4a41b790bcdfb027bf964",
-      "balance": "1000000000000000000000000"
-    },
-    {
-      "address": "0x8b5c58f0e12ab31c5e3f1c9ab4729d51e0b2c8a3",
-      "balance": "1000000000000000000000000"
-    },
-    {
-      "address": "0x9c6d69g1f23bc42d6f4g2d0bc5830e62f1c3d9b4",
-      "balance": "1000000000000000000000000"
+      "balance": "10000000000000000000000000"
     }
   ],
   "validators": [
@@ -39,16 +27,22 @@
       "commission": 0.05
     },
     {
-      "address": "0x8b5c58f0e12ab31c5e3f1c9ab4729d51e0b2c8a3",
+      "address": "0x632fbbec3284c1bb3c7de537abba617cc9a1320d",
       "stake": "3000000000000000000000",
       "name": "Storm Rider",
       "commission": 0.08
     },
     {
-      "address": "0x9c6d69g1f23bc42d6f4g2d0bc5830e62f1c3d9b4",
+      "address": "0x83916143aeeb6850124f37033dc043cfe6825f21",
       "stake": "3000000000000000000000",
       "name": "Crystal Weaver",
       "commission": 0.10
+    },
+    {
+      "address": "0xd28b00e39e09af372130ee6155c30f6e8b1c8b6d",
+      "stake": "3000000000000000000000",
+      "name": "Shadow Walker",
+      "commission": 0.05
     }
   ]
 }
