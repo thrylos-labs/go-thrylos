@@ -124,9 +124,18 @@ func NewMessageValidator(maxMsgSize int64, maxBlockRange int, readTimeout, write
 
 // M-3 FIX: CheckPeerStatusWithPriority includes priority-aware rate limiting
 func (mv *MessageValidator) CheckPeerStatusWithPriority(peerID peer.ID, priority MessagePriority) error {
+	// [FIX] Check for nil BEFORE locking
+	if mv == nil {
+		return nil // or return fmt.Errorf("message validator is nil")
+	}
+
 	mv.mu.Lock()
 	defer mv.mu.Unlock()
 
+	// [FIX] Add this check at the very beginning of the function
+	if mv == nil {
+		return nil // or handle error appropriately
+	}
 	// 1. Check global load first (adaptive throttling)
 	if err := mv.checkGlobalLoadInternal(); err != nil {
 		// During high load, only allow high-priority messages

@@ -1,6 +1,6 @@
 {
   "chain_id": "thrylos-devnet-1337",
-  "genesis_time": "2026-02-08T12:00:00Z",
+  "genesis_time": "2026-02-09T10:15:00Z", 
   "total_genesis": "25000000000000000000000000",
   "consensus": {
     "block_time": 3,
@@ -16,6 +16,22 @@
   "accounts": [
     {
       "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+      "balance": "10000000000000000000000000"
+    },
+    {
+      "address": "0x350b9f27991d9ddd2bc4a41b790bcdfb027bf964",
+      "balance": "10000000000000000000000000"
+    },
+    {
+      "address": "0x632fbbec3284c1bb3c7de537abba617cc9a1320d",
+      "balance": "10000000000000000000000000"
+    },
+    {
+      "address": "0x83916143aeeb6850124f37033dc043cfe6825f21",
+      "balance": "10000000000000000000000000"
+    },
+    {
+      "address": "0xd28b00e39e09af372130ee6155c30f6e8b1c8b6d",
       "balance": "10000000000000000000000000"
     }
   ],

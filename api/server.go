@@ -40,13 +40,14 @@ import (
 
 // Server represents the HTTP API server
 type Server struct {
-	worldState  *state.WorldState
-	blockchain  *chain.Blockchain // <--- ADD THIS
-	config      *config.Config    // <--- ADD THIS
-	evmExecutor *evm.RevmExecutor
-	router      *mux.Router
-	server      *http.Server
-	port        int
+	worldState    *state.WorldState
+	blockchain    *chain.Blockchain // <--- ADD THIS
+	config        *config.Config    // <--- ADD THIS
+	evmExecutor   *evm.RevmExecutor
+	pointsManager *PointsManager
+	router        *mux.Router
+	server        *http.Server
+	port          int
 
 	// HTTPS configuration
 	enableTLS bool
@@ -159,11 +160,20 @@ func NewServerWithConfig(
 		Enabled:         true,
 	}
 
+	// ✅ FIX: Only initialize PointsManager if Faucet is enabled (Dev Mode)
+	var pm *PointsManager
+	if cfg.API.EnableFaucet {
+		pm = NewPointsManager("points.json")
+	} else {
+		pm = nil // No points in production
+	}
+
 	server := &Server{
 		worldState:      worldState,
 		blockchain:      blockchain,  // <--- Assign
 		evmExecutor:     evmExecutor, // <--- Assign
 		config:          cfg,         // <--- Assign
+		pointsManager:   pm,
 		port:            extractPortFromConfig(cfg.API.RESTAddr),
 		enableTLS:       cfg.API.EnableTLS,
 		certFile:        cfg.API.CertFile,
@@ -343,6 +353,12 @@ func (s *Server) setupRoutes() {
 	// Use for: Simple reads, Lookups, Health checks
 	permissive := api.PathPrefix("").Subrouter()
 	permissive.Use(s.RateLimitMiddleware("permissive"))
+
+	// ---------------------------------------------------------
+	// ✅ ADD POINTS ROUTES HERE (In Permissive section)
+	// ---------------------------------------------------------
+	permissive.HandleFunc("/points", s.getPoints).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/leaderboard", s.getLeaderboard).Methods("GET", "OPTIONS")
 
 	permissiveRoot := s.router.PathPrefix("").Subrouter()
 	permissiveRoot.Use(s.RateLimitMiddleware("permissive"))
@@ -546,10 +562,12 @@ func (s *Server) submitSignedTransaction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	s.writeJSON(w, map[string]interface{}{
-		"status":  "accepted",
-		"tx_hash": tx.Hash,
-	})
+	// ✅ CORRECTED: Only one block, checks for nil, runs in background
+	if s.pointsManager != nil {
+		go s.pointsManager.RecordTransaction(tx.From, tx.To)
+	}
+
+	s.writeJSON(w, map[string]interface{}{"status": "accepted", "tx_hash": tx.Hash})
 }
 
 func (s *Server) estimateGas(w http.ResponseWriter, r *http.Request) {
@@ -1056,9 +1074,10 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 }
 
 // Development endpoint to fund addresses (for testing)
+// Development endpoint to fund addresses (for testing)
 func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
-	if !isDevEnvironment() {
-		s.writeError(w, "Funding endpoint not available in production", http.StatusForbidden)
+	if !isDevEnvironment() || !s.enableFaucet {
+		s.writeError(w, "Faucet not available", http.StatusForbidden)
 		return
 	}
 
@@ -1087,15 +1106,14 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		// Account doesn't exist, create a new one
 		account = &core.Account{
 			Address:      req.Address,
-			Balance:      math.BigIntToString(amountBig), // ✅ Fix: Store as string
+			Balance:      math.BigIntToString(amountBig),
 			Nonce:        0,
-			StakedAmount: "0",                     // ✅ Fix: Use string "0"
-			DelegatedTo:  make(map[string]string), // ✅ Fix: Use string map
-			Rewards:      "0",                     // ✅ Fix: Use string "0"
+			StakedAmount: "0",
+			DelegatedTo:  make(map[string]string),
+			Rewards:      "0",
 		}
 	} else {
 		// Account exists, add funding to existing balance
-		// ✅ Fix: Use BigInt math instead of +=
 		currentBal := math.ParseBigInt(account.Balance)
 		newBal := new(big.Int).Add(currentBal, amountBig)
 		account.Balance = math.BigIntToString(newBal)
@@ -1107,8 +1125,15 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ✅ CORRECTED: Award Points Logic (Safe Check)
+	var newTotalPoints int
+	var awarded bool
+
+	if s.pointsManager != nil {
+		newTotalPoints, awarded = s.pointsManager.AwardFaucet(req.Address)
+	}
+
 	// Convert to human-readable THRYLOS for display (Balance / 10^18)
-	// Use big.Float for display precision
 	fBalance := new(big.Float).SetInt(math.ParseBigInt(account.Balance))
 	fAmount := new(big.Float).SetInt(amountBig)
 	fBase := new(big.Float).SetInt(config.BaseUnit) // 10^18
@@ -1123,6 +1148,8 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		"amount_thrylos":  amountDisplay,   // Human readable
 		"new_balance":     account.Balance, // Raw string
 		"balance_thrylos": balanceDisplay,  // Human readable
+		"points_awarded":  awarded,
+		"total_points":    newTotalPoints,
 		"nonce":           account.Nonce,
 	}
 
@@ -1148,6 +1175,56 @@ func isDevEnvironment() bool {
 		log.Printf("⚠️  Unknown THRYLOS_ENVIRONMENT=%q, assuming PRODUCTION (dev-only features disabled)\n", env)
 		return false
 	}
+}
+
+// ========== POINTS SYSTEM HANDLERS ==========
+
+func (s *Server) getPoints(w http.ResponseWriter, r *http.Request) {
+	// ✅ Safety Check
+	if s.pointsManager == nil {
+		s.writeError(w, "Points system not active on Mainnet", http.StatusNotImplemented)
+		return
+	}
+
+	address := r.URL.Query().Get("address")
+	if address == "" {
+		s.writeError(w, "Address required", http.StatusBadRequest)
+		return
+	}
+
+	// Get basic points data
+	user := s.pointsManager.GetUserPoints(address)
+
+	// Optional: Check if they have staked in the WorldState to award the "Delegation Bonus"
+	account, err := s.worldState.GetAccount(address)
+	hasStaked := false
+	if err == nil && len(account.DelegatedTo) > 0 {
+		hasStaked = true
+	}
+
+	// Sync chain activity (if you implemented SyncChainActivity in points.go)
+	// s.pointsManager.SyncChainActivity(address, int(account.Nonce), hasStaked)
+
+	// If using the simpler points.go from step 4, just checking delegation is enough:
+	if hasStaked {
+		s.pointsManager.RecordDelegation(address)
+	}
+
+	response := map[string]interface{}{
+		"address":     user.Address,
+		"points":      user.TotalPoints,
+		"rank":        "Member",
+		"streak":      user.CurrentStreak,
+		"next_faucet": user.LastFaucet.Add(24 * time.Hour).Unix(),
+	}
+
+	s.writeJSON(w, response)
+}
+
+func (s *Server) getLeaderboard(w http.ResponseWriter, r *http.Request) {
+	// Return top 50
+	leaderboard := s.pointsManager.GetLeaderboard(50)
+	s.writeJSON(w, leaderboard)
 }
 
 // Transaction endpoints (keep existing implementation)
