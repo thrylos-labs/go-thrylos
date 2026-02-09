@@ -618,37 +618,50 @@ pub extern "C" fn revm_executor_new(
     get_code_fn: extern "C" fn(CAddress) -> CByteSlice,
     get_storage_fn: extern "C" fn(CAddress, CU256) -> CU256,
 ) -> *mut EVMExecutor {
-    let executor = EVMExecutor::new(
-        chain_id,
-        get_balance_fn,
-        get_nonce_fn,
-        get_code_fn,
-        get_storage_fn,
-    );
-    Box::into_raw(Box::new(executor))
+    // 🛡️ SECURITY FIX: Catch panic during initialization
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let executor = EVMExecutor::new(
+            chain_id,
+            get_balance_fn,
+            get_nonce_fn,
+            get_code_fn,
+            get_storage_fn,
+        );
+        Box::into_raw(Box::new(executor))
+    }));
+
+    match result {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            eprintln!("🚨 CRITICAL: Panic in revm_executor_new");
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// Enhanced executor cleanup with leak detection
 #[no_mangle]
 pub extern "C" fn revm_executor_free(executor: *mut EVMExecutor) {
-    if executor.is_null() {
-        return;
-    }
-    
-    unsafe {
-        (*executor).magic = EXECUTOR_FREED_MAGIC;
-        
-        // ✅ C-02 FIX: Report leaks before destroying
-        let leak_count = revm_get_leak_count();
-        if leak_count > 0 {
-            eprintln!("⚠️ WARNING: Freeing executor with {} potential memory leaks", leak_count);
-            eprintln!("   Tracked error messages: {}", revm_get_tracked_error_messages());
-            eprintln!("   Tracked return data: {}", revm_get_tracked_return_data());
-            revm_report_memory_stats();
+    // 🛡️ SECURITY: Catch panics during destruction (Drop trait)
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if executor.is_null() {
+            return;
         }
         
-        let _ = Box::from_raw(executor);
-    }
+        unsafe {
+            (*executor).magic = EXECUTOR_FREED_MAGIC;
+            
+            // Report leaks before destroying
+            let leak_count = revm_get_leak_count();
+            if leak_count > 0 {
+                eprintln!("⚠️ WARNING: Freeing executor with {} potential memory leaks", leak_count);
+                revm_report_memory_stats();
+            }
+            
+            // If this panics (e.g. locking issues in DashMap/RwLock), we catch it here.
+            let _ = Box::from_raw(executor);
+        }
+    }));
 }
 
 #[no_mangle]
@@ -880,53 +893,39 @@ pub extern "C" fn revm_deploy_contract(
 
 #[no_mangle]
 pub extern "C" fn revm_reserve_nonce(executor: *mut EVMExecutor, address: CAddress) -> u64 {
-    if executor.is_null() {
-        eprintln!("⚠️ revm_reserve_nonce: executor is null");
-        return u64::MAX;
-    }
-    
-    if let Err(_) = validate_executor(executor) {
-        eprintln!("⚠️ revm_reserve_nonce: invalid executor");
-        return u64::MAX;
-    }
-    
-    let executor = unsafe { &*executor };
-    let addr = Address::from_slice(&address.bytes);
-    executor.reserve_nonce(&addr)
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if validate_executor(executor).is_err() {
+            return u64::MAX;
+        }
+        let executor = unsafe { &*executor };
+        let addr = Address::from_slice(&address.bytes);
+        executor.reserve_nonce(&addr)
+    }));
+    result.unwrap_or(u64::MAX) // Return MAX on panic
 }
 
 #[no_mangle]
 pub extern "C" fn revm_release_nonce(executor: *mut EVMExecutor, address: CAddress, nonce: u64) {
-    if executor.is_null() {
-        eprintln!("⚠️ revm_release_nonce: executor is null");
-        return;
-    }
-    
-    if let Err(_) = validate_executor(executor) {
-        eprintln!("⚠️ revm_release_nonce: invalid executor");
-        return;
-    }
-    
-    let executor = unsafe { &*executor };
-    let addr = Address::from_slice(&address.bytes);
-    executor.release_nonce(&addr, nonce);
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if validate_executor(executor).is_ok() {
+            let executor = unsafe { &*executor };
+            let addr = Address::from_slice(&address.bytes);
+            executor.release_nonce(&addr, nonce);
+        }
+    }));
 }
 
 #[no_mangle]
 pub extern "C" fn revm_get_next_nonce(executor: *mut EVMExecutor, address: CAddress) -> u64 {
-    if executor.is_null() {
-        eprintln!("⚠️ revm_get_next_nonce: executor is null");
-        return u64::MAX;
-    }
-    
-    if let Err(_) = validate_executor(executor) {
-        eprintln!("⚠️ revm_get_next_nonce: invalid executor");
-        return u64::MAX;
-    }
-    
-    let executor = unsafe { &*executor };
-    let addr = Address::from_slice(&address.bytes);
-    executor.get_next_nonce(&addr)
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if validate_executor(executor).is_err() {
+            return u64::MAX;
+        }
+        let executor = unsafe { &*executor };
+        let addr = Address::from_slice(&address.bytes);
+        executor.get_next_nonce(&addr)
+    }));
+    result.unwrap_or(u64::MAX)
 }
 
 #[no_mangle]
@@ -959,29 +958,35 @@ pub extern "C" fn revm_free_bytes(data: *mut u8, len: usize) {
 
 #[no_mangle]
 pub extern "C" fn revm_calculate_create_address(deployer: CAddress, nonce: u64) -> CAddress {
-    use revm::primitives::keccak256;
-    
-    let mut rlp = Vec::new();
-    rlp.push(0xc0 + 22);
-    rlp.push(0x80 + 20);
-    rlp.extend_from_slice(&deployer.bytes);
-    
-    if nonce == 0 {
-        rlp.push(0x80);
-    } else if nonce < 0x80 {
-        rlp.push(nonce as u8);
-    } else {
-        let nonce_bytes = nonce.to_be_bytes();
-        let start = nonce_bytes.iter().position(|&b| b != 0).unwrap();
-        let len = 8 - start;
-        rlp.push(0x80 + len as u8);
-        rlp.extend_from_slice(&nonce_bytes[start..]);
-    }
-    
-    let hash = keccak256(&rlp);
-    let mut result = CAddress { bytes: [0u8; 20] };
-    result.bytes.copy_from_slice(&hash[12..]);
-    result
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        use revm::primitives::keccak256;
+        
+        let mut rlp = Vec::new();
+        rlp.push(0xc0 + 22);
+        rlp.push(0x80 + 20);
+        rlp.extend_from_slice(&deployer.bytes);
+        
+        if nonce == 0 {
+            rlp.push(0x80);
+        } else if nonce < 0x80 {
+            rlp.push(nonce as u8);
+        } else {
+            let nonce_bytes = nonce.to_be_bytes();
+            // Safety: if nonce >= 0x80, it must have a non-zero byte
+            let start = nonce_bytes.iter().position(|&b| b != 0).unwrap_or(0);
+            let len = 8 - start;
+            rlp.push(0x80 + len as u8);
+            rlp.extend_from_slice(&nonce_bytes[start..]);
+        }
+        
+        let hash = keccak256(&rlp);
+        let mut result = CAddress { bytes: [0u8; 20] };
+        result.bytes.copy_from_slice(&hash[12..]);
+        result
+    }));
+
+    // Return empty address on panic
+    result.unwrap_or(CAddress { bytes: [0u8; 20] })
 }
 
 #[no_mangle]
@@ -992,17 +997,20 @@ pub extern "C" fn revm_estimate_gas(
     data: CByteSlice,
     value: CU256,
 ) -> u64 {
-    if validate_executor(executor).is_err() {
-        eprintln!("⚠️  Gas estimation failed: invalid executor");
-        return u64::MAX;
-    }
-
-    if let Err(msg) = validate_data(data, MAX_CALLDATA_SIZE, "Calldata") {
-        eprintln!("⚠️  Gas estimation failed: {}", msg);
-        return u64::MAX;
-    }
-
+    // 🛡️ SECURITY: Wrap EVERYTHING in catch_unwind, including validation
     let result = catch_unwind(AssertUnwindSafe(|| {
+        // 1. Validation inside safety block
+        if validate_executor(executor).is_err() {
+            eprintln!("⚠️ Gas estimation failed: invalid executor");
+            return u64::MAX;
+        }
+
+        if let Err(msg) = validate_data(data, MAX_CALLDATA_SIZE, "Calldata") {
+            eprintln!("⚠️ Gas estimation failed: {}", msg);
+            return u64::MAX;
+        }
+
+        // 2. Execution logic
         let executor = unsafe { &mut *executor };
         let caller_addr = Address::from_slice(&caller.bytes);
         let to_addr = Address::from_slice(&to.bytes);
@@ -1016,9 +1024,7 @@ pub extern "C" fn revm_estimate_gas(
         let value_u256 = U256::from_be_bytes(value.bytes);
         let high_gas = MAX_GAS_LIMIT;
 
-        let c_addr = CAddress {
-            bytes: caller_addr.0.0,
-        };
+        let c_addr = CAddress { bytes: caller_addr.0.0 };
         let current_nonce = (executor.db.get_nonce_fn)(c_addr);
 
         let mut tx_env = TxEnv::default();
@@ -1052,33 +1058,31 @@ pub extern "C" fn revm_estimate_gas(
 
 #[no_mangle]
 pub extern "C" fn revm_get_active_locks(executor: *mut EVMExecutor) -> usize {
-    if executor.is_null() {
-        return 0;
-    }
-    
-    let executor = unsafe { &*executor };
-    executor.get_active_locks_count()
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if executor.is_null() { return 0; }
+        unsafe { (*executor).get_active_locks_count() }
+    }));
+    result.unwrap_or(0)
 }
 
 #[no_mangle]
 pub extern "C" fn revm_is_account_locked(executor: *mut EVMExecutor, address: CAddress) -> bool {
-    if executor.is_null() {
-        return false;
-    }
-    
-    let executor = unsafe { &*executor };
-    let addr = Address::from_slice(&address.bytes);
-    executor.is_account_locked(&addr)
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if executor.is_null() { return false; }
+        let executor = unsafe { &*executor };
+        let addr = Address::from_slice(&address.bytes);
+        executor.is_account_locked(&addr)
+    }));
+    result.unwrap_or(false)
 }
 
 #[no_mangle]
 pub extern "C" fn revm_get_reserved_nonces_count(executor: *mut EVMExecutor) -> usize {
-    if executor.is_null() {
-        return 0;
-    }
-    
-    let executor = unsafe { &*executor };
-    executor.get_reserved_nonces_count()
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if executor.is_null() { return 0; }
+        unsafe { (*executor).get_reserved_nonces_count() }
+    }));
+    result.unwrap_or(0)
 }
 
 /// Report memory statistics to stderr
