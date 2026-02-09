@@ -1081,7 +1081,6 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Change request to accept string to handle 18 decimals safeley
 	var req struct {
 		Address string `json:"address"`
 		Amount  string `json:"amount"`
@@ -1092,11 +1091,38 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Address == "" {
+		s.writeError(w, "Invalid address", http.StatusBadRequest)
+		return
+	}
+
+	// 🛑 CRITICAL FIX: Check Rate Limit (Points Cooldown) BEFORE sending tokens
+	// This prevents users from spamming the faucet for tokens even if they don't get points
+	if s.pointsManager != nil {
+		userPoints := s.pointsManager.GetUserPoints(req.Address)
+
+		// Check if 24 hours have passed since last use
+		if !userPoints.LastFaucet.IsZero() && time.Since(userPoints.LastFaucet) < 24*time.Hour {
+			waitTime := 24*time.Hour - time.Since(userPoints.LastFaucet)
+
+			// Return 429 Too Many Requests
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":          fmt.Sprintf("Faucet limit reached. Please wait %s.", waitTime.Round(time.Minute)),
+				"status":         "cooldown",
+				"next_available": userPoints.LastFaucet.Add(24 * time.Hour).Unix(),
+			})
+			return // <--- STOP EXECUTION HERE
+		}
+	}
+
+	// --- IF WE PASS HERE, THE USER IS ALLOWED ---
+
 	// Parse Amount string to BigInt
 	amountBig := math.ParseBigInt(req.Amount)
-
-	if req.Address == "" || amountBig.Sign() <= 0 {
-		s.writeError(w, "Invalid address or amount", http.StatusBadRequest)
+	if amountBig.Sign() <= 0 {
+		s.writeError(w, "Invalid amount", http.StatusBadRequest)
 		return
 	}
 
@@ -1119,16 +1145,15 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		account.Balance = math.BigIntToString(newBal)
 	}
 
-	// Update storage
+	// Update storage (Send Tokens)
 	if err := s.worldState.UpdateAccountWithStorage(account); err != nil {
 		s.writeError(w, fmt.Sprintf("Failed to create/update account: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ CORRECTED: Award Points Logic (Safe Check)
+	// Award Points (We know this will succeed now because we checked above)
 	var newTotalPoints int
 	var awarded bool
-
 	if s.pointsManager != nil {
 		newTotalPoints, awarded = s.pointsManager.AwardFaucet(req.Address)
 	}
