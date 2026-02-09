@@ -15,7 +15,11 @@ const (
 	PointsBaseTx         = 10  // Per Tx
 	PointsUniqueReceiver = 50  // Bonus for sending to a NEW person
 	PointsDelegate       = 500 // One-time bonus for first delegation
-	PointsStreakBonus    = 50  // Extra per day of streak
+
+	// ✅ NEW: Reward for testing the exit flow
+	PointsUndelegate = 500 // One-time bonus for first undelegation
+
+	PointsStreakBonus = 50 // Extra per day of streak
 
 	// Caps
 	MaxDailyTxPoints = 200 // Cap spamming txs to ~20 per day
@@ -37,6 +41,9 @@ type UserActivity struct {
 
 	// Staking/Delegation
 	HasDelegated bool `json:"has_delegated"`
+
+	// ✅ NEW: Track if they have tested unstaking
+	HasUndelegated bool `json:"has_undelegated"`
 
 	// Retention
 	CurrentStreak int `json:"current_streak"`
@@ -69,16 +76,13 @@ func (pm *PointsManager) AwardFaucet(address string) (int, bool) {
 
 	user := pm.getOrCreate(address)
 
-	if time.Since(user.LastFaucet) < 24*time.Hour {
+	if !user.LastFaucet.IsZero() && time.Since(user.LastFaucet) < 24*time.Hour {
 		return user.TotalPoints, false
 	}
 
 	user.TotalPoints += PointsFaucet
 	user.LastFaucet = time.Now()
-
-	// Update streak since they are active
 	pm.updateStreak(user)
-
 	pm.save()
 	return user.TotalPoints, true
 }
@@ -100,14 +104,11 @@ func (pm *PointsManager) RecordTransaction(from, to string) int {
 
 	// 2. Check Daily Cap
 	if user.DailyTxPoints >= MaxDailyTxPoints {
-		return user.TotalPoints // Cap reached, no points
+		return user.TotalPoints
 	}
 
-	// 3. Calculate Points for this Tx
+	// 3. Calculate Points
 	pointsEarned := PointsBaseTx
-
-	// 4. Bonus: Unique Receiver (Velocity)
-	// Don't reward sending to self or empty
 	if to != "" && to != from {
 		if user.UniqueInteractions == nil {
 			user.UniqueInteractions = make(map[string]bool)
@@ -118,10 +119,8 @@ func (pm *PointsManager) RecordTransaction(from, to string) int {
 		}
 	}
 
-	// 5. Apply Points
 	user.TotalPoints += pointsEarned
 	user.DailyTxPoints += pointsEarned
-
 	pm.save()
 	return user.TotalPoints
 }
@@ -136,7 +135,27 @@ func (pm *PointsManager) RecordDelegation(address string) int {
 	if !user.HasDelegated {
 		user.TotalPoints += PointsDelegate
 		user.HasDelegated = true
-		pm.updateStreak(user) // Counts as activity
+		pm.updateStreak(user)
+		pm.save()
+	}
+
+	return user.TotalPoints
+}
+
+// ✅ NEW FUNCTION: RecordUndelegation: +500 Points (One-time)
+func (pm *PointsManager) RecordUndelegation(address string) int {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	user := pm.getOrCreate(address)
+
+	if !user.HasUndelegated {
+		user.TotalPoints += PointsUndelegate
+		user.HasUndelegated = true
+
+		// Unstaking counts as "Activity" for the daily streak
+		pm.updateStreak(user)
+
 		pm.save()
 	}
 
@@ -155,23 +174,19 @@ func (pm *PointsManager) GetLeaderboard(limit int) []LeaderboardEntry {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	// Convert map to slice
 	var entries []LeaderboardEntry
 	for addr, u := range pm.Users {
 		entries = append(entries, LeaderboardEntry{Address: addr, Points: u.TotalPoints})
 	}
 
-	// Sort Descending
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Points > entries[j].Points
 	})
 
-	// Slice top N
 	if limit > len(entries) {
 		limit = len(entries)
 	}
 
-	// Assign Ranks
 	result := entries[:limit]
 	for i := range result {
 		result[i].Rank = i + 1
@@ -189,23 +204,18 @@ func (pm *PointsManager) GetUserPoints(address string) *UserActivity {
 	return &UserActivity{Address: address, TotalPoints: 0}
 }
 
-// Internal Helper: Update Streak Logic
 func (pm *PointsManager) updateStreak(user *UserActivity) {
 	today := time.Now().Format("2006-01-02")
 	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 
-	// If already active today, do nothing
 	if user.LastActiveDate == today {
 		return
 	}
 
 	if user.LastActiveDate == yesterday {
-		// Continued streak
 		user.CurrentStreak++
-		// Bonus Points for Streak
 		user.TotalPoints += PointsStreakBonus
 	} else {
-		// Broke streak (or first time)
 		user.CurrentStreak = 1
 	}
 
@@ -223,7 +233,6 @@ func (pm *PointsManager) getOrCreate(address string) *UserActivity {
 	return pm.Users[address]
 }
 
-// Persistence
 func (pm *PointsManager) save() {
 	data, _ := json.MarshalIndent(pm.Users, "", "  ")
 	_ = os.WriteFile(pm.FilePath, data, 0644)

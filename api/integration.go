@@ -45,14 +45,13 @@ type APIManagerConfig struct {
 func NewAPIManager(
 	worldState *state.WorldState,
 	blockchain *chain.Blockchain,
-	// UPDATE THIS TYPE:
 	evmExecutor *evm.RevmExecutor,
 	cfg *config.Config,
 	port int,
 ) *APIManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Pass it down
+	// Pass the new dependencies down to the Server
 	server := NewServerWithConfig(worldState, blockchain, evmExecutor, cfg)
 
 	if port != 0 {
@@ -72,16 +71,16 @@ func NewAPIManager(
 func NewAPIManagerWithConfig(
 	worldState *state.WorldState,
 	blockchain *chain.Blockchain,
-	// UPDATE THIS TYPE:
 	evmExecutor *evm.RevmExecutor,
 	mainConfig *config.Config,
 	apiConfig *APIManagerConfig,
 ) *APIManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Pass it down
+	// Pass the new dependencies down to the Server
 	server := NewServerWithConfig(worldState, blockchain, evmExecutor, mainConfig)
 
+	// Apply specific API settings
 	server.port = apiConfig.Port
 	server.enableTLS = apiConfig.EnableTLS
 	server.certFile = apiConfig.CertFile

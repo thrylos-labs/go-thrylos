@@ -724,6 +724,7 @@ func (s *Server) submitStakeTransaction(w http.ResponseWriter, r *http.Request) 
 }
 
 // submitUnstakeTransaction handles unstaking (undelegation) requests
+// submitUnstakeTransaction handles unstaking (undelegation) requests
 func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		From      string `json:"from"`
@@ -789,6 +790,12 @@ func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request
 	if err := stakingManager.Undelegate(req.From, req.To, amountBig); err != nil {
 		s.writeError(w, fmt.Sprintf("Unstaking failed: %v", err), http.StatusBadRequest)
 		return
+	}
+
+	// ✅ NEW: Award Points for Unstaking (Background Goroutine)
+	// Runs only if points system is active (Dev/Testnet)
+	if s.pointsManager != nil {
+		go s.pointsManager.RecordUndelegation(req.From)
 	}
 
 	// Generate transaction hash for tracking
