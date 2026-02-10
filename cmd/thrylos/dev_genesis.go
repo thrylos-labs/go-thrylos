@@ -102,14 +102,14 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 }
 
 // startDevNode wires deterministic keys + shared genesis into the NodeConfig and starts the node.
-func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []string, isValidator bool, cfg *config.Config) error {
+func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []string, isValidator bool, cfg *config.Config) (*node.Node, error) {
 	allValidators, allPrivateKeys, allAddresses, err := createAllValidators(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to create dev validators: %w", err)
+		return nil, fmt.Errorf("failed to create dev validators: %w", err)
 	}
 
 	if nodeID < 1 || nodeID > len(allPrivateKeys) {
-		return fmt.Errorf("invalid nodeID %d (expected 1..%d)", nodeID, len(allPrivateKeys))
+		return nil, fmt.Errorf("invalid nodeID %d (expected 1..%d)", nodeID, len(allPrivateKeys))
 	}
 
 	nodePrivateKey := allPrivateKeys[nodeID-1]
@@ -141,13 +141,13 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 
 	n, err := node.NewNode(nodeConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create dev node: %w", err)
+		return nil, fmt.Errorf("failed to create dev node: %w", err)
 	}
 
 	if err := n.Start(); err != nil {
-		return fmt.Errorf("failed to start dev node: %w", err)
+		return nil, fmt.Errorf("failed to start dev node: %w", err)
 	}
 
 	fmt.Printf("✅ Dev node %d started successfully\n", nodeID)
-	return nil
+	return n, nil // ← Changed: return the node!
 }

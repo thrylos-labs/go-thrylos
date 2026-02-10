@@ -103,10 +103,9 @@ type NodeConfig struct {
 	APIPort           int  `json:"api_port"`
 }
 
-// StartAPI starts the embedded API server using existing APIManager
-func (n *Node) StartAPI() error {
+func (n *Node) StartAPI() error { // Add (n *Node) - it's a method!
 	apiConfig := &api.APIManagerConfig{
-		RESTAddr:     n.config.API.RESTAddr, // Just pass it through!
+		RESTAddr:     n.config.API.RESTAddr, // Changed nodeConfig to n
 		EnableTLS:    n.config.API.EnableTLS,
 		CertFile:     n.config.API.CertFile,
 		KeyFile:      n.config.API.KeyFile,
@@ -118,6 +117,22 @@ func (n *Node) StartAPI() error {
 
 	return n.apiManager.Start()
 }
+
+// StartAPI starts the embedded API server using existing APIManager
+// func (n *Node) StartAPI() error {
+// 	apiConfig := &api.APIManagerConfig{
+// 		RESTAddr:     n.config.API.RESTAddr, // Just pass it through!
+// 		EnableTLS:    n.config.API.EnableTLS,
+// 		CertFile:     n.config.API.CertFile,
+// 		KeyFile:      n.config.API.KeyFile,
+// 		EnableFaucet: n.config.API.EnableFaucet,
+// 	}
+
+// 	n.apiManager = api.NewAPIManagerWithConfig(
+// 		n.worldState, n.blockchain, n.evmExecutor, n.config, apiConfig)
+
+// 	return n.apiManager.Start()
+// }
 
 // StopAPI gracefully shuts down the API server
 func (n *Node) StopAPI() error {

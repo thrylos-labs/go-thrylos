@@ -10,14 +10,12 @@ import (
 	"log"
 	"strings"
 
-	"github.com/thrylos-labs/go-thrylos/api"
 	"github.com/thrylos-labs/go-thrylos/config"
 )
 
 func main() {
 	var nodeID = flag.Int("node", 1, "Node ID (1, 2, 3)")
 	var p2pPort = flag.Int("p2p-port", 9000, "P2P listen port")
-	var apiPort = flag.String("api-port", "8080", "API server port")
 	var bootstraps = flag.String("bootstrap", "", "Comma-separated bootstrap peers")
 	var dataDir = flag.String("data", "", "Data directory (default: ./data-nodeN)")
 	var validator = flag.Bool("validator", true, "Run as validator")
@@ -63,15 +61,7 @@ func main() {
 
 	// ✅ NEW: Start embedded API server
 	if *enableAPI {
-		apiConfig := &api.APIConfig{
-			Port:           *apiPort,
-			EnableCORS:     true,
-			AllowedOrigins: []string{"http://localhost:3000", "*"},
-			EnableFaucet:   true,
-			PointsFile:     "points.json",
-		}
-
-		if err := node.StartAPI(apiConfig); err != nil {
+		if err := node.StartAPI(); err != nil { // No apiConfig arg needed
 			log.Printf("⚠️  Failed to start API server: %v", err)
 		}
 	}

@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
@@ -66,8 +68,6 @@ func NewAPIManager(
 	}
 }
 
-// NewAPIManagerWithConfig creates a new API manager with full configuration (HTTP/HTTPS)
-// Updated to accept Blockchain, EVM, and Global Config
 func NewAPIManagerWithConfig(
 	worldState *state.WorldState,
 	blockchain *chain.Blockchain,
@@ -77,11 +77,21 @@ func NewAPIManagerWithConfig(
 ) *APIManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Pass the new dependencies down to the Server
 	server := NewServerWithConfig(worldState, blockchain, evmExecutor, mainConfig)
 
+	// Parse port from RESTAddr (e.g., ":8080" -> 8080)
+	port := 8080 // default
+	if apiConfig.RESTAddr != "" {
+		parts := strings.Split(apiConfig.RESTAddr, ":")
+		if len(parts) > 0 && parts[len(parts)-1] != "" {
+			if p, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
+				port = p
+			}
+		}
+	}
+
 	// Apply specific API settings
-	server.port = apiConfig.Port
+	server.port = port // Parse and set port
 	server.enableTLS = apiConfig.EnableTLS
 	server.certFile = apiConfig.CertFile
 	server.keyFile = apiConfig.KeyFile
@@ -252,6 +262,8 @@ type APIConfig struct {
 	CertFile             string        `json:"cert_file"`
 	KeyFile              string        `json:"key_file"`
 	AutoGenerateCert     bool          `json:"auto_generate_cert"`
+	EnableFaucet         bool          `json:"enable_faucet"`
+	PointsFile           string        `json:"points_file"`
 }
 
 // DefaultAPIConfig returns sensible defaults
@@ -268,6 +280,8 @@ func DefaultAPIConfig() *APIConfig {
 		CertFile:             "./certs/server.crt",
 		KeyFile:              "./certs/server.key",
 		AutoGenerateCert:     false, // you're managing them yourself now
+		EnableFaucet:         true,
+		PointsFile:           "points.json",
 	}
 }
 

@@ -22,26 +22,6 @@ type APIServer struct {
 	config        *APIConfig
 }
 
-// APIConfig configures the API server
-type APIConfig struct {
-	Port           string
-	EnableCORS     bool
-	AllowedOrigins []string
-	EnableFaucet   bool
-	PointsFile     string
-}
-
-// DefaultAPIConfig returns sensible defaults
-func DefaultAPIConfig() *APIConfig {
-	return &APIConfig{
-		Port:           "8080",
-		EnableCORS:     true,
-		AllowedOrigins: []string{"http://localhost:3000", "*"},
-		EnableFaucet:   true,
-		PointsFile:     "points.json",
-	}
-}
-
 // NewAPIServer creates a new API server
 func NewAPIServer(worldState *state.WorldState, config *APIConfig) *APIServer {
 	if config == nil {
