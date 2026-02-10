@@ -103,6 +103,30 @@ type NodeConfig struct {
 	APIPort           int  `json:"api_port"`
 }
 
+// StartAPI starts the embedded API server using existing APIManager
+func (n *Node) StartAPI() error {
+	apiConfig := &api.APIManagerConfig{
+		RESTAddr:     n.config.API.RESTAddr, // Just pass it through!
+		EnableTLS:    n.config.API.EnableTLS,
+		CertFile:     n.config.API.CertFile,
+		KeyFile:      n.config.API.KeyFile,
+		EnableFaucet: n.config.API.EnableFaucet,
+	}
+
+	n.apiManager = api.NewAPIManagerWithConfig(
+		n.worldState, n.blockchain, n.evmExecutor, n.config, apiConfig)
+
+	return n.apiManager.Start()
+}
+
+// StopAPI gracefully shuts down the API server
+func (n *Node) StopAPI() error {
+	if n.apiManager != nil {
+		return n.apiManager.Stop()
+	}
+	return nil
+}
+
 // NewNode creates a new blockchain node with full WorldState integration
 func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	if nodeConfig == nil {
@@ -244,40 +268,23 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 			apiPort = parsePortFromAddr(nodeConfig.Config.API.RESTAddr)
 		}
 
-		if nodeConfig.Config.API.EnableTLS {
-			apiConfig := &api.APIManagerConfig{
-				Port:         apiPort,
-				EnableTLS:    true,
-				CertFile:     nodeConfig.Config.API.CertFile,
-				KeyFile:      nodeConfig.Config.API.KeyFile,
-				EnableFaucet: nodeConfig.Config.API.EnableFaucet,
-			}
-			// PASS bc AND revmExecutor HERE
-			node.apiManager = api.NewAPIManagerWithConfig(
-				worldState,
-				bc,
-				revmExecutor,
-				nodeConfig.Config,
-				apiConfig,
-			)
-		} else {
-			// ✅ FIX: Use NewAPIManagerWithConfig for HTTP mode too to enable faucet
-			apiConfig := &api.APIManagerConfig{
-				Port:         apiPort,
-				EnableTLS:    false,
-				CertFile:     "",
-				KeyFile:      "",
-				EnableFaucet: nodeConfig.Config.API.EnableFaucet,
-			}
-
-			node.apiManager = api.NewAPIManagerWithConfig(
-				worldState,
-				bc,
-				revmExecutor,
-				nodeConfig.Config,
-				apiConfig,
-			)
+		// Create API config
+		apiConfig := &api.APIManagerConfig{
+			RESTAddr:     nodeConfig.Config.API.RESTAddr, // Changed from Port
+			EnableTLS:    nodeConfig.Config.API.EnableTLS,
+			CertFile:     nodeConfig.Config.API.CertFile,
+			KeyFile:      nodeConfig.Config.API.KeyFile,
+			EnableFaucet: nodeConfig.Config.API.EnableFaucet,
 		}
+
+		// Start API manager
+		node.apiManager = api.NewAPIManagerWithConfig(
+			worldState,
+			bc,
+			revmExecutor,
+			nodeConfig.Config,
+			apiConfig,
+		)
 	}
 
 	// Store genesis configuration for initialization

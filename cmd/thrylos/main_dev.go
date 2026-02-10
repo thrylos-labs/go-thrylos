@@ -1,3 +1,4 @@
+// cmd/thrylos/main_dev.go
 //go:build dev
 // +build dev
 
@@ -9,20 +10,23 @@ import (
 	"log"
 	"strings"
 
+	"github.com/thrylos-labs/go-thrylos/api"
 	"github.com/thrylos-labs/go-thrylos/config"
 )
 
 func main() {
 	var nodeID = flag.Int("node", 1, "Node ID (1, 2, 3)")
 	var p2pPort = flag.Int("p2p-port", 9000, "P2P listen port")
+	var apiPort = flag.String("api-port", "8080", "API server port")
 	var bootstraps = flag.String("bootstrap", "", "Comma-separated bootstrap peers")
 	var dataDir = flag.String("data", "", "Data directory (default: ./data-nodeN)")
 	var validator = flag.Bool("validator", true, "Run as validator")
+	var enableAPI = flag.Bool("api", true, "Enable embedded API server")
 
 	flag.Parse()
 
-	if *nodeID < 1 || *nodeID > 4 { // <--- Changed 3 to 4
-		log.Fatalf("Node ID must be 1, 2, or 3 in dev mode")
+	if *nodeID < 1 || *nodeID > 4 {
+		log.Fatalf("Node ID must be 1-4 in dev mode")
 	}
 
 	if *dataDir == "" {
@@ -38,19 +42,6 @@ func main() {
 	cfg.Environment = "development"
 	cfg.Network.ChainID = config.GetChainIDForEnvironment(cfg.Environment)
 
-	// -------------------------------------------------------------------------
-	// PORT CONFIGURATION
-	// -------------------------------------------------------------------------
-	cfg.API.EnableAPI = true
-	cfg.API.EnableTLS = false
-	cfg.API.EnableFaucet = true
-	cfg.API.RESTAddr = ":8081"
-
-	// ✅ REMOVED: cfg.Consensus.MinStake = "0"
-	// The minimum stake is controlled by cfg.Staking.MinValidatorStake
-	// which is already set in config.go and genesis.json
-	// -------------------------------------------------------------------------
-
 	// Prepare bootstrap peers
 	var bootstrapPeers []string
 	if *bootstraps != "" {
@@ -65,9 +56,26 @@ func main() {
 	}
 
 	// Start the Node
-	if err := startDevNode(*nodeID, *dataDir, *p2pPort, bootstrapPeers, *validator, cfg); err != nil {
+	node, err := startDevNode(*nodeID, *dataDir, *p2pPort, bootstrapPeers, *validator, cfg)
+	if err != nil {
 		log.Fatalf("dev node failed: %v", err)
 	}
 
+	// ✅ NEW: Start embedded API server
+	if *enableAPI {
+		apiConfig := &api.APIConfig{
+			Port:           *apiPort,
+			EnableCORS:     true,
+			AllowedOrigins: []string{"http://localhost:3000", "*"},
+			EnableFaucet:   true,
+			PointsFile:     "points.json",
+		}
+
+		if err := node.StartAPI(apiConfig); err != nil {
+			log.Printf("⚠️  Failed to start API server: %v", err)
+		}
+	}
+
+	log.Println("✅ Node running with embedded API")
 	select {} // keep node running
 }

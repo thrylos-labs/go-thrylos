@@ -33,7 +33,7 @@ type APIManager struct {
 
 // APIManagerConfig represents API manager configuration
 type APIManagerConfig struct {
-	Port         int
+	RESTAddr     string // Use this instead of Port
 	EnableTLS    bool
 	CertFile     string
 	KeyFile      string

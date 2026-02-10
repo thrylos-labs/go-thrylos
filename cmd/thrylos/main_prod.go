@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/thrylos-labs/go-thrylos/api"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
@@ -26,6 +27,8 @@ func main() {
 	isValidator := flag.Bool("validator", false, "Run this node as a validator")
 	validatorKeyPath := flag.String("validator-key", "", "Path to hex-encoded validator private key file")
 	envFlag := flag.String("env", "", "Environment (mainnet|testnet|devnet|production|development). Overrides THRYLOS_ENVIRONMENT")
+	var enableAPI = flag.Bool("api", true, "Enable embedded API server")
+	var apiPort = flag.String("api-port", "8080", "API server port")
 
 	flag.Parse()
 
@@ -133,6 +136,20 @@ func main() {
 
 	if err := thrylosNode.Start(); err != nil {
 		log.Fatalf("node failed to start: %v", err)
+	}
+
+	if *enableAPI {
+		apiConfig := &api.APIConfig{
+			Port:           *apiPort,
+			EnableCORS:     true,
+			AllowedOrigins: []string{"https://your-frontend.com"},
+			EnableFaucet:   false, // Disable faucet in production
+			PointsFile:     "points.json",
+		}
+
+		if err := node.StartAPI(apiConfig); err != nil {
+			log.Fatalf("Failed to start API server: %v", err)
+		}
 	}
 
 	log.Printf("Node started successfully")
