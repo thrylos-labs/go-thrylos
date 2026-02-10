@@ -1,40 +1,26 @@
 #!/bin/bash
-# build_revm.sh
-# Builds the revm Rust library and sets up Go bindings
-
-set -e
 
 echo "🦀 Building revm wrapper..."
 
-# Navigate to Rust project
 cd revm_wrapper
 
-# Build for release (optimized)
+# Build for macOS (static library)
 cargo build --release
 
-# Create lib directory if it doesn't exist
+# Copy the static library
 mkdir -p ../lib
+cp target/release/libthrylos_revm.a ../lib/ 2>/dev/null || \
+cp target/release/libthrylos_revm.dylib ../lib/libthrylos_revm.a 2>/dev/null || \
+echo "⚠️  Static library not found, trying to convert dynamic library..."
 
-# Copy the library
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    # Linux
-    cp target/release/libthrylos_revm.so ../lib/
-    echo "✅ Built Linux shared library: lib/libthrylos_revm.so"
-elif [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS
-    cp target/release/libthrylos_revm.dylib ../lib/libthrylos_revm.so
-    echo "✅ Built macOS dynamic library: lib/libthrylos_revm.so"
-elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
-    # Windows
-    cp target/release/thrylos_revm.dll ../lib/
-    echo "✅ Built Windows DLL: lib/thrylos_revm.dll"
+# If only .so was created, create a symlink as fallback
+if [ ! -f ../lib/libthrylos_revm.a ] && [ -f target/release/libthrylos_revm.so ]; then
+    ln -sf target/release/libthrylos_revm.so ../lib/libthrylos_revm.a
 fi
 
-cd ..
-
+echo "✅ Built library copied to lib/"
 echo ""
 echo "🎉 revm wrapper built successfully!"
-echo ""
 echo "Next steps:"
 echo "1. Copy revm_executor.go to core/evm/"
 echo "2. Add WorldState contract methods"

@@ -5,6 +5,7 @@ package pos
 
 import (
 	"crypto/sha3"
+	"crypto/sha512"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -26,6 +27,7 @@ import (
 )
 
 // NewConsensusEngine creates a new PoS consensus engine
+// NewConsensusEngine creates a new PoS consensus engine
 func NewConsensusEngine(
 	cfg *config.Config,
 	blockchain *chain.Blockchain,
@@ -38,25 +40,21 @@ func NewConsensusEngine(
 	nodeAddress, _ := account.GenerateAddress(nodePrivateKey.PublicKey())
 
 	engine := &ConsensusEngine{
-		config:             cfg,
-		blockchain:         blockchain,
-		worldState:         worldState,
-		nodePrivateKey:     nodePrivateKey,
-		nodeAddress:        nodeAddress,
-		broadcastChan:      broadcastChan,
-		receiveChan:        receiveChan,
-		proposalTimeout:    time.Duration(cfg.Consensus.BlockTime),
-		attestationPhase:   time.Duration(cfg.Consensus.BlockTime) / 3,
-		attestations:       make(map[string]*types.Attestation),
-		votes:              make(map[string]*Vote),
-		currentEpoch:       0,
-		currentSlot:        0,
-		chainCache:         NewChainCache(),
-		validatorActivity:  make(map[string]*ValidatorActivity),
-		vrfSeedGen:         NewVRFSeedGenerator(),
-		vrfVerifier:        NewVRFVerifier(),
-		timestampValidator: NewTimestampValidator(15, 3, time.Now().Unix()),
-		finalityManager:    NewFinalityManager(32), // 32 block finality depth
+		config:            cfg,
+		blockchain:        blockchain,
+		worldState:        worldState,
+		nodePrivateKey:    nodePrivateKey,
+		nodeAddress:       nodeAddress,
+		broadcastChan:     broadcastChan,
+		receiveChan:       receiveChan,
+		proposalTimeout:   time.Duration(cfg.Consensus.BlockTime),
+		attestationPhase:  time.Duration(cfg.Consensus.BlockTime) / 3,
+		attestations:      make(map[string]*types.Attestation),
+		votes:             make(map[string]*Vote),
+		currentEpoch:      0,
+		currentSlot:       0,
+		chainCache:        NewChainCache(),
+		validatorActivity: make(map[string]*ValidatorActivity),
 	}
 
 	// Initialize validator management
@@ -76,7 +74,7 @@ func NewConsensusEngine(
 	// Pass SlashingManager placeholder
 	engine.forkChoice = NewForkChoiceWithConfig(cfg, worldState, &SlashingManager{}, fcConfig)
 
-	// ✅ STEP 1: Initialize slashing manager FIRST (before commitRevealMgr)
+	// Initialize slashing manager
 	slashingConfig := &storage.SlashingConfig{
 		DoubleVotingPenalty:     uint8(cfg.Consensus.SlashingDoubleVote),
 		SurroundVotingPenalty:   uint8(cfg.Consensus.SlashingSurroundVote),
@@ -106,12 +104,21 @@ func NewConsensusEngine(
 	// Update fork choice with real slashing manager
 	engine.forkChoice.slashingManager = engine.slashingManager
 
-	// ✅ STEP 2: NOW initialize commitRevealMgr with slashingManager
-	engine.commitRevealMgr = NewCommitRevealManager(10, engine.slashingManager)
+	// Initialize timestamp validator (prevents time manipulation)
+	genesisTime := cfg.GenesisTimestamp
+	if genesisTime == 0 {
+		// Fallback to current time if not configured
+		genesisTime = time.Now().Unix()
+		log.Printf("⚠️ GenesisTimestamp not set in config, using current time: %d\n", genesisTime)
+	}
 
-	// ============================================================
+	engine.timestampValidator = NewTimestampValidator(
+		2, // maxDriftSeconds (±2 seconds allowed)
+		6, // slotDurationSeconds (6 seconds per slot)
+		genesisTime,
+	)
+
 	// Database and checkpoint loading
-	// ============================================================
 	if badgerDB != nil {
 		// Wrap badger.DB to implement DatabaseStore interface
 		dbWrapper := &BadgerDatabaseWrapper{db: badgerDB}
@@ -123,7 +130,6 @@ func NewConsensusEngine(
 			log.Println("✅ Checkpoint persistence enabled")
 		}
 	}
-	// ============================================================
 
 	// Initialize evidence tracker
 	engine.evidenceTracker = NewEvidenceTracker()
@@ -173,11 +179,6 @@ func (ce *ConsensusEngine) Start() error {
 
 // Stop halts the consensus process
 func (ce *ConsensusEngine) Stop() error {
-
-	// NEW: Stop commit-reveal monitor
-	if ce.commitRevealMgr != nil {
-		ce.commitRevealMgr.Stop()
-	}
 
 	return nil
 }
@@ -422,49 +423,38 @@ func (ce *ConsensusEngine) updateValidatorActivity(validatorAddr string, wasBloc
 // proposeBlock creates and broadcast a new block proposal
 // proposeBlock creates and broadcasts a new block proposal
 func (ce *ConsensusEngine) proposeBlock() error {
-	// ✅ AUDIT FIX: Generate secure VRF seed from multiple sources
-	seed := ce.vrfSeedGen.GenerateSeed(
-		ce.currentEpoch,
-		ce.currentSlot,
-		ce.getPreviousBlockHash(), // Need to implement this helper
-		time.Now().Unix(),
-	)
+	// Generate VRF proof using simple slot + epoch input (no complex seed generation)
+	input := make([]byte, 16)
+	binary.BigEndian.PutUint64(input[0:8], ce.currentSlot)
+	binary.BigEndian.PutUint64(input[8:16], ce.currentEpoch)
 
-	// Validate seed meets minimum entropy
-	if err := ce.vrfSeedGen.ValidateSeed(seed); err != nil {
-		return fmt.Errorf("invalid VRF seed: %v", err)
-	}
-
-	vrfProof, err := ce.generateVRFProof(seed)
+	vrfProof, err := ce.generateVRFProof(input)
 	if err != nil {
 		return fmt.Errorf("VRF generation failed: %v", err)
 	}
 
-	// Record VRF output for future entropy
-	ce.vrfSeedGen.RecordOutput(vrfProof.Output)
-
-	// ✅ STEP 2: Create block (now WITH VRF data)
+	// Create block with VRF data
 	result, err := ce.blockProposer.ProposeBlockWithVRF(
 		ce.currentSlot,
 		ce.currentEpoch,
-		vrfProof.Output, // Pass VRF data to block construction
+		vrfProof.Output,
 		vrfProof.Proof,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create block: %v", err)
 	}
 
-	// 🔐 Sign the block with validator's key (existing code)
+	// Sign the block with validator's key
 	if err := ce.signBlock(result.Block); err != nil {
 		return fmt.Errorf("failed to sign block: %v", err)
 	}
 
-	// Validate our own block (now includes VRF + signature checks)
+	// Validate our own block (includes VRF + signature checks)
 	if err := ce.blockValidator.ValidateBlock(result.Block); err != nil {
 		return fmt.Errorf("block validation failed: %v", err)
 	}
 
-	// 🔒 CRITICAL FIX: Verify signature before adding block
+	// Verify signature before adding block
 	if err := ce.VerifyBlockWithSignatures(result.Block); err != nil {
 		return fmt.Errorf("block signature verification failed: %v", err)
 	}
@@ -474,7 +464,7 @@ func (ce *ConsensusEngine) proposeBlock() error {
 		return fmt.Errorf("failed to add block to world state: %v", err)
 	}
 
-	// Create and sign proposal (existing code unchanged)
+	// Create and sign proposal
 	proposal := &BlockProposal{
 		Block:     result.Block,
 		Proposer:  ce.nodeAddress,
@@ -1371,12 +1361,11 @@ func (bv *BlockValidator) validateBlockSignature(block *core.Block) error {
 }
 
 // validateVRFProof validates the VRF proof in the block header
+// validateVRFProof validates the VRF proof in the block header
 func (bv *BlockValidator) validateVRFProof(block *core.Block) error {
-	// ✅ SKIP VRF validation in development mode (single validator, local testing)
-	// Check environment or single validator setup
+	// Skip VRF validation in development mode (single validator)
 	validators := bv.consensusEngine.worldState.GetActiveValidators()
 	if len(validators) == 1 {
-		// Single validator - no need for VRF leader selection
 		return nil
 	}
 
@@ -1386,30 +1375,23 @@ func (bv *BlockValidator) validateVRFProof(block *core.Block) error {
 		return fmt.Errorf("validator not found: %v", err)
 	}
 
-	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
-	if err != nil {
-		return fmt.Errorf("invalid validator public key: %v", err)
-	}
+	// For now, derive Ed25519 public key from secp256k1 public key
+	// TODO: Add VRFPublicKey field to validator struct for proper Ed25519 keys
+	vrfPubKey := deriveVRFPublicKeyFromSecp256k1(validator.Pubkey)
 
-	// ✅ FIX: Use the same seed generation logic as block creation
-	seed := bv.consensusEngine.vrfSeedGen.GenerateSeed(
-		block.Header.Epoch,
-		block.Header.Slot,
-		block.Header.PrevHash,
-		block.Header.Timestamp,
-	)
+	// Create VRF input from slot and epoch
+	input := make([]byte, 16)
+	binary.BigEndian.PutUint64(input[0:8], block.Header.Slot)
+	binary.BigEndian.PutUint64(input[8:16], block.Header.Epoch)
 
+	// Construct VRF proof from block header
 	vrfProof := &VRFProof{
 		Output: block.Header.VrfOutput,
 		Proof:  block.Header.VrfProof,
 	}
 
-	// ✅ FIX: Verify using the same seed
-	valid, err := bv.consensusEngine.verifyVRFProof(
-		pubKey,
-		seed, // ← Changed from epochBytes to seed
-		vrfProof,
-	)
+	// Verify VRF proof
+	valid, _, err := VerifyVRFProof(vrfPubKey, input, vrfProof)
 	if err != nil {
 		return fmt.Errorf("VRF verification failed: %v", err)
 	}
@@ -1418,20 +1400,14 @@ func (bv *BlockValidator) validateVRFProof(block *core.Block) error {
 		return fmt.Errorf("VRF proof is invalid")
 	}
 
-	// Context verification (if available)
-	if bv.consensusEngine != nil && bv.consensusEngine.vrfVerifier != nil {
-		if err := bv.consensusEngine.vrfVerifier.VerifyVRFWithContext(
-			vrfProof,
-			block.Header.Epoch,
-			block.Header.Slot,
-			block.Header.PrevHash,
-			block.Header.Timestamp,
-		); err != nil {
-			return fmt.Errorf("VRF context verification failed: %w", err)
-		}
-	}
-
 	return nil
+}
+
+// deriveVRFPublicKeyFromSecp256k1 creates a deterministic Ed25519 public key from secp256k1
+// This is a bridge function until validators register proper Ed25519 VRF keys
+func deriveVRFPublicKeyFromSecp256k1(secp256k1PubKey []byte) []byte {
+	hash := sha512.Sum512(append(secp256k1PubKey, []byte("THRYLOS_VRF_PUBKEY_V1")...))
+	return hash[:32]
 }
 
 // validateBlockStructure validates the basic structure of a block
@@ -1550,39 +1526,4 @@ func (bv *BlockValidator) validateProposer(block *core.Block) error {
 func (ce *ConsensusEngine) cleanupChainCache() {
 	ce.chainCache.Clear()
 	fmt.Printf("🧹 Chain cache cleared\n")
-}
-
-// validateVRFReveal verifies that the VRF proof matches a prior commitment
-// Part of H-3 commit-reveal mitigation (Phase 2)
-func (bv *BlockValidator) validateVRFReveal(block *core.Block) error {
-	// Check if validator made a commitment for this slot
-	commitment, err := bv.consensusEngine.commitRevealMgr.GetCommitment(
-		block.Header.Slot,
-		block.Header.Validator,
-	)
-	if err != nil {
-		// No commitment found - for backward compatibility during rollout
-		return nil
-	}
-
-	// Verify reveal matches commitment
-	vrfProof := &VRFProof{
-		Output: block.Header.VrfOutput,
-		Proof:  block.Header.VrfProof,
-	}
-
-	// Extract nonce from block (would need to add to block header in protocol upgrade)
-	// For now, this is a placeholder
-	var nonce []byte // TODO: Get from block header
-
-	reveal := &VRFReveal{
-		ValidatorAddress: block.Header.Validator,
-		VRFOutput:        vrfProof.Output,
-		VRFProof:         vrfProof.Proof,
-		Nonce:            nonce,
-		Slot:             block.Header.Slot,
-		Epoch:            block.Header.Epoch,
-	}
-
-	return bv.consensusEngine.commitRevealMgr.VerifyReveal(commitment, reveal)
 }

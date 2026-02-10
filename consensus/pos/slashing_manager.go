@@ -263,46 +263,31 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 			Epoch:    dvEvidence.Proposal.Epoch,
 		}, "evidence submitted")
 
-		// ✅ NEW: VRF Missed Reveal Case
-		// ✅ NEW: VRF Missed Reveal Case
-	case EvidenceMissedVRFReveal:
-		missedRevealEvidence, ok := evidence.Evidence.(*MissedVRFRevealEvidence)
-		if !ok {
-			return fmt.Errorf("invalid evidence format for missed VRF reveal")
-		}
-
 		// Get current stake
 		validator, err := sm.worldState.GetValidator(evidence.ValidatorAddress)
 		if err != nil {
 			return fmt.Errorf("failed to get validator stake: %w", err)
 		}
 
-		// Use coremath.ParseBigInt instead of StringToBigInt
-		currentStake := coremath.ParseBigInt(validator.Stake)
-
 		// Calculate 5% penalty
+		currentStake := coremath.ParseBigInt(validator.Stake)
 		penalty := new(big.Int).Set(currentStake)
 		penalty.Mul(penalty, big.NewInt(5))
 		penalty.Div(penalty, big.NewInt(100))
 
-		// ✅ FIX 1: Use time.Now() instead of evidence.Timestamp (which is int64)
-		// ✅ FIX 2: Don't assign Evidence field - it's already in the outer evidence
+		// Create slashing record for invalid proposal
 		slashingRecord := &types.SlashingRecord{
 			ValidatorAddress: evidence.ValidatorAddress,
 			SlashedAmount:    penalty.Int64(),
-			Condition:        types.MissedVRFReveal,
-			Timestamp:        time.Now(), // ✅ Use time.Now() not int64
-			Reason:           fmt.Sprintf("Missed VRF reveal for slot %d", missedRevealEvidence.Slot),
-			// ✅ Don't include Evidence field here - applySlashing doesn't need it
+			Condition:        types.InvalidProposal,
+			Timestamp:        time.Now(),
 		}
 
-		// Apply slashing with the record
+		// Apply slashing
 		processErr = sm.applySlashing(slashingRecord)
-
 		if processErr == nil {
-			log.Printf("⚠️ Slashed validator %s for missed VRF reveal at slot %d (penalty: %s)",
+			log.Printf("⚠️ Slashed validator %s for invalid proposal (penalty: %s)",
 				evidence.ValidatorAddress,
-				missedRevealEvidence.Slot,
 				penalty.String(),
 			)
 		}

@@ -115,6 +115,8 @@ type Config struct {
 
 	// Validator key configuration (used by production entrypoint)
 	Validator ValidatorKeyConfig `json:"validator"`
+
+	GenesisTimestamp int64 `json:"genesis_timestamp"`
 }
 
 // P2PConfig represents P2P networking configuration

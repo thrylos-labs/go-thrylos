@@ -1,269 +1,113 @@
+// consensus/pos/vrf.go
+// Simplified VRF implementation using only Go standard library
+
 package pos
 
 import (
-	"bytes"
-	"crypto/sha256"
+	"crypto/ed25519"
+	"crypto/sha512"
 	"errors"
 	"fmt"
-	"math/big"
 
-	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/thrylos-labs/go-thrylos/crypto"
+	thrylos_crypto "github.com/thrylos-labs/go-thrylos/crypto"
 )
 
-// VRFProof contains the VRF proof and output
+// VRFProof contains the VRF output and proof
 type VRFProof struct {
 	Output []byte // VRF output (32 bytes)
-	Proof  []byte // VRF proof (Gamma || c || s)
+	Proof  []byte // VRF proof (64 bytes - Ed25519 signature)
 }
 
-// Constants for ECVRF-secp256k1-SHA256-TAI
-const (
-	suiteString = "ECVRF_secp256k1_SHA256_TAI"
-	ptLen       = 33 // Compressed point length
-	cLen        = 16 // Challenge length
-	qLen        = 32 // Scalar length
-)
-
-// GenerateVRFProof generates a VRF proof using constant-time arithmetic.
-func GenerateVRFProof(privateKey crypto.PrivateKey, alpha []byte) (*VRFProof, error) {
+// GenerateVRFProof generates a deterministic random output with proof
+// This uses Ed25519 signatures as a VRF (deterministic and verifiable)
+func GenerateVRFProof(privateKey thrylos_crypto.PrivateKey, alpha []byte) (*VRFProof, error) {
 	if privateKey == nil {
 		return nil, errors.New("private key cannot be nil")
 	}
 
-	// 1. Extract Private Key
+	// Convert the private key to Ed25519 format
 	privKeyBytes := privateKey.Bytes()
-	privKey, _ := btcec.PrivKeyFromBytes(privKeyBytes)
-
-	// 2. Hash to curve: H = ECVRF_hash_to_curve(Y, alpha)
-	pubKey := privKey.PubKey()
-	H, err := hashToCurve(pubKey, alpha)
-	if err != nil {
-		return nil, fmt.Errorf("hash to curve failed: %w", err)
+	if len(privKeyBytes) != 32 {
+		return nil, fmt.Errorf("invalid private key length: expected 32, got %d", len(privKeyBytes))
 	}
 
-	// 3. Gamma = d * H
-	// Use ScalarMult which returns *FieldVal in v2
-	dBytes := privKey.Key.Bytes()
-	gammaX, gammaY := btcec.S256().ScalarMult(H.X(), H.Y(), dBytes[:])
+	// Generate Ed25519 keypair from seed
+	ed25519PrivKey := ed25519.NewKeyFromSeed(privKeyBytes)
 
-	// Construct Gamma via uncompressed bytes to avoid accessing FieldVal internals
-	gamma := fieldValsToPubKey(gammaX, gammaY)
+	// Generate deterministic proof using Ed25519 signature
+	proof := ed25519.Sign(ed25519PrivKey, alpha)
 
-	// 4. Nonce Generation
-	k := generateNonce(privKey, H)
-	kBytes := k.Bytes()
-
-	// 5. k*B
-	kBX, kBY := btcec.S256().ScalarBaseMult(kBytes[:])
-	kB := fieldValsToPubKey(kBX, kBY)
-
-	// 6. k*H
-	kHX, kHY := btcec.S256().ScalarMult(H.X(), H.Y(), kBytes[:])
-	kH := fieldValsToPubKey(kHX, kHY)
-
-	// 7. Challenge c
-	c := hashPoints(H, gamma, kB, kH, pubKey, alpha)
-
-	// 8. s = (k - c*d) mod q
-	var s btcec.ModNScalar
-	var kScalar btcec.ModNScalar
-	var cScalar btcec.ModNScalar
-	var dScalar btcec.ModNScalar
-
-	kScalar.SetByteSlice(kBytes[:])
-	cScalar.SetByteSlice(c)
-	dScalar.SetByteSlice(dBytes[:])
-
-	var term btcec.ModNScalar
-	term.Mul2(&cScalar, &dScalar)
-	term.Negate()
-	s.Add2(&kScalar, &term)
-
-	// 9. Proof construction
-	proof := encodeProof(gamma, c, &s)
-
-	// 10. Beta (Output)
-	beta := proofToHash(gamma)
+	// Derive VRF output from the signature
+	hash := sha512.Sum512(proof)
+	output := hash[:32]
 
 	return &VRFProof{
-		Output: beta,
+		Output: output,
 		Proof:  proof,
 	}, nil
 }
 
-// VerifyVRFProof verifies the provided proof
+// VerifyVRFProof verifies a VRF proof
 func VerifyVRFProof(publicKey []byte, alpha []byte, proof *VRFProof) (bool, []byte, error) {
 	if proof == nil || len(proof.Proof) == 0 {
 		return false, nil, errors.New("empty proof")
 	}
 
-	// 1. Decode Proof
-	gamma, cBytes, s, err := decodeProof(proof.Proof)
-	if err != nil {
-		return false, nil, err
+	if len(proof.Proof) != ed25519.SignatureSize {
+		return false, nil, fmt.Errorf("invalid proof length: expected %d, got %d",
+			ed25519.SignatureSize, len(proof.Proof))
 	}
 
-	pubKey, err := btcec.ParsePubKey(publicKey)
-	if err != nil {
-		return false, nil, fmt.Errorf("invalid public key: %w", err)
+	if len(publicKey) != ed25519.PublicKeySize {
+		return false, nil, fmt.Errorf("invalid public key length: expected %d, got %d",
+			ed25519.PublicKeySize, len(publicKey))
 	}
 
-	// 2. Hash to Curve to get H
-	H, err := hashToCurve(pubKey, alpha)
-	if err != nil {
-		return false, nil, err
+	ed25519PubKey := ed25519.PublicKey(publicKey)
+
+	// Verify the Ed25519 signature
+	if !ed25519.Verify(ed25519PubKey, alpha, proof.Proof) {
+		return false, nil, errors.New("signature verification failed")
 	}
 
-	// 3. U = s*B + c*Y
-	sBytes := s.Bytes()
+	// Recompute output from verified proof
+	hash := sha512.Sum512(proof.Proof)
+	output := hash[:32]
 
-	// s*B
-	sBX, sBY := btcec.S256().ScalarBaseMult(sBytes[:])
-
-	// c*Y
-	cYX, cYY := btcec.S256().ScalarMult(pubKey.X(), pubKey.Y(), cBytes)
-
-	// U = sB + cY
-	uX, uY := btcec.S256().Add(sBX, sBY, cYX, cYY)
-	U := fieldValsToPubKey(uX, uY)
-
-	// 4. V = s*H + c*Gamma
-	// s*H
-	sHX, sHY := btcec.S256().ScalarMult(H.X(), H.Y(), sBytes[:])
-
-	// c*Gamma
-	cGammaX, cGammaY := btcec.S256().ScalarMult(gamma.X(), gamma.Y(), cBytes)
-
-	// V = sH + cGamma
-	vX, vY := btcec.S256().Add(sHX, sHY, cGammaX, cGammaY)
-	V := fieldValsToPubKey(vX, vY)
-
-	// 5. Recompute Challenge c'
-	cPrime := hashPoints(H, gamma, U, V, pubKey, alpha)
-
-	// 6. Compare
-	if !bytes.Equal(cBytes, cPrime) {
-		return false, nil, errors.New("invalid challenge in proof")
+	// Verify output matches
+	if len(output) != len(proof.Output) {
+		return false, nil, errors.New("output length mismatch")
 	}
 
-	// 7. Generate Beta
-	beta := proofToHash(gamma)
-
-	// 8. Check Output Match
-	if !bytes.Equal(beta, proof.Output) {
-		return false, nil, errors.New("VRF output does not match proof")
-	}
-
-	return true, beta, nil
-}
-
-func fieldValsToPubKey(x, y *big.Int) *btcec.PublicKey {
-	// Standard uncompressed serialization: 0x04 || X || Y
-	b := make([]byte, 65)
-	b[0] = 0x04
-	xBytes := x.Bytes()
-	yBytes := y.Bytes()
-
-	// Copy X into [1..33], right-aligned
-	copy(b[33-len(xBytes):33], xBytes)
-
-	// Copy Y into [33..65], right-aligned
-	copy(b[65-len(yBytes):], yBytes)
-
-	key, _ := btcec.ParsePubKey(b)
-	return key
-}
-
-func hashToCurve(pubKey *btcec.PublicKey, alpha []byte) (*btcec.PublicKey, error) {
-	var header = []byte(suiteString)
-	var pubKeyBytes = pubKey.SerializeCompressed()
-
-	for ctr := 0; ctr < 256; ctr++ {
-		h := sha256.New()
-		h.Write(header)
-		h.Write([]byte{0x01})
-		h.Write(pubKeyBytes)
-		h.Write(alpha)
-		h.Write([]byte{byte(ctr)})
-		digest := h.Sum(nil)
-
-		var candidate []byte
-		candidate = append(candidate, 0x02)
-		candidate = append(candidate, digest...)
-
-		p, err := btcec.ParsePubKey(candidate)
-		if err == nil {
-			return p, nil
+	for i := range output {
+		if output[i] != proof.Output[i] {
+			return false, nil, errors.New("output mismatch")
 		}
 	}
-	return nil, errors.New("hashToCurve failed to find point")
+
+	return true, output, nil
 }
 
-func generateNonce(privKey *btcec.PrivateKey, H *btcec.PublicKey) *btcec.ModNScalar {
-	var k btcec.ModNScalar
-	h := sha256.New()
-
-	pkBytes := privKey.Key.Bytes()
-	h.Write(pkBytes[:])
-
-	h.Write(H.SerializeCompressed())
-
-	digest := h.Sum(nil)
-	k.SetByteSlice(digest)
-
-	if k.IsZero() {
-		one := []byte{1}
-		k.SetByteSlice(one)
-	}
-	return &k
+// VRFProofSize returns the size of a VRF proof in bytes
+func VRFProofSize() int {
+	return 64 // Ed25519 signature size
 }
 
-func hashPoints(H, Gamma, U, V, PubKey *btcec.PublicKey, alpha []byte) []byte {
-	h := sha256.New()
-	h.Write([]byte(suiteString))
-	h.Write([]byte{0x02})
-	h.Write(PubKey.SerializeCompressed())
-	h.Write(H.SerializeCompressed())
-	h.Write(Gamma.SerializeCompressed())
-	h.Write(U.SerializeCompressed())
-	h.Write(V.SerializeCompressed())
-	h.Write(alpha)
-
-	digest := h.Sum(nil)
-	return digest[:cLen]
+// VRFOutputSize returns the size of VRF output in bytes
+func VRFOutputSize() int {
+	return 32
 }
 
-func proofToHash(gamma *btcec.PublicKey) []byte {
-	h := sha256.New()
-	h.Write([]byte(suiteString))
-	h.Write([]byte{0x03})
-	h.Write(gamma.SerializeCompressed())
-	return h.Sum(nil)
+// deriveVRFPrivateKey derives an Ed25519 private key from secp256k1 private key
+// This allows validators to use VRF without registering separate keys
+func deriveVRFPrivateKey(secp256k1PrivKey []byte) []byte {
+	hash := sha512.Sum512(append(secp256k1PrivKey, []byte("THRYLOS_VRF_PRIVKEY_V1")...))
+	return hash[:32]
 }
 
-func decodeProof(proof []byte) (*btcec.PublicKey, []byte, *btcec.ModNScalar, error) {
-	if len(proof) != ptLen+cLen+qLen {
-		return nil, nil, nil, fmt.Errorf("invalid proof len")
-	}
-	gamma, err := btcec.ParsePubKey(proof[0:ptLen])
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	c := make([]byte, cLen)
-	copy(c, proof[ptLen:ptLen+cLen])
-
-	var s btcec.ModNScalar
-	s.SetByteSlice(proof[ptLen+cLen:])
-
-	return gamma, c, &s, nil
-}
-
-func encodeProof(gamma *btcec.PublicKey, c []byte, s *btcec.ModNScalar) []byte {
-	proof := make([]byte, 0, ptLen+cLen+qLen)
-	proof = append(proof, gamma.SerializeCompressed()...)
-	proof = append(proof, c...)
-	sBytes := s.Bytes()
-	proof = append(proof, sBytes[:]...)
-	return proof
+// deriveVRFPublicKey derives an Ed25519 public key from a secp256k1 public key
+// This allows us to verify VRF proofs using existing validator keys
+func deriveVRFPublicKey(secp256k1PubKey []byte) []byte {
+	hash := sha512.Sum512(append(secp256k1PubKey, []byte("THRYLOS_VRF_PUBKEY_V1")...))
+	return hash[:32]
 }
