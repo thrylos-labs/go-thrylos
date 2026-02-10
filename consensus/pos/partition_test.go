@@ -30,67 +30,87 @@ func TestNetworkPartitionAndReorg(t *testing.T) {
 	cfg := &config.Config{
 		Consensus: config.ConsensusConfig{
 			BlockTime:     1 * time.Second,
-			StakeCacheTTL: 1 * time.Hour, // Ensure cache doesn't expire during test
+			StakeCacheTTL: 1 * time.Hour,
 		},
 	}
 
-	// Create a shared genesis
+	// Create blocks
 	genesisHash := "0xGenesis"
+	genesisBlock := &core.Block{
+		Hash:   genesisHash,
+		Header: &core.BlockHeader{Index: 0, PrevHash: "", Timestamp: time.Now().Unix()},
+	}
+
+	block1A := &core.Block{
+		Hash:   "0xBlock1A",
+		Header: &core.BlockHeader{Index: 1, PrevHash: genesisHash, Timestamp: time.Now().Unix()},
+	}
+
+	block1B := &core.Block{
+		Hash:   "0xBlock1B",
+		Header: &core.BlockHeader{Index: 1, PrevHash: genesisHash, Timestamp: time.Now().Unix()},
+	}
+
 	mockState := &MockWorldStateReader{
 		blocks: map[string]*core.Block{
-			genesisHash: {Hash: genesisHash, Header: &core.BlockHeader{Index: 0, PrevHash: ""}},
-			"0xBlock1A": {Hash: "0xBlock1A", Header: &core.BlockHeader{Index: 1, PrevHash: genesisHash}},
-			"0xBlock1B": {Hash: "0xBlock1B", Header: &core.BlockHeader{Index: 1, PrevHash: genesisHash}},
+			genesisHash: genesisBlock,
+			"0xBlock1A": block1A,
+			"0xBlock1B": block1B,
 		},
 	}
 
-	// 2. Initialize Engines for two isolated nodes
-
-	// Engine A (Majority: 70% stake)
-	// We pass 'nil' for the slashing manager and blockchain as they aren't needed for this specific logic test
+	// 2. Initialize Fork Choice Engines
 	engineA := NewForkChoice(cfg, mockState, nil)
-	// ✅ FIX: Assign string value
 	engineA.totalActiveStake = "10000"
 	engineA.totalActiveStakeTime = time.Now()
 
-	// Engine B (Minority: 30% stake)
 	engineB := NewForkChoice(cfg, mockState, nil)
-	// ✅ FIX: Assign string value
 	engineB.totalActiveStake = "10000"
 	engineB.totalActiveStakeTime = time.Now()
 
-	// 3. SIMULATE PARTITION
-	// Group A votes for Block 1A (7000 stake)
-	block1A_Hash := "0xBlock1A"
-	// ✅ FIX: Assign string value
-	engineA.blockScores[block1A_Hash] = "7000"
+	// 3. Register blocks in fork choice (CRITICAL!)
+	// Both engines know about genesis
+	engineA.OnBlockAdded(genesisBlock)
+	engineB.OnBlockAdded(genesisBlock)
 
-	// Group B votes for Block 1B (3000 stake)
-	block1B_Hash := "0xBlock1B"
-	// ✅ FIX: Assign string value
-	engineB.blockScores[block1B_Hash] = "3000"
+	// 4. SIMULATE PARTITION
+	// Engine A sees Block 1A with 7000 stake
+	engineA.OnBlockAdded(block1A)
+	engineA.blockScores[block1A.Hash] = "7000"
+	// Initialize children map for genesis if not exists
+	if engineA.children == nil {
+		engineA.children = make(map[string][]string)
+	}
+	engineA.children[genesisHash] = append(engineA.children[genesisHash], block1A.Hash)
 
-	// 4. ASSERT INDEPENDENT HEADS
-	// A should choose 1A (Has >66% quorum)
-	// 7000 >= (10000 * 2/3) + 1 => 7000 >= 6667 => True
-	assert.Equal(t, block1A_Hash, engineA.GetHead(), "Majority chain should accept 1A")
-	assert.True(t, engineA.HasQuorum(block1A_Hash), "Majority should have quorum")
+	// Engine B sees Block 1B with 3000 stake
+	engineB.OnBlockAdded(block1B)
+	engineB.blockScores[block1B.Hash] = "3000"
+	// Initialize children map for genesis if not exists
+	if engineB.children == nil {
+		engineB.children = make(map[string][]string)
+	}
+	engineB.children[genesisHash] = append(engineB.children[genesisHash], block1B.Hash)
 
-	// B might tentatively choose 1B based on local weight, but SHOULD NOT have quorum
-	// 3000 >= 6667 => False
-	assert.Equal(t, block1B_Hash, engineB.GetHead(), "Minority chain sees 1B locally")
-	assert.False(t, engineB.HasQuorum(block1B_Hash), "Minority should NOT have quorum")
+	// 5. ASSERT INDEPENDENT HEADS
+	headA := engineA.GetHead()
+	headB := engineB.GetHead()
 
-	// 5. RECONNECT (The Partition Heals)
-	// Engine B receives the attestations from Group A for Block 1A
-	// We simulate B receiving the heavy votes
-	// ✅ FIX: Assign string value
-	engineB.blockScores[block1A_Hash] = "7000"
+	assert.Equal(t, "0xBlock1A", headA, "Majority chain should accept 1A")
+	assert.True(t, engineA.HasQuorum("0xBlock1A"), "Majority should have quorum")
 
-	// 6. ASSERT CONVERGENCE
-	// Engine B should now switch its head to 1A because it has 7000 weight vs 1B's 3000
+	assert.Equal(t, "0xBlock1B", headB, "Minority chain sees 1B locally")
+	assert.False(t, engineB.HasQuorum("0xBlock1B"), "Minority should NOT have quorum")
+
+	// 6. RECONNECT (Partition Heals)
+	// Engine B now learns about Block 1A and its attestations
+	engineB.OnBlockAdded(block1A)
+	engineB.blockScores[block1A.Hash] = "7000"
+	engineB.children[genesisHash] = append(engineB.children[genesisHash], block1A.Hash)
+
+	// 7. ASSERT CONVERGENCE
 	newHeadB := engineB.GetHead()
 
-	assert.Equal(t, block1A_Hash, newHeadB, "Minority node MUST switch to majority chain (1A) after partition heals")
-	assert.True(t, engineB.HasQuorum(block1A_Hash), "Minority node should now recognize quorum on 1A")
+	assert.Equal(t, "0xBlock1A", newHeadB, "Minority node MUST switch to majority chain (1A) after partition heals")
+	assert.True(t, engineB.HasQuorum("0xBlock1A"), "Minority node should now recognize quorum on 1A")
 }
