@@ -4,6 +4,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"fmt"
 	"time"
@@ -27,9 +28,9 @@ func getNodeSpecificPrivateKey(nodeID int) (crypto.PrivateKey, error) {
 
 // createAllValidators generates a shared genesis validator set for dev networks.
 func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.PrivateKey, []string, error) {
-	validators := make([]*core.Validator, 0, 3)
-	privateKeys := make([]crypto.PrivateKey, 0, 3)
-	addresses := make([]string, 0, 3)
+	validators := make([]*core.Validator, 0, 4)
+	privateKeys := make([]crypto.PrivateKey, 0, 4)
+	addresses := make([]string, 0, 4)
 
 	metadata := map[int]struct {
 		Name        string
@@ -69,17 +70,21 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 			return nil, nil, nil, fmt.Errorf("failed to derive dev private key for node %d: %w", nodeID, err)
 		}
 
-		// Use the public key interface to generate the address
 		addr, err := account.GenerateAddress(priv.PublicKey())
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to derive address for node %d: %w", nodeID, err)
 		}
 
+		// ✅ FIX: Derive Ed25519 public key for VRF
+		privKeyBytes := priv.Bytes()
+		ed25519PrivKey := ed25519.NewKeyFromSeed(privKeyBytes)
+		vrfPubKey := ed25519PrivKey.Public().(ed25519.PublicKey)
+
 		meta := metadata[nodeID]
 
 		validator := &core.Validator{
 			Address:        addr,
-			Pubkey:         priv.PublicKey().Bytes(),
+			Pubkey:         vrfPubKey, // ← Use Ed25519 public key!
 			Stake:          "3000000000000000000000",
 			SelfStake:      "3000000000000000000000",
 			DelegatedStake: "0", // Fix: String "0" instead of int 0
@@ -118,6 +123,18 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 	fmt.Printf("🔑 Dev node %d address: %s\n", nodeID, nodeAddress)
 	fmt.Printf("👥 Dev genesis validators: %v\n", allAddresses)
 
+	// DEBUG: Check what we actually have
+	fmt.Printf("🔍 DEBUG: nodeAddress='%s', len=%d\n", nodeAddress, len(nodeAddress))
+	fmt.Printf("🔍 DEBUG: cfg.Genesis.TotalGenesis='%s'\n", cfg.Genesis.TotalGenesis)
+
+	// Ensure we have a valid genesis account
+	genesisAccount := nodeAddress
+	if genesisAccount == "" {
+		return nil, fmt.Errorf("node address is empty - cannot use as genesis account")
+	}
+
+	fmt.Printf("🔍 DEBUG: Using genesis account: %s\n", genesisAccount)
+
 	nodeConfig := &node.NodeConfig{
 		Config:            cfg,
 		PrivateKey:        nodePrivateKey,
@@ -127,7 +144,7 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 		DataDir:           dataDir,
 		CrossShardEnabled: false,
 
-		GenesisAccount:    cfg.Genesis.Accounts[0].Address,
+		GenesisAccount:    genesisAccount, // ← THIS should not be empty!
 		GenesisSupply:     cfg.Genesis.TotalGenesis,
 		GenesisValidators: allValidators,
 
@@ -136,8 +153,10 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 		BootstrapPeers: bootstrapPeers,
 
 		EnableAPI: cfg.API.EnableAPI,
-		APIPort:   0, // let node determine from cfg.API.RESTAddr
+		APIPort:   0,
 	}
+
+	fmt.Printf("🔍 DEBUG: Before NewNode - GenesisAccount='%s'\n", nodeConfig.GenesisAccount)
 
 	n, err := node.NewNode(nodeConfig)
 	if err != nil {
@@ -149,5 +168,5 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 	}
 
 	fmt.Printf("✅ Dev node %d started successfully\n", nodeID)
-	return n, nil // ← Changed: return the node!
+	return n, nil
 }

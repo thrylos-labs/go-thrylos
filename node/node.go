@@ -82,6 +82,9 @@ type Node struct {
 	genesisValidators []*core.Validator
 
 	evmExecutor *evm.RevmExecutor
+
+	genesisAccount string // Add this line
+
 }
 
 // NodeConfig represents comprehensive node configuration
@@ -275,6 +278,7 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 		ctx:               ctx,
 		cancelFunc:        cancelFunc,
 		genesisValidators: nodeConfig.GenesisValidators,
+		genesisAccount:    nodeConfig.GenesisAccount,
 	}
 
 	if nodeConfig.EnableAPI {
@@ -983,12 +987,12 @@ func (n *Node) initializeGenesis() error {
 	// ✅ NEW: Initialize the blockchain genesis with accounts and validators
 	fmt.Printf("🏗️  Initializing blockchain genesis...\n")
 
-	// Get genesis data from stored config
-	genesisAccount := ""
+	// Get genesis data from node config
+	genesisAccount := n.genesisAccount // Now this works!
 	genesisSupply := n.config.Economics.GenesisSupply
 
-	// Use first genesis account if available
-	if len(n.config.Genesis.Accounts) > 0 {
+	// Fallback to config accounts if genesisAccount is empty
+	if genesisAccount == "" && len(n.config.Genesis.Accounts) > 0 {
 		genesisAccount = n.config.Genesis.Accounts[0].Address
 	}
 

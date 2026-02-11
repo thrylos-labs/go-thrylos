@@ -380,6 +380,33 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply str
 		}
 	}
 
+	// ✅ ADD THIS: Fund all validator addresses
+	fmt.Printf("💰 Funding %d validators...\n", len(genesisValidators))
+	for _, validator := range genesisValidators {
+		balance, ok := new(big.Int).SetString("10000000000000000000000", 10) // 10M tokens
+		if !ok {
+			fmt.Printf("⚠️  Failed to parse balance for validator %s\n", validator.Address)
+			continue
+		}
+
+		ws.accountMu.Lock(validator.Address)
+		err := ws.accountManager.CreateGenesisAccount(validator.Address, balance.String())
+		ws.accountMu.Unlock(validator.Address)
+
+		if err != nil {
+			fmt.Printf("⚠️  Failed to fund validator %s: %v\n", validator.Address, err)
+			continue
+		}
+
+		// Display balance
+		thrylosBalance := new(big.Float).Quo(
+			new(big.Float).SetInt(balance),
+			new(big.Float).SetInt(config.BaseUnit),
+		)
+		fmt.Printf("✅ Funded validator %s with %s THRYLOS\n",
+			validator.Address, thrylosBalance.Text('f', 2))
+	}
+
 	// Set initial state
 	ws.totalSupply = initialSupply
 	ws.height = 0

@@ -8,3 +8,5 @@ go test -run TestForkChoice_ReorgDepthLimit ./consensus/pos -v
 
 If it doesn't work close and open the browser back up 
 
+docker-compose -f docker-compose-testnet.yml down -v
+docker-compose -f docker-compose-testnet.yml up --build

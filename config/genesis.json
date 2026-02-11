@@ -6,9 +6,10 @@
     "block_time": 3,
     "epoch_length": 32,
     "max_validators": 10,
-      "genesis_timestamp": 1704067200,
+      "genesis_timestamp": 1739275131,
     "min_stake": "1000000000000000000000"
   },
+  
   "slashing": {
     "enable_slashing": true,
     "enable_jailing": false,

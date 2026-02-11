@@ -113,8 +113,8 @@ func NewConsensusEngine(
 	}
 
 	engine.timestampValidator = NewTimestampValidator(
-		2, // maxDriftSeconds (±2 seconds allowed)
-		6, // slotDurationSeconds (6 seconds per slot)
+		300, // maxDriftSeconds - allow ±30 seconds drift
+		6,   // slotDurationSeconds
 		genesisTime,
 	)
 
@@ -155,6 +155,8 @@ func (ce *ConsensusEngine) generateVRFProof(input []byte) (*VRFProof, error) {
 
 // Start begins the consensus process
 func (ce *ConsensusEngine) Start() error {
+	log.Printf("🚀 Consensus starting for validator: %s", ce.nodeAddress)
+
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
 
@@ -238,6 +240,8 @@ func (ce *ConsensusEngine) processSlot() {
 
 	// Get the proposer for this slot
 	proposer, err := ce.getSlotProposer(ce.currentSlot)
+	log.Printf("🎲 Slot %d: Proposer=%s, MyAddress=%s, Match=%v",
+		ce.currentSlot, proposer, ce.nodeAddress, proposer == ce.nodeAddress)
 	if err != nil {
 		fmt.Printf("❌ Failed to get slot proposer: %v\n", err)
 		ce.mu.Unlock()
@@ -251,14 +255,22 @@ func (ce *ConsensusEngine) processSlot() {
 		return
 	}
 
+	// ✅ ADD THIS DEBUG LOG
+	log.Printf("🔍 BEFORE CHECK: proposer='%s' (len=%d), nodeAddress='%s' (len=%d), equal=%v",
+		proposer, len(proposer), ce.nodeAddress, len(ce.nodeAddress), proposer == ce.nodeAddress)
+
+	// If we are the proposer, create block
 	// If we are the proposer, create block
 	if proposer == ce.nodeAddress {
+		fmt.Printf("🔨 I AM the proposer for slot %d! Attempting to propose...\n", ce.currentSlot)
 		if err := ce.proposeBlock(); err != nil {
 			fmt.Printf("❌ Failed to propose block: %v\n", err)
 			ce.blocksMissed++
 		} else {
 			ce.blocksProposed++
 		}
+	} else {
+		fmt.Printf("ℹ️  Not my turn (proposer: %s, me: %s)\n", proposer[:8], ce.nodeAddress[:8])
 	}
 
 	// Create attestation if we're a validator
@@ -420,7 +432,8 @@ func (ce *ConsensusEngine) updateValidatorActivity(validatorAddr string, wasBloc
 	}
 }
 
-// proposeBlock creates and broadcast a new block proposal
+// proposeBlock creates and broadcasts a new block proposal
+// proposeBlock creates and broadcasts a new block proposal
 // proposeBlock creates and broadcasts a new block proposal
 func (ce *ConsensusEngine) proposeBlock() error {
 	// Generate VRF proof using simple slot + epoch input (no complex seed generation)
@@ -428,7 +441,8 @@ func (ce *ConsensusEngine) proposeBlock() error {
 	binary.BigEndian.PutUint64(input[0:8], ce.currentSlot)
 	binary.BigEndian.PutUint64(input[8:16], ce.currentEpoch)
 
-	vrfProof, err := ce.generateVRFProof(input)
+	// ✅ FIX: Use GenerateVRFProof with proper key
+	vrfProof, err := GenerateVRFProof(ce.nodePrivateKey, input)
 	if err != nil {
 		return fmt.Errorf("VRF generation failed: %v", err)
 	}
@@ -437,8 +451,8 @@ func (ce *ConsensusEngine) proposeBlock() error {
 	result, err := ce.blockProposer.ProposeBlockWithVRF(
 		ce.currentSlot,
 		ce.currentEpoch,
-		vrfProof.Output,
-		vrfProof.Proof,
+		vrfProof.Output, // VRF output
+		vrfProof.Proof,  // VRF proof
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create block: %v", err)

@@ -216,6 +216,7 @@ func (tv *TimeValidator) ValidateBlockTimestamp(
 	maxFutureDrift time.Duration,
 	maxPastDrift time.Duration,
 ) error {
+
 	// 1. Check against current system time (always enforced)
 	if err := tv.ValidateTimestamp(blockTimestamp, maxFutureDrift, maxPastDrift); err != nil {
 		return fmt.Errorf("timestamp validation failed: %v", err)
