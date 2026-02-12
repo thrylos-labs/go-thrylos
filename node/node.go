@@ -350,6 +350,11 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to start consensus engine: %v", err)
 	}
 
+	// ✅ ADD THIS: Connect P2P to consensus engine
+	if n.p2pNetwork != nil && n.consensusEngine != nil {
+		n.p2pNetwork.SetConsensusEngine(n.consensusEngine)
+	}
+
 	// Announce validator to network if this node is a validator
 	if n.p2pNetwork != nil && n.consensusEngine != nil {
 		time.Sleep(2 * time.Second)

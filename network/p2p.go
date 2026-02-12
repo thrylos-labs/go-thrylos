@@ -12,6 +12,17 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
+// ConsensusEngineInterface for validator discovery
+type ConsensusEngineInterface interface {
+	RegisterDiscoveredValidator(validator *core.Validator) error
+	GetAllValidators() []*core.Validator
+}
+
+// SetConsensusEngine sets the consensus engine
+func (n *P2PNetwork) SetConsensusEngine(engine ConsensusEngineInterface) {
+	n.consensusEngine = engine
+}
+
 // P2PNetwork represents the P2P networking layer for Thrylos
 type P2PNetwork struct {
 	manager *p2p.Manager
@@ -24,6 +35,8 @@ type P2PNetwork struct {
 	VoteChan        chan interface{}
 	startTime       time.Time
 	validator       *p2p.MessageValidator
+	consensusEngine ConsensusEngineInterface // ADD THIS
+
 }
 
 // Config for P2P network

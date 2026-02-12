@@ -65,8 +65,9 @@ type Message struct {
 }
 
 type Response struct {
-	Data  interface{}
-	Error error
+	Data    interface{}
+	Error   error
+	Success bool
 }
 
 // NetworkMetrics tracks P2P network performance
@@ -1050,4 +1051,9 @@ func (m *Manager) DisconnectPeer(peerIDStr string) error {
 
 	log.Printf("🚫 Disconnected from peer %s\n", peerIDStr)
 	return nil
+}
+
+// GetTopic returns a topic for publishing (used by P2PNetwork)
+func (m *Manager) GetTopic(topicName string) (*pubsub.Topic, error) {
+	return m.getOrJoinTopic(topicName)
 }
