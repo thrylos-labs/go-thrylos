@@ -248,7 +248,15 @@ func (m *Manager) handleVoteRequest(s network.Stream) {
 
 // subscribeToPubSubTopics subscribes to all Thrylos PubSub topics
 func (m *Manager) subscribeToPubSubTopics() {
-	topics := []string{TopicBlocks, TopicTransactions, TopicAttestations, TopicVotes}
+	// Include the new validators topic
+	topics := []string{
+		TopicBlocks,
+		TopicTransactions,
+		TopicAttestations,
+		TopicVotes,
+		TopicValidators, // NEW: Add validator topic
+	}
+
 	for _, topicName := range topics {
 		// Use the caching system instead of direct PubSub.Join()
 		topic, err := m.getOrJoinTopic(topicName)
@@ -274,59 +282,88 @@ func (m *Manager) readPubSubMessages(topicName string, sub *pubsub.Subscription)
 		msg, err := sub.Next(m.Ctx)
 		if err != nil {
 			if err == context.Canceled {
-				stdlog.Printf("PubSub subscription for %s canceled", topicName)
-			} else {
-				stdlog.Printf("Error reading from PubSub subscription %s: %v", topicName, err)
+				stdlog.Printf("Context canceled for topic %s", topicName)
+				return
 			}
-			return
-		}
-
-		if msg.ReceivedFrom == m.Host.ID() {
-			continue // Ignore messages from self
-		}
-
-		// [SEC-FIX H-04] Basic size check on PubSub messages
-		// (Note: PubSub also has internal limits, but this protects the decoder)
-		if int64(len(msg.Data)) > m.validator.maxMessageSize {
-			stdlog.Printf("⚠️ Dropping oversized PubSub message from %s on %s (%d bytes)",
-				msg.ReceivedFrom, topicName, len(msg.Data))
+			stdlog.Printf("Error reading from topic %s: %v", topicName, err)
 			continue
 		}
 
-		stdlog.Printf("Received PubSub message from %s on topic %s", msg.ReceivedFrom.String(), topicName)
+		// Skip messages from self
+		if msg.ReceivedFrom == m.Host.ID() {
+			continue
+		}
 
+		stdlog.Printf("Received PubSub message from %s on topic %s", msg.ReceivedFrom, topicName)
+
+		// Route based on topic
 		switch topicName {
 		case TopicBlocks:
 			var block core.Block
 			if err := json.Unmarshal(msg.Data, &block); err != nil {
-				stdlog.Printf("Failed to unmarshal block from PubSub: %v", err)
+				stdlog.Printf("Failed to unmarshal block: %v", err)
 				continue
 			}
-			m.BlockchainProcessCh <- Message{Type: ProcessBlock, Data: &block}
+			m.BlockchainProcessCh <- Message{
+				Type:       ProcessBlock,
+				Data:       &block,
+				FromPeerID: msg.ReceivedFrom,
+			}
 
 		case TopicTransactions:
 			var tx core.Transaction
 			if err := json.Unmarshal(msg.Data, &tx); err != nil {
-				stdlog.Printf("Failed to unmarshal transaction from PubSub: %v", err)
+				stdlog.Printf("Failed to unmarshal transaction: %v", err)
 				continue
 			}
-			m.BlockchainProcessCh <- Message{Type: ProcessTransaction, Data: &tx}
+			m.BlockchainProcessCh <- Message{
+				Type:       ProcessTransaction,
+				Data:       &tx,
+				FromPeerID: msg.ReceivedFrom,
+			}
 
 		case TopicAttestations:
 			var attestation map[string]interface{}
 			if err := json.Unmarshal(msg.Data, &attestation); err != nil {
-				stdlog.Printf("Failed to unmarshal attestation from PubSub: %v", err)
+				stdlog.Printf("Failed to unmarshal attestation: %v", err)
 				continue
 			}
-			m.BlockchainProcessCh <- Message{Type: ProcessAttestation, Data: attestation}
+			m.BlockchainProcessCh <- Message{
+				Type:       ProcessAttestation,
+				Data:       attestation,
+				FromPeerID: msg.ReceivedFrom,
+			}
 
 		case TopicVotes:
 			var vote map[string]interface{}
 			if err := json.Unmarshal(msg.Data, &vote); err != nil {
-				stdlog.Printf("Failed to unmarshal vote from PubSub: %v", err)
+				stdlog.Printf("Failed to unmarshal vote: %v", err)
 				continue
 			}
-			m.BlockchainProcessCh <- Message{Type: ProcessVote, Data: vote}
+			m.BlockchainProcessCh <- Message{
+				Type:       ProcessVote,
+				Data:       vote,
+				FromPeerID: msg.ReceivedFrom,
+			}
+
+		// NEW: Handle validator announcements
+		case TopicValidators:
+			var validator core.Validator
+			if err := json.Unmarshal(msg.Data, &validator); err != nil {
+				stdlog.Printf("Failed to unmarshal validator: %v", err)
+				continue
+			}
+			stdlog.Printf("📢 Received validator announcement: %s from peer %s",
+				validator.Address, msg.ReceivedFrom)
+
+			m.BlockchainProcessCh <- Message{
+				Type:       ValidatorAnnouncement,
+				Data:       &validator,
+				FromPeerID: msg.ReceivedFrom,
+			}
+
+		default:
+			stdlog.Printf("Unknown topic: %s", topicName)
 		}
 	}
 }

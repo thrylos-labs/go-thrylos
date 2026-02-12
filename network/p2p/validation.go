@@ -17,14 +17,14 @@ const (
 	DefaultStreamReadTimeout  = 30 * time.Second
 	DefaultStreamWriteTimeout = 30 * time.Second
 
-	// M-3 FIX: Enhanced Rate Limits with tiers
-	DefaultRequestRateLimit   = 50 // requests per minute (normal peers)
-	DefaultMaxPendingRequests = 10 // Concurrent requests
+	// For development/testnet with 4+ nodes
+	DefaultRequestRateLimit   = 200 // requests per minute (increased from 50)
+	DefaultMaxPendingRequests = 100 // Concurrent requests (increased from 10)
 
-	// M-3 FIX: Tiered rate limits based on reputation
-	HighReputationRateLimit   = 100 // High reputation: 100 req/min
-	MediumReputationRateLimit = 50  // Medium: 50 req/min
-	LowReputationRateLimit    = 20  // Low reputation: 20 req/min
+	// Tiered rate limits
+	HighReputationRateLimit   = 300 // High reputation (increased from 100)
+	MediumReputationRateLimit = 200 // Medium (increased from 50)
+	LowReputationRateLimit    = 100 // Low reputation (increased from 20)
 
 	// Reputation Constants
 	ReputationInitial      = 100
@@ -284,13 +284,13 @@ func (mv *MessageValidator) checkPriorityQuotaInternal(tracker *PeerRequestTrack
 	var maxQuota int
 	switch priority {
 	case PriorityCritical:
-		maxQuota = 20 // Critical messages: 20/min
+		maxQuota = 200 // Critical messages: 200/min (increased 10x)
 	case PriorityHigh:
-		maxQuota = 30 // High priority: 30/min
+		maxQuota = 300 // High priority: 300/min (increased 10x)
 	case PriorityNormal:
-		maxQuota = 40 // Normal: 40/min
+		maxQuota = 400 // Normal: 400/min (increased 10x)
 	case PriorityLow:
-		maxQuota = 20 // Low priority: 20/min
+		maxQuota = 200 // Low priority: 200/min (increased 10x)
 	}
 
 	current := tracker.priorityQuota[priority]

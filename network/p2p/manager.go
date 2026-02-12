@@ -39,6 +39,7 @@ const (
 	TopicTransactions = "thrylos-transactions"
 	TopicAttestations = "thrylos-attestations"
 	TopicVotes        = "thrylos-votes"
+	TopicValidators   = "thrylos-validators"
 )
 
 // Message types for communication with blockchain
@@ -52,6 +53,8 @@ const (
 	GetBlockchainInfo
 	GetBlocksFromHeight
 	GetStateSnapshot
+	ValidatorAnnouncement // NEW: Announce validator to network
+	ValidatorSync         // NEW: Sync all validators
 )
 
 type Message struct {
@@ -338,9 +341,10 @@ func (m *Manager) Start() error {
 	m.Host.SetStreamHandler(ProtocolAttestation, m.handleAttestationRequest)
 	m.Host.SetStreamHandler(ProtocolVote, m.handleVoteRequest)
 
-	// Add these new handlers:
+	// Add sync protocol handlers
 	m.setupSyncProtocolHandlers()
-	// Subscribe to PubSub topics
+
+	// Subscribe to PubSub topics (now includes validators)
 	m.subscribeToPubSubTopics()
 
 	// Start health monitoring

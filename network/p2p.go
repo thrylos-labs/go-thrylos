@@ -1,6 +1,7 @@
 package network
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -79,6 +80,14 @@ func NewP2PNetworkWithConfig(cfg *config.Config, p2pListenPort int, bootstrapPee
 		return nil, fmt.Errorf("P2P networking is disabled")
 	}
 
+	// ✅ CREATE VALIDATOR (like in NewP2PNetwork)
+	validator := p2p.NewMessageValidator(
+		p2p.DefaultMaxMessageSize,
+		p2p.DefaultMaxBlockRangeSize,
+		p2p.DefaultStreamReadTimeout,
+		p2p.DefaultStreamWriteTimeout,
+	)
+
 	p2pConfig := &p2p.Config{
 		ListenPort:     p2pListenPort,
 		BootstrapPeers: bootstrapPeers,
@@ -90,12 +99,14 @@ func NewP2PNetworkWithConfig(cfg *config.Config, p2pListenPort int, bootstrapPee
 	}
 
 	network := &P2PNetwork{
+		startTime:       time.Now(), // ✅ ALSO ADD THIS for consistency
 		manager:         manager,
 		config:          cfg,
 		BlockChan:       make(chan *core.Block, 1000),
 		TransactionChan: make(chan *core.Transaction, 1000),
 		AttestationChan: make(chan interface{}, 1000),
 		VoteChan:        make(chan interface{}, 1000),
+		validator:       validator, // ✅ ADD THIS LINE
 	}
 
 	// Set up event handlers
@@ -242,6 +253,54 @@ func (n *P2PNetwork) handleBlockchainMessage(msg p2p.Message) {
 		default:
 			stdlog.Println("Vote channel full, dropping message")
 		}
+
+	// NEW: Handle validator announcements
+	case p2p.ValidatorAnnouncement:
+		if validator, ok := msg.Data.(*core.Validator); ok {
+			if validator == nil {
+				stdlog.Println("⚠️ Received nil validator announcement")
+				return
+			}
+
+			// Register the validator
+			if n.consensusEngine != nil {
+				if err := n.consensusEngine.RegisterDiscoveredValidator(validator); err != nil {
+					stdlog.Printf("❌ Failed to register validator from peer: %v", err)
+					if n.validator != nil {
+						n.validator.AdjustReputation(msg.FromPeerID, p2p.ScoreInvalidBlock)
+					}
+				} else {
+					stdlog.Printf("✅ Registered validator %s from peer %s", validator.Address, msg.FromPeerID)
+					if n.validator != nil {
+						n.validator.AdjustReputation(msg.FromPeerID, p2p.ScoreGoodBlock)
+					}
+				}
+			}
+		} else {
+			stdlog.Println("⚠️ Invalid validator announcement data type")
+			if n.validator != nil {
+				n.validator.AdjustReputation(msg.FromPeerID, p2p.ScoreSpam)
+			}
+		}
+
+	// NEW: Handle validator sync requests
+	case p2p.ValidatorSync:
+		if n.consensusEngine != nil {
+			// Get all validators and send them back
+			validators := n.consensusEngine.GetAllValidators()
+			stdlog.Printf("📤 Sending %d validators to peer %s", len(validators), msg.FromPeerID)
+
+			// Send response if ResponseCh is available
+			if msg.ResponseCh != nil {
+				msg.ResponseCh <- p2p.Response{
+					Success: true,
+					Data:    validators,
+				}
+			}
+		}
+
+	default:
+		stdlog.Printf("⚠️ Unknown message type: %v", msg.Type)
 	}
 }
 
@@ -374,4 +433,50 @@ func (n *P2PNetwork) DisconnectPeer(peerID string) error {
 		return fmt.Errorf("P2P manager not available")
 	}
 	return n.manager.DisconnectPeer(peerID)
+}
+
+// ============================================================================
+// VALIDATOR DISCOVERY
+// ============================================================================
+
+// AnnounceValidator broadcasts this node's validator to the network
+func (n *P2PNetwork) AnnounceValidator(validator *core.Validator) error {
+	if validator == nil {
+		return fmt.Errorf("validator cannot be nil")
+	}
+
+	// Broadcast via PubSub
+	topic, err := n.manager.GetTopic("thrylos-validators")
+	if err != nil {
+		return fmt.Errorf("failed to get validators topic: %w", err)
+	}
+
+	// Serialize validator
+	data, err := json.Marshal(validator)
+	if err != nil {
+		return fmt.Errorf("failed to marshal validator: %w", err)
+	}
+
+	if err := topic.Publish(n.manager.Ctx, data); err != nil {
+		return fmt.Errorf("failed to publish validator announcement: %w", err)
+	}
+
+	stdlog.Printf("📢 Announced validator %s to network", validator.Address)
+	return nil
+}
+
+// RequestValidatorSync requests full validator set from a peer
+func (n *P2PNetwork) RequestValidatorSync() {
+	// Send validator sync request via manager
+	msg := p2p.Message{
+		Type: p2p.ValidatorSync,
+		Data: nil, // Request all validators
+	}
+
+	select {
+	case n.manager.BlockchainProcessCh <- msg:
+		stdlog.Println("📡 Requested validator sync from network")
+	default:
+		stdlog.Println("⚠️ Failed to request validator sync: channel full")
+	}
 }

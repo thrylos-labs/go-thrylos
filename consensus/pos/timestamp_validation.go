@@ -7,6 +7,7 @@ package pos
 import (
 	"errors"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -25,11 +26,15 @@ type TimestampValidator struct {
 // NewTimestampValidator creates a new timestamp validator
 func NewTimestampValidator(maxDriftSeconds, slotDurationSeconds, genesisTimestamp int64) *TimestampValidator {
 	if maxDriftSeconds == 0 {
-		maxDriftSeconds = 2 // Default: ±2 seconds
+		maxDriftSeconds = 60 // Increased default
 	}
 	if slotDurationSeconds == 0 {
 		slotDurationSeconds = 6 // Default: 6 seconds per slot
 	}
+
+	// ADD DEBUG LOG
+	log.Printf("🔍 Creating TimestampValidator: maxDrift=%d, slotDuration=%d",
+		maxDriftSeconds, slotDurationSeconds)
 
 	return &TimestampValidator{
 		maxDriftSeconds:     maxDriftSeconds,
@@ -38,9 +43,9 @@ func NewTimestampValidator(maxDriftSeconds, slotDurationSeconds, genesisTimestam
 	}
 }
 
-// ValidateBlockTimestamp validates a block's timestamp with strict constraints
-// Enforces 4 rules:
-// 1. Block timestamp must be after parent
+// ValidateBlockTimestamp performs comprehensive timestamp validation
+// Rules:
+// 1. Block timestamp must be after parent timestamp
 // 2. Block timestamp must not be too far in the future
 // 3. Block timestamp should align with expected slot time
 // 4. Time between blocks must be reasonable
@@ -48,6 +53,7 @@ func (tv *TimestampValidator) ValidateBlockTimestamp(
 	blockTimestamp int64,
 	blockSlot uint64,
 	parentTimestamp int64,
+	parentIndex int64, // NEW PARAMETER
 ) error {
 
 	// Rule 1: Block timestamp must be after parent
@@ -73,6 +79,9 @@ func (tv *TimestampValidator) ValidateBlockTimestamp(
 	expectedTimestamp := tv.CalculateSlotTimestamp(blockSlot)
 	timestampDiff := abs64(blockTimestamp - expectedTimestamp)
 
+	log.Printf("🔍 Timestamp validation: block=%d, expected=%d, diff=%d, maxDrift=%d",
+		blockTimestamp, expectedTimestamp, timestampDiff, tv.maxDriftSeconds)
+
 	if timestampDiff > tv.maxDriftSeconds {
 		return fmt.Errorf(
 			"block timestamp (%d) deviates too much from expected slot time (%d), diff: %d seconds, max allowed: %d",
@@ -81,15 +90,49 @@ func (tv *TimestampValidator) ValidateBlockTimestamp(
 	}
 
 	// Rule 4: Prevent timestamp manipulation via unreasonable time between blocks
-	// Time between blocks should be roughly equal to slot duration
-	// Rule 4: Prevent timestamp manipulation - but be more lenient in dev
 	expectedDiff := tv.slotDurationSeconds
 	actualDiff := blockTimestamp - parentTimestamp
 
-	// Allow wider range for development (10x the slot duration)
+	// Default validation range
 	minExpectedDiff := int64(1)           // At least 1 second
-	maxExpectedDiff := expectedDiff * 200 // Up to 10x slot duration (60 seconds)
+	maxExpectedDiff := expectedDiff * 200 // Up to 200x slot duration (1200 seconds / 20 min)
 
+	// ==============================================================================
+	// GENESIS RECOVERY FIX: Allow extended time for first block after genesis
+	// ==============================================================================
+	// When nodes restart after extended downtime (e.g., Docker containers stopped),
+	// the first block (index 1) after genesis (index 0) may have a large timestamp gap.
+	// We explicitly check if parent index is 0 (genesis block).
+	// ==============================================================================
+
+	const maxGenesisRecoveryPeriod = int64(604800) // 1 week for genesis recovery
+	// For production with frequent restarts, consider:
+	// const maxGenesisRecoveryPeriod = int64(86400) // 24 hours
+
+	// Check if parent is genesis block (index 0)
+	isFirstBlockAfterGenesis := (parentIndex == 0)
+
+	if isFirstBlockAfterGenesis && actualDiff > maxExpectedDiff {
+		// This is the first block after genesis with a large gap
+		if actualDiff <= maxGenesisRecoveryPeriod {
+			// Allow it as genesis recovery
+			fmt.Printf("⚠️  Genesis recovery (block 1): Extended time between blocks detected: %d seconds (%.1f hours)\n",
+				actualDiff, float64(actualDiff)/3600.0)
+			fmt.Printf("✅ Allowing for genesis recovery (max: %d seconds / %.1f days)\n",
+				maxGenesisRecoveryPeriod, float64(maxGenesisRecoveryPeriod)/86400.0)
+
+			// Skip the normal range validation for this special case
+			return nil
+		} else {
+			// Even for genesis recovery, this is too large
+			return fmt.Errorf(
+				"time between blocks (%d seconds) exceeds even genesis recovery limit (max: %d seconds / %.1f days)",
+				actualDiff, maxGenesisRecoveryPeriod, float64(maxGenesisRecoveryPeriod)/86400.0,
+			)
+		}
+	}
+
+	// Normal validation for non-genesis blocks
 	if actualDiff < minExpectedDiff || actualDiff > maxExpectedDiff {
 		return fmt.Errorf(
 			"time between blocks (%d seconds) is outside acceptable range [%d, %d]",
@@ -125,7 +168,7 @@ func (tv *TimestampValidator) ValidateTimestampProgression(timestamps []int64, s
 
 	// Check each consecutive pair
 	for i := 1; i < len(timestamps); i++ {
-		err := tv.ValidateBlockTimestamp(timestamps[i], slots[i], timestamps[i-1])
+		err := tv.ValidateBlockTimestamp(timestamps[i], slots[i], timestamps[i-1], int64(i-1))
 		if err != nil {
 			return fmt.Errorf("block %d validation failed: %w", i, err)
 		}

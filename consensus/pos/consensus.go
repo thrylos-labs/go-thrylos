@@ -1271,6 +1271,8 @@ func (bv *BlockValidator) ValidateBlock(block *core.Block) error {
 				block.Header.Timestamp,
 				block.Header.Slot,
 				parentBlock.Header.Timestamp,
+				parentBlock.Header.Index, // NEW PARAMETER
+
 			); err != nil {
 				return fmt.Errorf("timestamp validation failed: %v", err)
 			}
@@ -1540,4 +1542,77 @@ func (bv *BlockValidator) validateProposer(block *core.Block) error {
 func (ce *ConsensusEngine) cleanupChainCache() {
 	ce.chainCache.Clear()
 	fmt.Printf("🧹 Chain cache cleared\n")
+}
+
+// ============================================================================
+// VALIDATOR DISCOVERY
+// ============================================================================
+
+// RegisterDiscoveredValidator registers a validator discovered from a peer
+func (ce *ConsensusEngine) RegisterDiscoveredValidator(validator *core.Validator) error {
+	if validator == nil {
+		return fmt.Errorf("validator cannot be nil")
+	}
+
+	// Basic validation
+	if validator.Address == "" {
+		return fmt.Errorf("validator address cannot be empty")
+	}
+
+	if len(validator.Pubkey) == 0 {
+		return fmt.Errorf("validator public key cannot be empty")
+	}
+
+	// Check if already registered
+	existing, err := ce.worldState.GetValidator(validator.Address)
+	if err == nil && existing != nil {
+		// Already registered - update if needed
+		log.Printf("✅ Validator %s already registered, skipping", validator.Address)
+		return nil
+	}
+
+	// Validate stake is non-zero
+	stake, ok := new(big.Int).SetString(validator.Stake, 10)
+	if !ok || stake.Sign() <= 0 {
+		return fmt.Errorf("invalid stake amount: %s", validator.Stake)
+	}
+
+	// Add to WorldState
+	if err := ce.worldState.AddValidator(validator); err != nil {
+		return fmt.Errorf("failed to add validator to world state: %w", err)
+	}
+
+	log.Printf("✅ Registered discovered validator: %s (Stake: %s, Active: %v)",
+		validator.Address, validator.Stake, validator.Active)
+
+	return nil
+}
+
+// GetLocalValidator returns this node's validator info for broadcasting
+func (ce *ConsensusEngine) GetLocalValidator() (*core.Validator, error) {
+	validator, err := ce.worldState.GetValidator(ce.nodeAddress)
+	if err != nil {
+		return nil, fmt.Errorf("local validator not found: %w", err)
+	}
+	return validator, nil
+}
+
+// GetAllValidators returns all known validators for sync
+func (ce *ConsensusEngine) GetAllValidators() []*core.Validator {
+	return ce.worldState.GetActiveValidators()
+}
+
+// SyncValidators syncs a batch of validators from a peer
+func (ce *ConsensusEngine) SyncValidators(validators []*core.Validator) error {
+	successCount := 0
+	for _, v := range validators {
+		if err := ce.RegisterDiscoveredValidator(v); err != nil {
+			log.Printf("⚠️ Failed to sync validator %s: %v", v.Address, err)
+			continue
+		}
+		successCount++
+	}
+
+	log.Printf("✅ Synced %d/%d validators from peer", successCount, len(validators))
+	return nil
 }

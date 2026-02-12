@@ -4,6 +4,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/big"
 	"path/filepath"
 	"strconv"
@@ -347,6 +348,24 @@ func (n *Node) Start() error {
 	// Start consensus engine
 	if err := n.consensusEngine.Start(); err != nil {
 		return fmt.Errorf("failed to start consensus engine: %v", err)
+	}
+
+	// Announce validator to network if this node is a validator
+	if n.p2pNetwork != nil && n.consensusEngine != nil {
+		time.Sleep(2 * time.Second)
+
+		// Try to get local validator (will fail if not a validator)
+		validator, err := n.consensusEngine.GetLocalValidator()
+		if err == nil && validator != nil {
+			// Announce to network
+			if err := n.p2pNetwork.AnnounceValidator(validator); err != nil {
+				log.Printf("⚠️ Failed to announce validator: %v", err)
+			} else {
+				log.Printf("✅ Announced validator %s to network", validator.Address)
+				n.p2pNetwork.RequestValidatorSync()
+			}
+		}
+		// Silently skip if not a validator
 	}
 
 	if n.bridge != nil {
