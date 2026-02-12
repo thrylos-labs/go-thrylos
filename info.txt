@@ -32,3 +32,18 @@ Context-based - proper Go patterns
 Interface-driven - dependency injection ready
 Concurrent-safe - proper mutex usage
 Event-driven - pubsub for loose coupling
+
+# Stop everything
+docker-compose -f docker-compose-testnet.yml down -v
+
+# The -v flag removes volumes automatically, but let's be sure:
+docker volume ls | grep v3
+
+# If you still see v3 volumes, remove them manually:
+docker volume prune -f
+
+# Or specifically:
+docker volume rm $(docker volume ls -q | grep thrylos | grep v3)
+
+# Now start fresh
+docker-compose -f docker-compose-testnet.yml up --build

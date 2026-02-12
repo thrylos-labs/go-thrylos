@@ -1616,3 +1616,8 @@ func (ce *ConsensusEngine) SyncValidators(validators []*core.Validator) error {
 	log.Printf("✅ Synced %d/%d validators from peer", successCount, len(validators))
 	return nil
 }
+
+// GetSlashingModule returns the slashing manager
+func (ce *ConsensusEngine) GetSlashingModule() *SlashingManager {
+	return ce.slashingManager
+}

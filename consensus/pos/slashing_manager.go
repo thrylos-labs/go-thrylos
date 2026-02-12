@@ -1033,3 +1033,23 @@ func (sm *SlashingManager) GetPruningStats() map[string]interface{} {
 		"last_archive_count":    stats.LastArchiveCount,
 	}
 }
+
+// ClearJailStatus removes jail status for a validator (dev mode only)
+func (sm *SlashingManager) ClearJailStatus(address string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Remove from jailed validators map
+	delete(sm.jailedValidators, address)
+
+	// Clear any slashing records
+	delete(sm.slashingRecords, address)
+
+	// Clear attestation history for this validator
+	delete(sm.attestationHistory, address)
+
+	// Clear attestations by validator
+	delete(sm.attestationsByValidator, address)
+
+	log.Printf("🔓 Cleared jail status for %s", address)
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -350,7 +351,34 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to start consensus engine: %v", err)
 	}
 
-	// ✅ ADD THIS: Connect P2P to consensus engine
+	// ✅ MOVE IT HERE: Reset jail status AFTER consensus engine starts
+	if os.Getenv("THRYLOS_ENVIRONMENT") == "development" && n.consensusEngine != nil {
+		log.Println("🔓 Development mode: Resetting jail status for all validators...")
+		validators := n.consensusEngine.GetAllValidators()
+
+		for _, v := range validators {
+			// Reset jail status in validator object
+			v.JailUntil = 0
+			v.Active = true
+
+			// Update the validator in WorldState
+			if err := n.blockchain.GetWorldState().UpdateValidator(v); err != nil {
+				log.Printf("⚠️ Failed to reset jail status for validator %s: %v", v.Address, err)
+			} else {
+				log.Printf("✅ Reset jail status for validator %s (Active: true, JailUntil: 0)", v.Address)
+			}
+
+			// Also clear slashing info via the slashing module
+			slashingModule := n.consensusEngine.GetSlashingModule()
+			if slashingModule != nil {
+				slashingModule.ClearJailStatus(v.Address)
+				log.Printf("✅ Cleared slashing info for validator %s", v.Address)
+			}
+		}
+		log.Println("✅ All validators unjailed and reactivated for development")
+	}
+
+	// ✅ Connect P2P to consensus engine
 	if n.p2pNetwork != nil && n.consensusEngine != nil {
 		n.p2pNetwork.SetConsensusEngine(n.consensusEngine)
 	}
@@ -359,10 +387,8 @@ func (n *Node) Start() error {
 	if n.p2pNetwork != nil && n.consensusEngine != nil {
 		time.Sleep(2 * time.Second)
 
-		// Try to get local validator (will fail if not a validator)
 		validator, err := n.consensusEngine.GetLocalValidator()
 		if err == nil && validator != nil {
-			// Announce to network
 			if err := n.p2pNetwork.AnnounceValidator(validator); err != nil {
 				log.Printf("⚠️ Failed to announce validator: %v", err)
 			} else {
@@ -370,7 +396,6 @@ func (n *Node) Start() error {
 				n.p2pNetwork.RequestValidatorSync()
 			}
 		}
-		// Silently skip if not a validator
 	}
 
 	if n.bridge != nil {
@@ -393,7 +418,6 @@ func (n *Node) Start() error {
 			return fmt.Errorf("failed to start P2P network: %v", err)
 		}
 
-		// Start P2P message processing
 		go n.processP2PMessages()
 	}
 
