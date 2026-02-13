@@ -5,11 +5,12 @@ package pos
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/sha512"
 	"errors"
 	"fmt"
 
-	thrylos_crypto "github.com/thrylos-labs/go-thrylos/crypto"
+	"github.com/thrylos-labs/go-thrylos/crypto"
 )
 
 // VRFProof contains the VRF output and proof
@@ -20,30 +21,19 @@ type VRFProof struct {
 
 // GenerateVRFProof generates a deterministic random output with proof
 // This uses Ed25519 signatures as a VRF (deterministic and verifiable)
-func GenerateVRFProof(privateKey thrylos_crypto.PrivateKey, alpha []byte) (*VRFProof, error) {
-	if privateKey == nil {
-		return nil, errors.New("private key cannot be nil")
-	}
+func GenerateVRFProof(privateKey crypto.PrivateKey, input []byte) (*VRFProof, error) {
+	// Derive deterministic Ed25519 key from secp256k1 public key
+	pubKeyBytes := privateKey.PublicKey().Bytes()
+	hash := sha256.Sum256(pubKeyBytes)
+	ed25519PrivKey := ed25519.NewKeyFromSeed(hash[:])
 
-	// Convert the private key to Ed25519 format
-	privKeyBytes := privateKey.Bytes()
-	if len(privKeyBytes) != 32 {
-		return nil, fmt.Errorf("invalid private key length: expected 32, got %d", len(privKeyBytes))
-	}
-
-	// Generate Ed25519 keypair from seed
-	ed25519PrivKey := ed25519.NewKeyFromSeed(privKeyBytes)
-
-	// Generate deterministic proof using Ed25519 signature
-	proof := ed25519.Sign(ed25519PrivKey, alpha)
-
-	// Derive VRF output from the signature
-	hash := sha512.Sum512(proof)
-	output := hash[:32]
+	// Sign with Ed25519
+	signature := ed25519.Sign(ed25519PrivKey, input)
+	output := sha256.Sum256(signature)
 
 	return &VRFProof{
-		Output: output,
-		Proof:  proof,
+		Output: output[:],
+		Proof:  signature,
 	}, nil
 }
 

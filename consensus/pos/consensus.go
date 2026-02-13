@@ -4,8 +4,9 @@
 package pos
 
 import (
+	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/sha3"
-	"crypto/sha512"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -1422,8 +1423,11 @@ func (bv *BlockValidator) validateVRFProof(block *core.Block) error {
 // deriveVRFPublicKeyFromSecp256k1 creates a deterministic Ed25519 public key from secp256k1
 // This is a bridge function until validators register proper Ed25519 VRF keys
 func deriveVRFPublicKeyFromSecp256k1(secp256k1PubKey []byte) []byte {
-	hash := sha512.Sum512(append(secp256k1PubKey, []byte("THRYLOS_VRF_PUBKEY_V1")...))
-	return hash[:32]
+	// Must match GenerateVRFProof derivation!
+	hash := sha256.Sum256(secp256k1PubKey)
+	ed25519PrivKey := ed25519.NewKeyFromSeed(hash[:])
+	ed25519PubKey := ed25519PrivKey.Public().(ed25519.PublicKey)
+	return ed25519PubKey
 }
 
 // validateBlockStructure validates the basic structure of a block

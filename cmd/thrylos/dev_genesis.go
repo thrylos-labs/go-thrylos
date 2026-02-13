@@ -4,7 +4,6 @@
 package main
 
 import (
-	"crypto/ed25519"
 	"crypto/sha256"
 	"fmt"
 	"time"
@@ -75,16 +74,13 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 			return nil, nil, nil, fmt.Errorf("failed to derive address for node %d: %w", nodeID, err)
 		}
 
-		// ✅ FIX: Derive Ed25519 public key for VRF
-		privKeyBytes := priv.Bytes()
-		ed25519PrivKey := ed25519.NewKeyFromSeed(privKeyBytes)
-		vrfPubKey := ed25519PrivKey.Public().(ed25519.PublicKey)
-
 		meta := metadata[nodeID]
+
+		secp256k1PubKey := priv.PublicKey().Bytes() // 33 or 65 bytes
 
 		validator := &core.Validator{
 			Address:        addr,
-			Pubkey:         vrfPubKey, // ← Use Ed25519 public key!
+			Pubkey:         secp256k1PubKey, // ✅ Use secp256k1 key for signatures
 			Stake:          "3000000000000000000000",
 			SelfStake:      "3000000000000000000000",
 			DelegatedStake: "0", // Fix: String "0" instead of int 0
