@@ -385,16 +385,27 @@ func (n *Node) Start() error {
 
 	// Announce validator to network if this node is a validator
 	if n.p2pNetwork != nil && n.consensusEngine != nil {
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second) // Initial wait
 
 		validator, err := n.consensusEngine.GetLocalValidator()
 		if err == nil && validator != nil {
+			// Announce immediately
 			if err := n.p2pNetwork.AnnounceValidator(validator); err != nil {
 				log.Printf("⚠️ Failed to announce validator: %v", err)
 			} else {
 				log.Printf("✅ Announced validator %s to network", validator.Address)
-				n.p2pNetwork.RequestValidatorSync()
 			}
+
+			// Re-announce every 10 seconds for the first minute
+			go func() {
+				for i := 0; i < 6; i++ {
+					time.Sleep(10 * time.Second)
+					n.p2pNetwork.AnnounceValidator(validator)
+					log.Printf("🔁 Re-announced validator %s", validator.Address)
+				}
+			}()
+
+			n.p2pNetwork.RequestValidatorSync()
 		}
 	}
 
