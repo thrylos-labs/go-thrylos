@@ -4,6 +4,7 @@
 package pos
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -60,22 +61,15 @@ func VerifyVRFProof(publicKey []byte, alpha []byte, proof *VRFProof) (bool, []by
 		return false, nil, errors.New("signature verification failed")
 	}
 
-	// Recompute output from verified proof
-	hash := sha512.Sum512(proof.Proof)
-	output := hash[:32]
+	// ✅ FIX: Use SHA256 to match GenerateVRFProof
+	output := sha256.Sum256(proof.Proof)
 
 	// Verify output matches
-	if len(output) != len(proof.Output) {
-		return false, nil, errors.New("output length mismatch")
+	if !bytes.Equal(output[:], proof.Output) {
+		return false, nil, errors.New("output mismatch")
 	}
 
-	for i := range output {
-		if output[i] != proof.Output[i] {
-			return false, nil, errors.New("output mismatch")
-		}
-	}
-
-	return true, output, nil
+	return true, output[:], nil
 }
 
 // VRFProofSize returns the size of a VRF proof in bytes
