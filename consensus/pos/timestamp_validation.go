@@ -57,9 +57,9 @@ func (tv *TimestampValidator) ValidateBlockTimestamp(
 ) error {
 
 	// Rule 1: Block timestamp must be after parent
-	if blockTimestamp <= parentTimestamp {
+	if blockTimestamp < parentTimestamp {
 		return fmt.Errorf(
-			"block timestamp (%d) must be after parent timestamp (%d)",
+			"block timestamp (%d) cannot be less than parent timestamp (%d)",
 			blockTimestamp, parentTimestamp,
 		)
 	}

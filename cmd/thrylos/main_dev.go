@@ -40,6 +40,9 @@ func main() {
 	cfg.Environment = "development"
 	cfg.Network.ChainID = config.GetChainIDForEnvironment(cfg.Environment)
 
+	// Fixed genesis timestamp for deterministic genesis across all nodes
+	cfg.GenesisTimestamp = 1770000000
+
 	// Prepare bootstrap peers
 	var bootstrapPeers []string
 	if *bootstraps != "" {

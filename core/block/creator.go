@@ -152,8 +152,9 @@ func (bc *Creator) CreateGenesisBlock(genesisValidator string, timestamp int64) 
 		return nil, fmt.Errorf("genesis validator cannot be empty")
 	}
 
+	// ✅ FIX: Use fixed timestamp for deterministic genesis in dev
 	if timestamp <= 0 {
-		timestamp = time.Now().Unix()
+		timestamp = 1770000000 // Fixed epoch for dev network
 	}
 
 	header := &core.BlockHeader{
@@ -164,7 +165,7 @@ func (bc *Creator) CreateGenesisBlock(genesisValidator string, timestamp int64) 
 		TxRoot:    calculateEmptyRoot(),
 		StateRoot: "",
 		GasUsed:   0,
-		GasLimit:  1000000, // Default genesis gas limit
+		GasLimit:  1000000,
 	}
 
 	block := &core.Block{

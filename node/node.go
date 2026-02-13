@@ -430,6 +430,28 @@ func (n *Node) Start() error {
 		}
 
 		go n.processP2PMessages()
+
+		go n.processP2PMessageBus()
+
+		// ✅ NEW: Genesis sync AFTER P2P is running
+		nodeID := os.Getenv("NODE_ID")
+		if nodeID != "1" && nodeID != "" {
+			// Check if we need to sync genesis
+			if n.blockchain.GetGenesisBlock() == nil {
+				log.Println("⏳ Waiting for P2P peers before syncing genesis...")
+
+				// Give P2P time to discover peers
+				time.Sleep(15 * time.Second)
+
+				log.Println("📡 Attempting genesis sync now that P2P is running...")
+				if err := n.syncGenesisFromNetwork(); err != nil {
+					log.Printf("❌ CRITICAL: Failed to sync genesis: %v", err)
+					log.Println("❌ Node cannot start without genesis block")
+					return fmt.Errorf("genesis sync failed: %v", err)
+				}
+				log.Println("✅ Genesis synced successfully!")
+			}
+		}
 	}
 
 	if err := n.syncManager.Start(); err != nil {
@@ -1037,17 +1059,26 @@ func (n *Node) storeGenesisConfig(config *NodeConfig) {
 }
 
 func (n *Node) initializeGenesis() error {
-	// Check if genesis block already exists
+	// ✅ CHECK NODE_ID FIRST, before checking if genesis exists
+	nodeID := os.Getenv("NODE_ID")
+
+	// Check if genesis already exists (from previous run or sync)
 	if n.blockchain.GetGenesisBlock() != nil {
-		fmt.Printf("🏛️  Genesis block already exists, skipping initialization\n")
+		fmt.Printf("🏛️  Genesis block already exists\n")
 		return nil
 	}
 
-	// ✅ NEW: Initialize the blockchain genesis with accounts and validators
-	fmt.Printf("🏗️  Initializing blockchain genesis...\n")
+	// ✅ Non-leader nodes: Don't create genesis here, will sync after P2P starts
+	if nodeID != "1" && nodeID != "" {
+		fmt.Printf("⏳ Node %s will sync genesis after P2P network starts...\n", nodeID)
+		return nil // Don't create genesis, don't attempt sync yet
+	}
+
+	// Node 1: Create genesis
+	fmt.Printf("🏗️  Node 1 initializing blockchain genesis...\n")
 
 	// Get genesis data from node config
-	genesisAccount := n.genesisAccount // Now this works!
+	genesisAccount := n.genesisAccount
 	genesisSupply := n.config.Economics.GenesisSupply
 
 	// Fallback to config accounts if genesisAccount is empty
@@ -1058,7 +1089,7 @@ func (n *Node) initializeGenesis() error {
 	// Prepare genesis validators
 	genesisValidators := n.genesisValidators
 
-	// If no genesis validators provided, create one for this node (backward compatibility)
+	// If no genesis validators provided, create one for this node
 	if len(genesisValidators) == 0 && n.isValidatorNode {
 		genesisValidators = []*core.Validator{
 			{
@@ -1076,15 +1107,14 @@ func (n *Node) initializeGenesis() error {
 		}
 	}
 
-	// ✅ CRITICAL: Call blockchain.InitializeGenesis() to load accounts and create genesis block
+	// Initialize blockchain genesis
 	if err := n.blockchain.InitializeGenesis(
 		genesisAccount,
-		n.nodeAddress, // genesis validator
+		n.nodeAddress,
 		genesisSupply,
 		genesisValidators,
 		n.nodePrivateKey,
 	); err != nil {
-		// If genesis already initialized, that's okay
 		if err.Error() == "genesis block already exists" {
 			fmt.Printf("✅ Genesis already initialized\n")
 			return nil
@@ -1094,6 +1124,69 @@ func (n *Node) initializeGenesis() error {
 
 	fmt.Printf("✅ Blockchain genesis initialized successfully\n")
 	return nil
+}
+
+// syncGenesisFromNetwork attempts to sync genesis block from bootstrap nodes
+// syncGenesisFromNetwork attempts to sync genesis block from bootstrap nodes
+func (n *Node) syncGenesisFromNetwork() error {
+	if n.p2pNetwork == nil {
+		return fmt.Errorf("P2P network not initialized")
+	}
+
+	// ✅ RETRY LOGIC: Try for up to 60 seconds
+	maxRetries := 12
+	retryDelay := 5 * time.Second
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		fmt.Printf("📡 Sync attempt %d/%d...\n", attempt, maxRetries)
+
+		// Get connected peers
+		peers := n.p2pNetwork.GetConnectedPeerIDs()
+		if len(peers) == 0 {
+			fmt.Printf("⏳ No peers yet, waiting %v before retry...\n", retryDelay)
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		fmt.Printf("📡 Found %d peers, attempting genesis sync...\n", len(peers))
+
+		// Try each peer until we get genesis
+		for _, peerID := range peers {
+			fmt.Printf("📥 Requesting genesis from peer %s...\n", peerID[:8])
+
+			// Request block 0 (genesis) from peer
+			blocks, err := n.p2pNetwork.RequestBlockRange(peerID, 0, 0)
+			if err != nil {
+				fmt.Printf("⚠️  Failed to get genesis from peer %s: %v\n", peerID[:8], err)
+				continue
+			}
+
+			if len(blocks) == 0 {
+				fmt.Printf("⚠️  Peer %s returned no genesis block\n", peerID[:8])
+				continue
+			}
+
+			genesisBlock := blocks[0]
+			fmt.Printf("✅ Received genesis block %s from peer %s\n", genesisBlock.Hash[:8], peerID[:8])
+
+			// Add genesis block to our chain
+			if err := n.blockchain.GetWorldState().AddBlock(genesisBlock); err != nil {
+				fmt.Printf("⚠️  Failed to add genesis block: %v\n", err)
+				continue
+			}
+
+			fmt.Printf("✅ Genesis block synced successfully!\n")
+			return nil
+		}
+
+		// Didn't work, wait and retry
+		if attempt < maxRetries {
+			fmt.Printf("⏳ Sync failed, waiting %v before retry...\n", retryDelay)
+			time.Sleep(retryDelay)
+		}
+	}
+
+	return fmt.Errorf("failed to sync genesis after %d attempts", maxRetries)
 }
 
 func (n *Node) registerAsValidator() error {
@@ -1310,4 +1403,74 @@ func (n *Node) GetPeerID() string {
 
 func (n *Node) ForceP2PSync() error {
 	return n.SyncWithPeers()
+}
+
+// processP2PMessageBus handles requests from P2P MessageBus
+// processP2PMessageBus handles requests from P2P MessageBus
+func (n *Node) processP2PMessageBus() {
+	if n.p2pNetwork == nil {
+		return
+	}
+
+	messageBus := n.p2pNetwork.GetMessageBus()
+	if messageBus == nil {
+		log.Println("⚠️ P2P MessageBus not available")
+		return
+	}
+
+	log.Println("📬 P2P MessageBus processor started")
+
+	for msg := range messageBus {
+		// Check the type by casting to the internal type value
+		data, ok := msg.Data.(map[string]int64)
+		if ok && data != nil {
+			// This is a block range request
+			n.handleGetBlocksFromHeight(msg)
+		} else {
+			log.Printf("⚠️ Unknown MessageBus message")
+			if msg.ResponseCh != nil {
+				close(msg.ResponseCh)
+			}
+		}
+	}
+}
+
+// handleGetBlocksFromHeight fetches blocks for a peer
+func (n *Node) handleGetBlocksFromHeight(msg network.Message) {
+	data, ok := msg.Data.(map[string]int64)
+	if !ok {
+		if msg.ResponseCh != nil {
+			msg.ResponseCh <- network.Response{
+				Success: false,
+				Error:   fmt.Errorf("invalid data format"),
+			}
+		}
+		return
+	}
+
+	startHeight := data["start"]
+	endHeight := data["end"]
+
+	log.Printf("📦 Fetching blocks %d to %d for peer", startHeight, endHeight)
+
+	// Fetch blocks
+	var blocks []*core.Block
+	for height := startHeight; height <= endHeight; height++ {
+		block, err := n.blockchain.GetWorldState().GetBlock(height)
+		if err != nil {
+			log.Printf("⚠️ Block %d not found: %v", height, err)
+			break
+		}
+		blocks = append(blocks, block)
+	}
+
+	log.Printf("✅ Sending %d blocks to peer", len(blocks))
+
+	// Send response
+	if msg.ResponseCh != nil {
+		msg.ResponseCh <- network.Response{
+			Success: true,
+			Data:    blocks,
+		}
+	}
 }

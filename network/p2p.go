@@ -478,6 +478,9 @@ func (n *P2PNetwork) AnnounceValidator(validator *core.Validator) error {
 	return nil
 }
 
+type Message = p2p.Message
+type Response = p2p.Response
+
 // RequestValidatorSync requests full validator set from a peer
 func (n *P2PNetwork) RequestValidatorSync() {
 	// Send validator sync request via manager
@@ -492,4 +495,12 @@ func (n *P2PNetwork) RequestValidatorSync() {
 	default:
 		stdlog.Println("⚠️ Failed to request validator sync: channel full")
 	}
+}
+
+// GetMessageBus returns the P2P message bus
+func (n *P2PNetwork) GetMessageBus() chan Message {
+	if n.manager == nil {
+		return nil
+	}
+	return n.manager.GetMessageBus()
 }

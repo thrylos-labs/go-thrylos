@@ -52,11 +52,11 @@ services:
       node-1:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8081/api/v1/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]  # ✅ FIX: 8080 not 8081
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s 
     restart: unless-stopped
 
   node-3:
@@ -82,14 +82,12 @@ services:
     depends_on:
       node-1:
         condition: service_healthy
-      node-2:
-        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8081/api/v1/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]  
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
     restart: unless-stopped
 
   node-4:
@@ -117,11 +115,11 @@ services:
       node-1:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8081/api/v1/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"] 
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
     restart: unless-stopped
 
 volumes:

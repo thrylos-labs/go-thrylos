@@ -215,37 +215,40 @@ func (bc *Blockchain) InitializeGenesis(genesisAccount string, genesisValidator 
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
-	// 1. In-Memory Check: If already set in this struct, return immediately.
+	// 1. In-Memory Check
 	if bc.genesisBlock != nil {
 		return nil
 	}
 
-	// 2. Persistent Storage Check: Check if genesis already exists in the DB.
-	// If the node restarts, the WorldState might already have the genesis block.
-	// Note: Verify the method name 'GetBlockByNumber' matches your WorldState interface.
+	// 2. Persistent Storage Check
 	if existingGenesis, err := bc.worldState.GetBlock(0); err == nil && existingGenesis != nil {
-		// Log that we found an existing genesis
-		// fmt.Println("Found existing genesis block in storage, skipping initialization.")
-
 		bc.genesisBlock = existingGenesis
-		// If your blockchain tracks totalBlocks, you might need to load the actual height here
-		// e.g., bc.totalBlocks = bc.worldState.CurrentHeight() + 1
 		bc.totalBlocks = 1
 		return nil
 	}
 
-	// --- Proceed with Genesis Creation if not found ---
+	// --- Proceed with Genesis Creation ---
 
 	// Initialize WorldState genesis first
 	if err := bc.worldState.InitializeGenesis(genesisAccount, initialSupply, genesisValidators); err != nil {
 		return fmt.Errorf("failed to initialize world state genesis: %v", err)
 	}
 
-	// Create genesis block
-	genesisBlock, err := bc.blockCreator.CreateGenesisBlock(genesisValidator, time.Now().Unix())
+	// ✅ FIX: Use config timestamp for deterministic genesis
+	genesisTimestamp := bc.config.GenesisTimestamp
+	if genesisTimestamp == 0 {
+		genesisTimestamp = 1770000000 // Fixed fallback for dev
+	}
+
+	// Create genesis block with deterministic timestamp
+	genesisBlock, err := bc.blockCreator.CreateGenesisBlock(genesisValidator, genesisTimestamp)
 	if err != nil {
 		return fmt.Errorf("failed to create genesis block: %v", err)
 	}
+
+	// ✅ DEBUG: Log genesis details
+	log.Printf("🔍 GENESIS DEBUG: timestamp=%d, validator=%s, hash=%s",
+		genesisBlock.Header.Timestamp, genesisValidator, genesisBlock.Hash)
 
 	// Set state root from WorldState
 	stateRoot := bc.worldState.GetStateRoot()

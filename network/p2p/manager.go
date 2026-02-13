@@ -909,6 +909,11 @@ func (m *Manager) handleBlockRangeRequest(s network.Stream) {
 	stdlog.Printf("Sent %d blocks to peer %s", len(blocks), peerID.String())
 }
 
+// GetMessageBus returns the message bus channel for processing requests
+func (m *Manager) GetMessageBus() chan Message {
+	return m.MessageBus
+}
+
 // handleHeightRequest handles incoming height requests
 func (m *Manager) handleHeightRequest(s network.Stream) {
 	defer s.Close()
