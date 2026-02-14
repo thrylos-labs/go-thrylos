@@ -25,11 +25,13 @@ if [ -n "$BOOTSTRAP_PEERS" ]; then
 fi
 
 echo "🔥 Launching Thrylos..."
-if [ "$NODE_ID" = "1" ]; then
-    echo "👑 Node $NODE_ID starting as Initial Validator"
-else
-    echo "🌐 Node $NODE_ID connecting to bootstrap peers: $BOOTSTRAP_PEERS"
+# If not node-1, wait for P2P port 9000 on node-1 to be reachable before starting
+if [ "$NODE_ID" != "1" ]; then
+    echo "⏳ Waiting for node-1 P2P..."
+    while ! nc -z 172.25.0.10 9000; do
+      sleep 1
+    done
+    echo "✅ Node-1 P2P reachable"
 fi
 
-# Execute the main binary
 exec thrylos "${ARGS[@]}"

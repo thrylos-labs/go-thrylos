@@ -142,7 +142,7 @@ func (ce *ConsensusEngine) verifyProposalSignature(proposal *BlockProposal) erro
 
 	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
 	if err != nil {
-		return fmt.Errorf("invalid public key: %v", err)
+		return fmt.Errorf("invalid public key bytes (len=%d): %v", len(validator.Pubkey), err)
 	}
 
 	hash, err := ce.computeProposalHash(proposal)
@@ -159,8 +159,11 @@ func (ce *ConsensusEngine) verifyProposalSignature(proposal *BlockProposal) erro
 		return fmt.Errorf("invalid signature format: %v", err)
 	}
 
-	// [FIX L-02] Use VerifyHash
+	// ✅ DEBUGGING: Print details on failure
 	if err := pubKey.VerifyHash(hash, sig); err != nil {
+		// Log the ChainID used during verification
+		fmt.Printf("❌ SIG FAIL | Proposer: %s | ChainID: %s | PubKeyLen: %d\n",
+			proposal.Proposer, ce.config.Network.ChainID, len(validator.Pubkey))
 		return fmt.Errorf("proposal signature verification failed: %v", err)
 	}
 

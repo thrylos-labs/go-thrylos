@@ -38,7 +38,7 @@ func main() {
 
 	// Force dev environment
 	cfg.Environment = "development"
-	cfg.Network.ChainID = config.GetChainIDForEnvironment(cfg.Environment)
+	cfg.Network.ChainID = "thrylos-devnet-1337"
 
 	// Fixed genesis timestamp for deterministic genesis across all nodes
 	cfg.GenesisTimestamp = 1770000000

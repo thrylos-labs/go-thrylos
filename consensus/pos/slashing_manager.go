@@ -186,6 +186,13 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	// If the chain is just starting (Height < 100), ignore slashing evidence.
+	// This prevents "boot-up storms" in Docker from jailing nodes.
+	if sm.worldState != nil && sm.worldState.GetHeight() < 100 {
+		log.Printf("ℹ️  [Slashing] Evidence ignored due to startup grace period (Height < 100)")
+		return nil
+	}
+
 	sm.metrics.RecordSubmission()
 
 	// LAYER 1: Rate Limiting (Spam Protection)
@@ -365,6 +372,14 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 		return nil
 	}
 
+	// ✅ NEW: Startup Grace Period
+	// We do NOT want to check for conflicts during the first 100 blocks
+	if sm.worldState != nil && sm.worldState.GetHeight() < 100 {
+		// We still record it for history, but we skip the "Double Signing" check below
+		// or just return early if you don't care about history yet.
+		return nil
+	}
+
 	// 2. Initialize storage if nil
 	if sm.attestationsByValidator == nil {
 		sm.attestationsByValidator = make(map[string][]*storage.AttestationRecord)
@@ -424,12 +439,14 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 		Timestamp:        time.Now(),
 	}
 
-	// 6. Double-Signing / Equivocation Check
 	// This is a primary function of the SlashingManager.
+	// 6. Double-Signing / Equivocation Check
 	prevAttestations := sm.attestationsByValidator[validatorAddress]
 	for _, prev := range prevAttestations {
 		conflicts := record.Conflicts(prev)
 		if conflicts {
+			// ✅ Log it but don't error out if we want to be super lenient (optional)
+			// But usually, the "return nil" at the top handles it.
 			return &DoubleSigningError{
 				ConflictingRecord: prev,
 			}
@@ -488,6 +505,11 @@ func (sm *SlashingManager) ApplyDoubleVoteSlashing(att1, att2 *types.Attestation
 func (sm *SlashingManager) ReportBlockWithholding(validatorAddr string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+
+	// ✅ NEW: Grace Period
+	if sm.worldState != nil && sm.worldState.GetHeight() < 100 {
+		return nil
+	}
 
 	if sm.isValidatorJailed(validatorAddr) {
 		return nil

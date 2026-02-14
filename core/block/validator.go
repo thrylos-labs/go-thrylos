@@ -384,24 +384,20 @@ func (v *Validator) ValidateTimestamp(block *core.Block, prevBlock *core.Block, 
 	blockTime := block.Header.Timestamp
 	now := time.Now().Unix()
 
-	// 1. Block timestamp must not be too far in future (Wall Clock)
+	// 1. Future Check
 	if blockTime > now+int64(maxFutureTime.Seconds()) {
-		return fmt.Errorf("block timestamp too far in future: %d > %d",
-			blockTime, now+int64(maxFutureTime.Seconds()))
+		return fmt.Errorf("block timestamp too far in future: %d > %d", blockTime, now+int64(maxFutureTime.Seconds()))
 	}
 
-	// 2. Block timestamp must not be too far in past (Wall Clock)
+	// 2. Past Check
 	if blockTime < now-int64(maxPastTime.Seconds()) {
-		return fmt.Errorf("block timestamp too far in past: %d < %d",
-			blockTime, now-int64(maxPastTime.Seconds()))
+		return fmt.Errorf("block timestamp too far in past: %d < %d", blockTime, now-int64(maxPastTime.Seconds()))
 	}
 
-	// Checks relative to Parent Block
 	if prevBlock != nil {
-		// 3. Block timestamp must be strictly after previous block
+		// 3. Sequence Check
 		if blockTime <= prevBlock.Header.Timestamp {
-			return fmt.Errorf("block timestamp must be after previous block: %d <= %d",
-				blockTime, prevBlock.Header.Timestamp)
+			return fmt.Errorf("block timestamp must be after previous block")
 		}
 
 		// 4. Drift Check
@@ -412,20 +408,25 @@ func (v *Validator) ValidateTimestamp(block *core.Block, prevBlock *core.Block, 
 
 		timeDiff := blockTime - prevBlock.Header.Timestamp
 
-		// ✅ FIX: Allow "Network Restart" mode.
-		// If the gap is larger than 1 hour (3600s), assume the network was down and allow it.
-		// This implicitly allows ANY gap > 1 hour (removing the previous 7-day cap).
-		const NetworkRestartThreshold = 3600
+		// ✅ FIX: Increase Genesis Recovery to 30 Days (2,592,000 seconds)
+		// The error log showed "1064363 seconds too large", so we need a limit higher than that.
+		const MaxGenesisRecoveryTime = 2592000
 
-		if timeDiff > int64(maxDrift.Seconds()) {
-			if timeDiff > NetworkRestartThreshold {
-				// Log warning but ALLOW it
-				fmt.Printf("⚠️ WARNING: Large timestamp gap detected (%d seconds). Assuming network restart.\n", timeDiff)
-				return nil // Explicitly return nil to indicate success
-			} else {
-				// Strict check for normal operation
-				return fmt.Errorf("block timestamp drift too large: %d seconds (max allowed: %d)", timeDiff, int64(maxDrift.Seconds()))
+		// If gap is huge (> 1 hour), check against the new Recovery Limit
+		if timeDiff > 3600 {
+			if timeDiff <= MaxGenesisRecoveryTime {
+				// WARN but ALLOW
+				fmt.Printf("⚠️ Network Restart Detected: allowing large timestamp gap (%d seconds)\n", timeDiff)
+				return nil
 			}
+			// If it exceeds even the 30-day limit, then fail
+			return fmt.Errorf("block timestamp increment %d seconds too large (max: %d seconds for normal, %d for recovery)",
+				timeDiff, int64(maxDrift.Seconds()), int64(MaxGenesisRecoveryTime))
+		}
+
+		// Normal operation check
+		if timeDiff > int64(maxDrift.Seconds()) {
+			return fmt.Errorf("block timestamp drift too large: %d seconds", timeDiff)
 		}
 	}
 	return nil

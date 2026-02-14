@@ -704,10 +704,18 @@ func (vm *Manager) RecordAttestation(address string, success bool) error {
 }
 
 // checkDowntimeSlashing checks if a validator should be slashed for downtime
+// checkDowntimeSlashing checks if a validator should be slashed for downtime
 func (vm *Manager) checkDowntimeSlashing(address string) error {
 	_, err := vm.worldState.GetValidator(address)
 	if err != nil {
 		return err
+	}
+
+	// ✅ STARTUP GRACE PERIOD: Skip slashing if network is young (e.g., < 100 blocks)
+	// This prevents nodes from being jailed while they are still syncing in Docker.
+	currentHeight := vm.worldState.GetHeight()
+	if currentHeight < 100 {
+		return nil
 	}
 
 	metrics, exists := vm.validatorMetrics[address]
@@ -719,6 +727,8 @@ func (vm *Manager) checkDowntimeSlashing(address string) error {
 	totalActivity := metrics.BlocksProposed + metrics.BlocksMissed +
 		metrics.AttestationsMade + metrics.AttestationsMissed
 
+	// ✅ LENIENT WINDOW: Ensure we have a significant sample size before slashing
+	// Increase performanceWindow logic or check against a higher threshold for dev
 	if totalActivity < uint64(vm.performanceWindow) {
 		return nil // Not enough data yet
 	}
