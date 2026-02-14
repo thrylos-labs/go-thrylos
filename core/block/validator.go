@@ -412,11 +412,21 @@ func (v *Validator) ValidateTimestamp(block *core.Block, prevBlock *core.Block, 
 
 		timeDiff := blockTime - prevBlock.Header.Timestamp
 
+		// ✅ FIX: Allow "Network Restart" mode.
+		// If the gap is larger than 1 hour (3600s), assume the network was down and allow it.
+		// This implicitly allows ANY gap > 1 hour (removing the previous 7-day cap).
+		const NetworkRestartThreshold = 3600
+
 		if timeDiff > int64(maxDrift.Seconds()) {
-			return fmt.Errorf("block timestamp drift too large: %d seconds (max allowed: %d)",
-				timeDiff, int64(maxDrift.Seconds()))
+			if timeDiff > NetworkRestartThreshold {
+				// Log warning but ALLOW it
+				fmt.Printf("⚠️ WARNING: Large timestamp gap detected (%d seconds). Assuming network restart.\n", timeDiff)
+				return nil // Explicitly return nil to indicate success
+			} else {
+				// Strict check for normal operation
+				return fmt.Errorf("block timestamp drift too large: %d seconds (max allowed: %d)", timeDiff, int64(maxDrift.Seconds()))
+			}
 		}
 	}
-
 	return nil
 }

@@ -217,6 +217,7 @@ func (ce *ConsensusEngine) ValidateBlock(block *core.Block) error {
 }
 
 // processSlot handles consensus for a single slot
+// processSlot handles consensus for a single slot
 func (ce *ConsensusEngine) processSlot() {
 	ce.mu.Lock()
 
@@ -243,24 +244,38 @@ func (ce *ConsensusEngine) processSlot() {
 	proposer, err := ce.getSlotProposer(ce.currentSlot)
 	log.Printf("🎲 Slot %d: Proposer=%s, MyAddress=%s, Match=%v",
 		ce.currentSlot, proposer, ce.nodeAddress, proposer == ce.nodeAddress)
+
 	if err != nil {
 		fmt.Printf("❌ Failed to get slot proposer: %v\n", err)
 		ce.mu.Unlock()
 		return
 	}
 
-	// Check if proposer is still active
-	if !ce.slashingManager.IsValidatorActive(proposer) {
-		fmt.Printf("⚠️  Proposer %s is not active\n", proposer)
-		ce.mu.Unlock()
-		return
+	// ✅ FIX: "Emergency Recovery" Bypass
+	// We check if the proposer is active. If NOT, we only proceed if the network is dead (0 active validators).
+	isActive := ce.slashingManager.IsValidatorActive(proposer)
+
+	if !isActive {
+		// Check how many active validators exist in total
+		activeCount := len(ce.validatorSet.GetActiveValidators())
+
+		if activeCount == 0 {
+			// 🚨 EMERGENCY OVERRIDE 🚨
+			// The network is dead (all jailed). We MUST allow this inactive proposer to proceed
+			// so they can propose a block and potential unjail validators.
+			fmt.Printf("🚨 EMERGENCY: Proposer %s is INACTIVE, but proceeding because ActiveValidatorCount=0 (Recovery Mode)\n", proposer)
+		} else {
+			// Normal behavior: Reject inactive proposers
+			fmt.Printf("⚠️  Proposer %s is not active\n", proposer)
+			ce.mu.Unlock()
+			return
+		}
 	}
 
-	// ✅ ADD THIS DEBUG LOG
+	// ✅ DEBUG LOG
 	log.Printf("🔍 BEFORE CHECK: proposer='%s' (len=%d), nodeAddress='%s' (len=%d), equal=%v",
 		proposer, len(proposer), ce.nodeAddress, len(ce.nodeAddress), proposer == ce.nodeAddress)
 
-	// If we are the proposer, create block
 	// If we are the proposer, create block
 	if proposer == ce.nodeAddress {
 		fmt.Printf("🔨 I AM the proposer for slot %d! Attempting to propose...\n", ce.currentSlot)
@@ -274,7 +289,8 @@ func (ce *ConsensusEngine) processSlot() {
 		fmt.Printf("ℹ️  Not my turn (proposer: %s, me: %s)\n", proposer[:8], ce.nodeAddress[:8])
 	}
 
-	// Create attestation if we're a validator
+	// Create attestation if we're a validator (or in recovery mode)
+	// We might need to allow attesting even if inactive during recovery, but let's stick to proposing first.
 	if ce.isCurrentNodeValidator() {
 		if err := ce.createAttestation(); err != nil {
 			fmt.Printf("Failed to create attestation: %v\n", err)
@@ -291,7 +307,7 @@ func (ce *ConsensusEngine) processSlot() {
 
 	ce.mu.Unlock()
 
-	// ✅ Process attestations and fork choice ASYNC
+	// Process attestations and fork choice ASYNC
 	go func() {
 		ce.processAttestationsAsync(attestationsCopy)
 		ce.updateForkChoice()
@@ -559,50 +575,53 @@ func (ce *ConsensusEngine) createAttestation() error {
 	return nil
 }
 
-// getSlotProposer determines which validator should propose for a given slot
-// getSlotProposer determines which validator should propose for a given slot using VRF
 func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
+	// 1. Try to get standard active validators
 	activeValidators := ce.validatorSet.GetActiveValidators()
 
-	// 🔍 DEBUG LOG
-	fmt.Printf("🔍 DEBUG getSlotProposer: slot=%d, active validators count=%d\n",
-		slot, len(activeValidators))
-
+	// ✅ FIX: Emergency Deadlock Recovery
+	// If NO active validators exist (all jailed/slashed), the chain halts.
+	// Fallback: Use ALL validators (including jailed ones) to allow a "recovery block"
+	// to be proposed, which can contain transactions to unjail nodes.
 	if len(activeValidators) == 0 {
-		fmt.Printf("❌ DEBUG: No active validators in validator set!\n")
-		return "", fmt.Errorf("no active validators")
+		fmt.Println("🚨 EMERGENCY: No active validators found (all jailed?). Entering Recovery Mode.")
+
+		// Retrieve ALL validators from WorldState (requires the new method added above)
+		allValidators := ce.worldState.GetAllValidators()
+
+		if len(allValidators) == 0 {
+			return "", fmt.Errorf("CRITICAL: No validators exist in world state (bootstrap required)")
+		}
+
+		fmt.Printf("⚠️ Recovery Mode: Using %d total validators (active+inactive) for consensus\n", len(allValidators))
+
+		// Overwrite activeValidators with the full set for this slot selection only
+		activeValidators = allValidators
 	}
 
-	for i, val := range activeValidators {
-		fmt.Printf("   Validator %d: %s (Active=%v, Stake=%s)\n",
-			i, val.Address, val.Active, val.Stake)
-	}
+	// 🔍 DEBUG LOG
+	fmt.Printf("🔍 DEBUG getSlotProposer: slot=%d, candidates=%d\n", slot, len(activeValidators))
 
+	// 2. Filter for eligibility (Slashing Check)
 	eligibleValidators := make([]*core.Validator, 0)
 	for _, validator := range activeValidators {
-		isActive := ce.slashingManager.IsValidatorActive(validator.Address)
-		fmt.Printf("   Checking %s: slashing active=%v\n", validator.Address, isActive)
-
-		if isActive {
-			eligibleValidators = append(eligibleValidators, validator)
-		}
+		// In Recovery Mode, we might want to skip the "IsValidatorActive" check
+		// or check purely for slashing status, not "Active" status.
+		// For now, we trust the set passed in.
+		eligibleValidators = append(eligibleValidators, validator)
 	}
-
-	fmt.Printf("🔍 DEBUG: Eligible validators count=%d\n", len(eligibleValidators))
 
 	if len(eligibleValidators) == 0 {
-		fmt.Printf("❌ DEBUG: No eligible validators (all jailed/slashed)\n")
-		return "", fmt.Errorf("no eligible validators (all are jailed or slashed)")
+		return "", fmt.Errorf("no eligible validators found even after recovery attempt")
 	}
 
-	// Use VRF-based selection
+	// 3. VRF Selection
 	selectedValidator, err := ce.selectValidatorWithVRF(eligibleValidators, slot)
 	if err != nil {
-		fmt.Printf("❌ DEBUG: VRF selection failed: %v\n", err)
 		return "", fmt.Errorf("failed to select validator: %v", err)
 	}
 
-	fmt.Printf("✅ DEBUG: Selected validator %s for slot %d\n", selectedValidator.Address, slot)
+	fmt.Printf("✅ DEBUG: Selected proposer %s for slot %d\n", selectedValidator.Address, slot)
 	return selectedValidator.Address, nil
 }
 

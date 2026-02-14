@@ -286,6 +286,19 @@ func (bc *Blockchain) addBlockUnsafe(block *core.Block) error {
 		return fmt.Errorf("block cannot be nil")
 	}
 
+	// ✅ FIX: Genesis Idempotency Check
+	// If receiving Genesis block, check if we already have it to prevent "index 0 != expected 1" errors
+	if block.Header.Index == 0 {
+		currentGenesis := bc.GetGenesisBlock()
+		if currentGenesis != nil {
+			if currentGenesis.Hash == block.Hash {
+				// We already have this exact genesis block. Treat as success.
+				return nil
+			}
+			return fmt.Errorf("CRITICAL GENESIS MISMATCH: Local %s vs Remote %s", currentGenesis.Hash, block.Hash)
+		}
+	}
+
 	// Validate block structure
 	if err := bc.validateBlockStructure(block); err != nil {
 		return fmt.Errorf("block structure validation failed: %v", err)

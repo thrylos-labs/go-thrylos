@@ -2929,3 +2929,17 @@ func (ws *WorldState) GetAccountsSnapshot(addresses []string) ([]*core.Account, 
 
 	return accounts, nil
 }
+
+// GetAllValidators retrieves all validators (active, inactive, and jailed) from the world state.
+// This is critical for emergency recovery when no active validators exist.
+func (ws *WorldState) GetAllValidators() []*core.Validator {
+	ws.validatorMu.RLock()
+	defer ws.validatorMu.RUnlock()
+
+	allValidators := make([]*core.Validator, 0, len(ws.validators))
+	for _, v := range ws.validators {
+		allValidators = append(allValidators, v)
+	}
+
+	return allValidators
+}
