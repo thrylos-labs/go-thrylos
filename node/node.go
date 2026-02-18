@@ -383,32 +383,7 @@ func (n *Node) Start() error {
 		n.p2pNetwork.SetConsensusEngine(n.consensusEngine)
 	}
 
-	// Announce validator to network if this node is a validator
-	if n.p2pNetwork != nil && n.consensusEngine != nil {
-		time.Sleep(5 * time.Second) // Initial wait
-
-		validator, err := n.consensusEngine.GetLocalValidator()
-		if err == nil && validator != nil {
-			// Announce immediately
-			if err := n.p2pNetwork.AnnounceValidator(validator); err != nil {
-				log.Printf("⚠️ Failed to announce validator: %v", err)
-			} else {
-				log.Printf("✅ Announced validator %s to network", validator.Address)
-			}
-
-			// Re-announce every 10 seconds for the first minute
-			go func() {
-				for i := 0; i < 6; i++ {
-					time.Sleep(10 * time.Second)
-					n.p2pNetwork.AnnounceValidator(validator)
-					log.Printf("🔁 Re-announced validator %s", validator.Address)
-				}
-			}()
-
-			n.p2pNetwork.RequestValidatorSync()
-		}
-	}
-
+	// Start bridge
 	if n.bridge != nil {
 		if err := n.bridge.Start(); err != nil {
 			return fmt.Errorf("failed to start consensus bridge: %v", err)
@@ -416,40 +391,55 @@ func (n *Node) Start() error {
 		fmt.Println("🌉 P2P <-> Consensus bridge started")
 	}
 
-	// Start API server if enabled
+	// Start API server
 	if n.apiManager != nil {
 		if err := n.apiManager.Start(); err != nil {
 			return fmt.Errorf("failed to start API server: %v", err)
 		}
 	}
 
-	// Start P2P network if enabled
+	// Start P2P network
 	if n.p2pNetwork != nil {
 		if err := n.p2pNetwork.Start(); err != nil {
 			return fmt.Errorf("failed to start P2P network: %v", err)
 		}
-
 		go n.processP2PMessages()
-
 		go n.processP2PMessageBus()
 
-		// ✅ NEW: Genesis sync AFTER P2P is running
+		// Genesis sync for non-node-1 nodes
 		nodeID := os.Getenv("NODE_ID")
 		if nodeID != "1" && nodeID != "" {
-			// Check if we need to sync genesis
-			if n.blockchain.GetGenesisBlock() == nil {
-				log.Println("⏳ Waiting for P2P peers before syncing genesis...")
+			log.Println("⏳ Waiting for P2P peers before syncing genesis...")
+			time.Sleep(15 * time.Second)
+			log.Println("📡 Attempting genesis sync now that P2P is running...")
+			if err := n.syncGenesisFromNetwork(); err != nil {
+				log.Printf("❌ CRITICAL: Failed to sync genesis: %v", err)
+				return fmt.Errorf("genesis sync failed: %v", err)
+			}
+			log.Println("✅ Genesis synced successfully!")
+		}
 
-				// Give P2P time to discover peers
-				time.Sleep(15 * time.Second)
-
-				log.Println("📡 Attempting genesis sync now that P2P is running...")
-				if err := n.syncGenesisFromNetwork(); err != nil {
-					log.Printf("❌ CRITICAL: Failed to sync genesis: %v", err)
-					log.Println("❌ Node cannot start without genesis block")
-					return fmt.Errorf("genesis sync failed: %v", err)
+		// ✅ Announce validator AFTER P2P is up AND genesis is synced
+		if n.consensusEngine != nil {
+			validator, err := n.consensusEngine.GetLocalValidator()
+			if err == nil && validator != nil {
+				if err := n.p2pNetwork.AnnounceValidator(validator); err != nil {
+					log.Printf("⚠️ Failed to announce validator: %v", err)
+				} else {
+					log.Printf("✅ Announced validator %s to network", validator.Address)
 				}
-				log.Println("✅ Genesis synced successfully!")
+
+				// Re-announce every 10 seconds for the first minute
+				go func() {
+					for i := 0; i < 6; i++ {
+						time.Sleep(10 * time.Second)
+						peers := n.p2pNetwork.GetConnectedPeers()
+						log.Printf("🔁 Re-announcing validator %s (attempt %d, peers: %d)", validator.Address, i+1, peers)
+						n.p2pNetwork.AnnounceValidator(validator)
+					}
+				}()
+
+				n.p2pNetwork.RequestValidatorSync()
 			}
 		}
 	}
@@ -1127,20 +1117,17 @@ func (n *Node) initializeGenesis() error {
 }
 
 // syncGenesisFromNetwork attempts to sync genesis block from bootstrap nodes
-// syncGenesisFromNetwork attempts to sync genesis block from bootstrap nodes
 func (n *Node) syncGenesisFromNetwork() error {
 	if n.p2pNetwork == nil {
 		return fmt.Errorf("P2P network not initialized")
 	}
 
-	// ✅ RETRY LOGIC: Try for up to 60 seconds
 	maxRetries := 12
 	retryDelay := 5 * time.Second
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		fmt.Printf("📡 Sync attempt %d/%d...\n", attempt, maxRetries)
 
-		// Get connected peers
 		peers := n.p2pNetwork.GetConnectedPeerIDs()
 		if len(peers) == 0 {
 			fmt.Printf("⏳ No peers yet, waiting %v before retry...\n", retryDelay)
@@ -1148,45 +1135,76 @@ func (n *Node) syncGenesisFromNetwork() error {
 			continue
 		}
 
-		fmt.Printf("📡 Found %d peers, attempting genesis sync...\n", len(peers))
-
-		// Try each peer until we get genesis
 		for _, peerID := range peers {
-			fmt.Printf("📥 Requesting genesis from peer %s...\n", peerID[:8])
-
-			// Request block 0 (genesis) from peer
+			// Request Genesis
 			blocks, err := n.p2pNetwork.RequestBlockRange(peerID, 0, 0)
 			if err != nil {
-				fmt.Printf("⚠️  Failed to get genesis from peer %s: %v\n", peerID[:8], err)
+				fmt.Printf("⚠️ RequestBlockRange failed for peer %s: %v\n", peerID[:8], err)
+				continue
+			}
+			if len(blocks) == 0 {
+				fmt.Printf("⚠️ Peer %s returned 0 blocks\n", peerID[:8])
 				continue
 			}
 
-			if len(blocks) == 0 {
-				fmt.Printf("⚠️  Peer %s returned no genesis block\n", peerID[:8])
-				continue
-			}
+			fmt.Printf("📡 Trying %d peers for genesis sync...\n", len(peers))
 
 			genesisBlock := blocks[0]
 			fmt.Printf("✅ Received genesis block %s from peer %s\n", genesisBlock.Hash[:8], peerID[:8])
 
-			// Add genesis block to our chain
-			if err := n.blockchain.GetWorldState().AddBlock(genesisBlock); err != nil {
-				fmt.Printf("⚠️  Failed to add genesis block: %v\n", err)
+			// 1. Add to Blockchain (Triggering our new AddBlockUnsafe logic)
+			fmt.Printf("⏳ Adding genesis block to blockchain...\n")
+			addDone := make(chan error, 1)
+			go func() { addDone <- n.blockchain.AddBlock(genesisBlock) }()
+
+			select {
+			case err := <-addDone:
+				if err != nil {
+					fmt.Printf("⚠️  Failed to add genesis block from peer %s: %v\n", peerID[:8], err)
+					existing := n.blockchain.GetGenesisBlock()
+					if existing != nil {
+						fmt.Printf("✅ Genesis block already exists locally (%s), proceeding\n", existing.Hash[:8])
+					} else {
+						continue
+					}
+				}
+			case <-time.After(10 * time.Second):
+				fmt.Printf("⚠️ AddBlock timed out for peer %s, checking local state...\n", peerID[:8])
+				existing := n.blockchain.GetGenesisBlock()
+				if existing != nil {
+					fmt.Printf("✅ Genesis block exists locally despite timeout, proceeding\n")
+				} else {
+					continue
+				}
+			}
+
+			// 2. FORCE VALIDATOR REGISTRATION (Fixes "Signature Mismatch")
+			validators := n.blockchain.GetActiveValidators()
+			if len(validators) == 0 {
+				fmt.Printf("⚠️  Genesis synced but state empty. Retrying...\n")
 				continue
 			}
 
-			fmt.Printf("✅ Genesis block synced successfully!\n")
+			if n.consensusEngine != nil {
+				fmt.Printf("🔄 Force-registering %d genesis validators...\n", len(validators))
+				for _, v := range validators {
+					n.consensusEngine.RegisterDiscoveredValidator(v)
+				}
+			}
+
+			// Force re-initialize the validator set from worldstate
+			if err := n.consensusEngine.ReinitializeValidatorSet(); err != nil {
+				fmt.Printf("⚠️ Failed to reinitialize validator set: %v\n", err)
+			} else {
+				fmt.Printf("✅ Validator set reinitialized after genesis sync\n")
+			}
+			fmt.Printf("✅ Genesis sync complete! (Validators: %d)\n", len(validators))
 			return nil
 		}
-
-		// Didn't work, wait and retry
-		if attempt < maxRetries {
-			fmt.Printf("⏳ Sync failed, waiting %v before retry...\n", retryDelay)
-			time.Sleep(retryDelay)
-		}
+		time.Sleep(retryDelay)
 	}
 
-	return fmt.Errorf("failed to sync genesis after %d attempts", maxRetries)
+	return fmt.Errorf("failed to sync genesis")
 }
 
 func (n *Node) registerAsValidator() error {
@@ -1368,8 +1386,6 @@ func (n *Node) IsHealthy() bool {
 	return isHealthy
 }
 
-// P2P-specific Methods
-
 func (n *Node) GetP2PStats() map[string]interface{} {
 	if n.p2pNetwork != nil {
 		return n.p2pNetwork.GetNetworkStats()
@@ -1405,8 +1421,6 @@ func (n *Node) ForceP2PSync() error {
 	return n.SyncWithPeers()
 }
 
-// processP2PMessageBus handles requests from P2P MessageBus
-// processP2PMessageBus handles requests from P2P MessageBus
 func (n *Node) processP2PMessageBus() {
 	if n.p2pNetwork == nil {
 		return
@@ -1414,20 +1428,42 @@ func (n *Node) processP2PMessageBus() {
 
 	messageBus := n.p2pNetwork.GetMessageBus()
 	if messageBus == nil {
-		log.Println("⚠️ P2P MessageBus not available")
 		return
 	}
 
 	log.Println("📬 P2P MessageBus processor started")
 
 	for msg := range messageBus {
-		// Check the type by casting to the internal type value
-		data, ok := msg.Data.(map[string]int64)
-		if ok && data != nil {
-			// This is a block range request
+		switch data := msg.Data.(type) {
+
+		// Handle Block Range Requests
+		case map[string]int64:
 			n.handleGetBlocksFromHeight(msg)
-		} else {
-			log.Printf("⚠️ Unknown MessageBus message")
+
+		// Handle String messages (Heartbeats/Status) - Silence the warning
+		case string:
+			// Do nothing, just consume the message
+
+			// Unknown types
+			// Handle ValidatorAnnouncement
+		case *core.Validator:
+			if n.consensusEngine != nil {
+				if err := n.consensusEngine.RegisterDiscoveredValidator(data); err != nil {
+					log.Printf("⚠️ Failed to register discovered validator: %v", err)
+				}
+			}
+
+		// Handle ValidatorSync (slice of validators)
+		case []*core.Validator:
+			if n.consensusEngine != nil {
+				if err := n.consensusEngine.SyncValidators(data); err != nil {
+					log.Printf("⚠️ Failed to sync validators: %v", err)
+				}
+			}
+
+		// Unknown types
+		default:
+			log.Printf("⚠️ Unknown MessageBus message. Type: %T", data)
 			if msg.ResponseCh != nil {
 				close(msg.ResponseCh)
 			}

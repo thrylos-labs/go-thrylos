@@ -4,7 +4,10 @@ package pos
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
@@ -114,60 +117,77 @@ func (ce *ConsensusEngine) signAttestation(attestation *types.Attestation) ([]by
 // BLOCK PROPOSAL SIGNATURES
 // =============================================================================
 
+// After (consensus/pos/consensus.go)
 func (ce *ConsensusEngine) computeProposalHash(proposal *BlockProposal) ([]byte, error) {
 	var buf bytes.Buffer
 
+	// 1. Domain Tag (ensures proposals can't be reused for other message types)
 	buf.WriteString(DomainProposal)
-	buf.WriteString(ce.config.Network.ChainID)
 
-	buf.WriteString(proposal.Block.Hash)
-	buf.WriteString(proposal.Proposer)
+	// 2. ChainID (Normalize to lowercase string)
+	chainID := strings.ToLower(ce.config.Network.ChainID)
+	binary.Write(&buf, binary.BigEndian, uint32(len(chainID)))
+	buf.WriteString(chainID)
 
-	if err := binary.Write(&buf, binary.BigEndian, proposal.Slot); err != nil {
-		return nil, err
+	// 3. Block Hash - Convert hex string to RAW BYTES
+	// This ensures "0xABC" and "abc" result in the same 32 bytes
+	cleanBlockHash := strings.TrimPrefix(proposal.Block.Hash, "0x")
+	blockHashBytes, err := hex.DecodeString(cleanBlockHash)
+	if err != nil {
+		return nil, fmt.Errorf("invalid block hash hex: %v", err)
 	}
-	if err := binary.Write(&buf, binary.BigEndian, proposal.Epoch); err != nil {
-		return nil, err
+	buf.Write(blockHashBytes)
+
+	// 4. Proposer Address - Convert hex string to RAW BYTES (20 bytes)
+	cleanProposer := strings.TrimPrefix(proposal.Proposer, "0x")
+	proposerBytes, err := hex.DecodeString(cleanProposer)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proposer hex: %v", err)
 	}
+	buf.Write(proposerBytes)
+
+	// 5. Fixed-size fields
+	binary.Write(&buf, binary.BigEndian, proposal.Slot)
+	binary.Write(&buf, binary.BigEndian, proposal.Epoch)
 
 	return hash.Keccak256(buf.Bytes()), nil
-
 }
 
 func (ce *ConsensusEngine) verifyProposalSignature(proposal *BlockProposal) error {
-	validator, err := ce.worldState.GetValidator(proposal.Proposer)
+	addr := strings.ToLower(strings.TrimPrefix(proposal.Proposer, "0x"))
+	lookupKey := "0x" + addr
+
+	validator, err := ce.worldState.GetValidator(lookupKey)
 	if err != nil {
-		return fmt.Errorf("proposer not found: %v", err)
+		return fmt.Errorf("proposer %s not found in state: %v", lookupKey, err)
 	}
 
+	// ADD THIS:
+	log.Printf("🔍 Verifying signature for %s, pubkey=%x", lookupKey, validator.Pubkey)
+
+	// 2. Convert stored bytes back to a PublicKey object
 	pubKey, err := crypto.NewPublicKeyFromBytes(validator.Pubkey)
 	if err != nil {
-		return fmt.Errorf("invalid public key bytes (len=%d): %v", len(validator.Pubkey), err)
+		return fmt.Errorf("invalid stored public key: %v", err)
 	}
 
-	hash, err := ce.computeProposalHash(proposal)
+	// 3. Compute the hash using the RAW BYTE logic from Step 1
+	msgHash, err := ce.computeProposalHash(proposal)
 	if err != nil {
 		return err
 	}
 
-	if len(proposal.Signature) == 0 {
-		return fmt.Errorf("missing signature")
-	}
-
+	// ADD THIS:
+	log.Printf("🔍 VERIFY hash=%x proposer=%s slot=%d blockHash=%s",
+		msgHash, proposal.Proposer, proposal.Slot, proposal.Block.Hash)
+	// 4. Decode the signature
 	sig, err := crypto.SignatureFromBytes(proposal.Signature)
 	if err != nil {
-		return fmt.Errorf("invalid signature format: %v", err)
+		return err
 	}
 
-	// ✅ DEBUGGING: Print details on failure
-	if err := pubKey.VerifyHash(hash, sig); err != nil {
-		// Log the ChainID used during verification
-		fmt.Printf("❌ SIG FAIL | Proposer: %s | ChainID: %s | PubKeyLen: %d\n",
-			proposal.Proposer, ce.config.Network.ChainID, len(validator.Pubkey))
-		return fmt.Errorf("proposal signature verification failed: %v", err)
-	}
-
-	return nil
+	// 5. Verify (uses the X/Y coordinate comparison we fixed earlier)
+	return pubKey.VerifyHash(msgHash, sig)
 }
 
 func (ce *ConsensusEngine) signBlockProposal(proposal *BlockProposal) error {
@@ -176,7 +196,10 @@ func (ce *ConsensusEngine) signBlockProposal(proposal *BlockProposal) error {
 		return err
 	}
 
-	// [FIX L-02] Use SignHash
+	// ADD THIS:
+	log.Printf("🔍 SIGN hash=%x proposer=%s slot=%d blockHash=%s",
+		hash, proposal.Proposer, proposal.Slot, proposal.Block.Hash)
+
 	signature, err := ce.nodePrivateKey.SignHash(hash)
 	if err != nil {
 		return fmt.Errorf("signing failed: %v", err)

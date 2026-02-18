@@ -209,7 +209,8 @@ type Manager struct {
 	// Synchronization
 	mu sync.RWMutex
 
-	validator *MessageValidator
+	validator     *MessageValidator
+	ValidatorChan chan *core.Validator
 }
 
 // ConnectionState tracks the state of peer connections
@@ -322,6 +323,7 @@ func NewManager(config *Config) (*Manager, error) {
 		connectionStates:    make(map[peer.ID]*ConnectionState),
 		metrics:             &NetworkMetrics{},
 		validator:           validator, // ADD THIS LINE
+		ValidatorChan:       make(chan *core.Validator, 100),
 	}
 
 	return manager, nil

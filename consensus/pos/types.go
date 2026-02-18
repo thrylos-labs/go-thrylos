@@ -128,6 +128,9 @@ type ConsensusEngine struct {
 	timestampValidator *TimestampValidator
 
 	lastAttestedEpoch uint64
+
+	validatorsSynced bool // true after first quorum + propagation delay
+
 }
 
 // ForkChoice implements fork choice with memory management

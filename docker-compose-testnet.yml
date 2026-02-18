@@ -7,6 +7,7 @@ services:
     hostname: node-1
     environment:
       - NODE_ID=1
+      - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
       - P2P_PORT=9000
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
@@ -34,6 +35,7 @@ services:
     hostname: node-2
     environment:
       - NODE_ID=2
+      - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
       - P2P_PORT=9000
       - DATA_DIR=/app/data
       - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000
@@ -65,6 +67,7 @@ services:
     hostname: node-3
     environment:
       - NODE_ID=3
+      - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
       - P2P_PORT=9000
       - DATA_DIR=/app/data
       - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000,/ip4/172.25.0.11/tcp/9000
@@ -97,6 +100,7 @@ services:
     hostname: node-4
     environment:
       - NODE_ID=4
+      - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
       - P2P_PORT=9000
       - DATA_DIR=/app/data
       - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000

@@ -348,6 +348,7 @@ func (m *Manager) readPubSubMessages(topicName string, sub *pubsub.Subscription)
 
 		// NEW: Handle validator announcements
 		case TopicValidators:
+			stdlog.Printf("🔍 DEBUG: Raw validator message received, len=%d", len(msg.Data))
 			var validator core.Validator
 			if err := json.Unmarshal(msg.Data, &validator); err != nil {
 				stdlog.Printf("Failed to unmarshal validator: %v", err)
@@ -355,11 +356,11 @@ func (m *Manager) readPubSubMessages(topicName string, sub *pubsub.Subscription)
 			}
 			stdlog.Printf("📢 Received validator announcement: %s from peer %s",
 				validator.Address, msg.ReceivedFrom)
-
-			m.BlockchainProcessCh <- Message{
-				Type:       ValidatorAnnouncement,
-				Data:       &validator,
-				FromPeerID: msg.ReceivedFrom,
+			select {
+			case m.ValidatorChan <- &validator:
+				stdlog.Printf("✅ Queued validator %s to ValidatorChan", validator.Address)
+			default:
+				stdlog.Printf("⚠️ ValidatorChan full, dropping announcement from %s", validator.Address)
 			}
 
 		default:

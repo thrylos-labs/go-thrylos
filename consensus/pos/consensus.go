@@ -4,6 +4,7 @@
 package pos
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -12,6 +13,8 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
@@ -28,7 +31,6 @@ import (
 	"github.com/thrylos-labs/go-thrylos/types"
 )
 
-// NewConsensusEngine creates a new PoS consensus engine
 // NewConsensusEngine creates a new PoS consensus engine
 func NewConsensusEngine(
 	cfg *config.Config,
@@ -218,7 +220,6 @@ func (ce *ConsensusEngine) ValidateBlock(block *core.Block) error {
 }
 
 // processSlot handles consensus for a single slot
-// processSlot handles consensus for a single slot
 func (ce *ConsensusEngine) processSlot() {
 	ce.mu.Lock()
 
@@ -230,13 +231,35 @@ func (ce *ConsensusEngine) processSlot() {
 		}
 	}
 
+	// ✅ NEW: Warm-up Guard
+	// Prevents nodes from starting consensus prematurely with an incomplete validator list.
+	// Without this, Node A (knowing only itself) would pick itself for Slot 1,
+	// while Node B (knowing only itself) would also pick itself, causing an immediate fork.
+	expectedValidators := 4
+	if ce.validatorSet.Size() < expectedValidators {
+		log.Printf("⏳ Waiting for validators to join... (Have %d, Need %d)",
+			ce.validatorSet.Size(), expectedValidators)
+		ce.mu.Unlock() // Must unlock before returning
+		return
+	}
+
+	// ✅ NEW: One-time propagation delay after quorum is first reached
+	// Gives time for all nodes to receive each other's validator announcements
+	// before anyone starts proposing blocks and requiring signature verification.
+	if !ce.validatorsSynced {
+		ce.validatorsSynced = true
+		ce.mu.Unlock()
+		log.Printf("✅ Validator quorum reached, waiting 15s for announcements to propagate...")
+		time.Sleep(15 * time.Second)
+		ce.mu.Lock()
+	}
+
 	// Process completed unbondings
 	if err := ce.worldState.ProcessUnbondingQueue(); err != nil {
 		log.Printf("⚠️ Failed to process unbonding queue: %v", err)
 	}
 
 	// ✅ FIX 2: Grace Period for Activity Tracking
-	// Prevents jailing for "Withholding" while Docker nodes are still handshaking.
 	if ce.currentSlot > 0 && ce.worldState.GetHeight() >= 100 {
 		previousSlot := ce.currentSlot
 		expectedProposer, err := ce.getSlotProposer(previousSlot)
@@ -263,7 +286,6 @@ func (ce *ConsensusEngine) processSlot() {
 	if !isActive {
 		activeCount := len(ce.validatorSet.GetActiveValidators())
 		if activeCount == 0 {
-			// 🚨 EMERGENCY RECOVERY: Allow inactive proposer if entire network is jailed
 			log.Printf("🚨 EMERGENCY: Proposer %s is INACTIVE, but proceeding (Recovery Mode)", proposer)
 		} else {
 			log.Printf("⚠️ Proposer %s is not active, skipping slot", proposer)
@@ -280,8 +302,6 @@ func (ce *ConsensusEngine) processSlot() {
 	log.Printf("🎲 Slot %d: Proposer=%s, Match=%v", currentSlot, proposer[:10], isMyTurn)
 
 	// ✅ FIX 3: Unlock before P2P Network Operations
-	// ce.proposeBlock() performs GossipSub broadcasts. Holding the lock during
-	// network I/O often causes deadlocks when incoming messages try to acquire the lock.
 	ce.mu.Unlock()
 
 	if isMyTurn {
@@ -290,7 +310,6 @@ func (ce *ConsensusEngine) processSlot() {
 		if err := ce.proposeBlock(); err != nil {
 			fmt.Printf("❌ BLOCK PROPOSAL FAILED: %v\n", err)
 
-			// Re-acquire lock to update metrics
 			if currentHeight >= 100 {
 				ce.mu.Lock()
 				ce.blocksMissed++
@@ -318,14 +337,13 @@ func (ce *ConsensusEngine) processSlot() {
 		}
 	}
 
-	// Copy attestations for async processing
 	attestationsCopy := make(map[string]*types.Attestation)
 	for k, v := range ce.attestations {
 		attestationsCopy[k] = v
 	}
 	ce.mu.Unlock()
 
-	// Process attestations and fork choice ASYNC to keep the clock ticking
+	// Process attestations and fork choice ASYNC
 	go func() {
 		ce.processAttestationsAsync(attestationsCopy)
 		ce.updateForkChoice()
@@ -510,8 +528,9 @@ func (ce *ConsensusEngine) proposeBlock() error {
 
 	// Prepare proposal for P2P
 	proposal := &BlockProposal{
-		Block:    result.Block,
-		Proposer: ce.nodeAddress,
+		Block: result.Block,
+		// Standardize proposer string to lowercase hex without 0x
+		Proposer: "0x" + strings.ToLower(strings.TrimPrefix(ce.nodeAddress, "0x")),
 		Slot:     ce.currentSlot,
 		Epoch:    ce.currentEpoch,
 	}
@@ -519,6 +538,9 @@ func (ce *ConsensusEngine) proposeBlock() error {
 	if err := ce.signBlockProposal(proposal); err != nil {
 		return fmt.Errorf("failed to sign block proposal: %v", err)
 	}
+
+	// Store proposal signature on block for P2P transmission
+	result.Block.ProposalSignature = proposal.Signature
 
 	// ✅ FIX: Use a small timeout instead of dropping immediately
 	// This allows the P2P layer a moment to catch up if it's busy.
@@ -999,6 +1021,8 @@ func (ce *ConsensusEngine) signBlock(block *core.Block) error {
 		return fmt.Errorf("failed to sign block: %w", err)
 	}
 
+	log.Printf("🔍 Signing block with pubkey=%x", ce.nodePrivateKey.PublicKey().Bytes())
+
 	// Assumes core.Block has `Signature []byte`
 	block.Signature = sig.Bytes()
 	return nil
@@ -1006,29 +1030,19 @@ func (ce *ConsensusEngine) signBlock(block *core.Block) error {
 
 // initializeValidatorSet initializes the validator set from world state
 func (ce *ConsensusEngine) initializeValidatorSet() error {
-	activeValidators := ce.worldState.GetActiveValidators()
+	candidates := ce.worldState.GetActiveValidators()
 
-	// ✅ FIX: If no active validators are found (Genesis/Startup),
-	// fallback to ALL validators to kickstart the chain.
-	if len(activeValidators) == 0 {
-		log.Printf("⚠️ No active validators found in WorldState. Falling back to all registered validators.")
-		activeValidators = ce.worldState.GetAllValidators()
+	// CRITICAL: Sort candidates by address to ensure deterministic selection across nodes
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Address < candidates[j].Address
+	})
+
+	ce.validatorSet.Clear()
+	for _, v := range candidates {
+		ce.validatorSet.AddValidator(v)
 	}
 
-	// ✅ FIX: Pass an integer to NewSet.
-	// Using 10 or the length of validators is safe here.
-	ce.validatorSet = validator.NewSet(len(activeValidators) + 10)
-
-	for _, v := range activeValidators {
-		if ce.slashingManager.IsValidatorActive(v.Address) {
-			if err := ce.validatorSet.AddValidator(v); err != nil {
-				log.Printf("⚠️ Failed to add validator %s to set: %v", v.Address, err)
-				continue
-			}
-		}
-	}
-
-	log.Printf("✅ Validator set initialized with %d candidates", ce.validatorSet.Size())
+	log.Printf("✅ Validator set initialized with %d candidates (sorted)", ce.validatorSet.Size())
 	return nil
 }
 
@@ -1479,6 +1493,12 @@ func (bv *BlockValidator) validateVRFProof(block *core.Block) error {
 	return nil
 }
 
+func (ce *ConsensusEngine) ReinitializeValidatorSet() error {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+	return ce.initializeValidatorSet()
+}
+
 // deriveVRFPublicKeyFromSecp256k1 creates a deterministic Ed25519 public key from secp256k1
 // This is a bridge function until validators register proper Ed25519 VRF keys
 func deriveVRFPublicKeyFromSecp256k1(secp256k1PubKey []byte) []byte {
@@ -1629,8 +1649,15 @@ func (ce *ConsensusEngine) RegisterDiscoveredValidator(validator *core.Validator
 	// Check if already registered
 	existing, err := ce.worldState.GetValidator(validator.Address)
 	if err == nil && existing != nil {
-		// Already registered - update if needed
-		log.Printf("✅ Validator %s already registered, skipping", validator.Address)
+		// Update pubkey if we now have one and didn't before
+		if len(validator.Pubkey) > 0 && !bytes.Equal(existing.Pubkey, validator.Pubkey) {
+			existing.Pubkey = validator.Pubkey
+			if err := ce.worldState.UpdateValidator(existing); err != nil {
+				log.Printf("⚠️ Failed to update validator pubkey: %v", err)
+			} else {
+				log.Printf("✅ Updated pubkey for validator %s", validator.Address)
+			}
+		}
 		return nil
 	}
 

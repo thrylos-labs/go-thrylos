@@ -12,7 +12,6 @@ import (
 )
 
 // P2PNetwork interface for the network layer
-// This matches your network.P2PNetwork structure
 type P2PNetwork interface {
 	// Outgoing: Broadcast to network
 	BroadcastBlock(block *core.Block) error
@@ -23,6 +22,7 @@ type P2PNetwork interface {
 	GetBlockChannel() <-chan *core.Block
 	GetAttestationChannel() <-chan interface{}
 	GetVoteChannel() <-chan interface{}
+	GetValidatorChannel() <-chan *core.Validator
 
 	// Network info
 	GetConnectedPeers() int
@@ -95,9 +95,9 @@ func (cb *ConsensusBridge) forwardNetworkToConsensus() {
 			blockProposal := &BlockProposal{
 				Block:     block,
 				Proposer:  block.Header.Validator,
-				Slot:      uint64(block.Header.Index),
-				Epoch:     uint64(block.Header.Index) / 32,
-				Signature: block.Signature, // ✅ FIX: Was nil, should copy from block
+				Slot:      block.Header.Slot,  // ← use the actual slot from the header
+				Epoch:     block.Header.Epoch, // ← use the actual epoch from the header
+				Signature: block.ProposalSignature,
 			}
 			cb.consensus.receiveChan <- blockProposal
 
@@ -108,6 +108,14 @@ func (cb *ConsensusBridge) forwardNetworkToConsensus() {
 				log.Printf("✅ Forwarded attestation from %s to consensus", att.ValidatorAddress[:min(8, len(att.ValidatorAddress))])
 			} else {
 				log.Printf("⚠️ Received non-Attestation type from network: %T", attestation)
+			}
+
+			// Forward validator announcements
+		case validator := <-cb.network.GetValidatorChannel():
+			if err := cb.consensus.RegisterDiscoveredValidator(validator); err != nil {
+				log.Printf("⚠️ Failed to register validator %s: %v", validator.Address, err)
+			} else {
+				log.Printf("✅ Registered validator %s via P2P announcement", validator.Address)
 			}
 
 		// Forward votes

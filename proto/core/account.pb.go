@@ -9,11 +9,12 @@
 package core
 
 import (
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -386,13 +387,14 @@ func (x *Transaction) GetChainId() string {
 }
 
 type Block struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Header        *BlockHeader           `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
-	Transactions  []*Transaction         `protobuf:"bytes,2,rep,name=transactions,proto3" json:"transactions,omitempty"`
-	Hash          string                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`
-	Signature     []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Header            *BlockHeader           `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	Transactions      []*Transaction         `protobuf:"bytes,2,rep,name=transactions,proto3" json:"transactions,omitempty"`
+	Hash              string                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`
+	Signature         []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
+	ProposalSignature []byte                 `protobuf:"bytes,5,opt,name=proposal_signature,json=proposalSignature,proto3" json:"proposal_signature,omitempty"` // ADD THIS
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Block) Reset() {
@@ -449,6 +451,13 @@ func (x *Block) GetHash() string {
 func (x *Block) GetSignature() []byte {
 	if x != nil {
 		return x.Signature
+	}
+	return nil
+}
+
+func (x *Block) GetProposalSignature() []byte {
+	if x != nil {
+		return x.ProposalSignature
 	}
 	return nil
 }
@@ -859,12 +868,13 @@ const file_proto_account_proto_rawDesc = "" +
 	"\ttimestamp\x18\f \x01(\x03R\ttimestamp\x12\x1f\n" +
 	"\vfrom_pubkey\x18\r \x01(\fR\n" +
 	"fromPubkey\x12\x19\n" +
-	"\bchain_id\x18\x0e \x01(\tR\achainId\"\xab\x01\n" +
+	"\bchain_id\x18\x0e \x01(\tR\achainId\"\xda\x01\n" +
 	"\x05Block\x121\n" +
 	"\x06header\x18\x01 \x01(\v2\x19.thrylos.core.BlockHeaderR\x06header\x12=\n" +
 	"\ftransactions\x18\x02 \x03(\v2\x19.thrylos.core.TransactionR\ftransactions\x12\x12\n" +
 	"\x04hash\x18\x03 \x01(\tR\x04hash\x12\x1c\n" +
-	"\tsignature\x18\x04 \x01(\fR\tsignature\"\x92\x03\n" +
+	"\tsignature\x18\x04 \x01(\fR\tsignature\x12-\n" +
+	"\x12proposal_signature\x18\x05 \x01(\fR\x11proposalSignature\"\x92\x03\n" +
 	"\vBlockHeader\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x03R\x05index\x12\x1b\n" +
 	"\tprev_hash\x18\x02 \x01(\tR\bprevHash\x12\x1c\n" +

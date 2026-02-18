@@ -280,74 +280,105 @@ func (bc *Blockchain) AddBlock(block *core.Block) error {
 	return bc.addBlockUnsafe(block)
 }
 
+// core/chain/blockchain.go
+
 // addBlockUnsafe adds a block without locking (caller must hold lock)
 func (bc *Blockchain) addBlockUnsafe(block *core.Block) error {
 	if block == nil {
 		return fmt.Errorf("block cannot be nil")
 	}
 
-	// ✅ FIX: Genesis Idempotency Check
-	// If receiving Genesis block, check if we already have it to prevent "index 0 != expected 1" errors
+	// ✅ FIX: Fetch current tip from WorldState (safest method)
+	// This fixes the "bc.CurrentBlock undefined" error
+	currentTip := bc.worldState.GetCurrentBlock()
+
+	// ---------------------------------------------------------
+	// ✅ FIX 1: IDEMPOTENCY CHECK
+	// ---------------------------------------------------------
+	// If we have a tip and the new block is older/equal, check for duplicates.
+	if currentTip != nil && block.Header.Index <= currentTip.Header.Index {
+		// Retrieve the block we have at this height
+		existingBlock, err := bc.GetBlockByIndex(block.Header.Index)
+		if err == nil && existingBlock != nil {
+			if existingBlock.Hash == block.Hash {
+				// We have this EXACT block. Return success.
+				return nil
+			}
+			// Fork detected
+			return fmt.Errorf("fork at height %d: have %s, received %s",
+				block.Header.Index, existingBlock.Hash, block.Hash)
+		}
+	}
+
+	// ---------------------------------------------------------
+	// ✅ FIX 2: GENESIS HANDLING
+	// ---------------------------------------------------------
 	if block.Header.Index == 0 {
-		currentGenesis := bc.GetGenesisBlock()
+		currentGenesis := bc.getGenesisBlockUnsafe()
+
+		// Case A: We already have a genesis block
 		if currentGenesis != nil {
 			if currentGenesis.Hash == block.Hash {
-				// We already have this exact genesis block. Treat as success.
 				return nil
 			}
 			return fmt.Errorf("CRITICAL GENESIS MISMATCH: Local %s vs Remote %s", currentGenesis.Hash, block.Hash)
 		}
+
+		// Case B: Initial Sync
+		fmt.Printf("🌱 Accepting New Genesis Block via Sync (Hash: %s)\n", block.Hash)
+
+		if err := bc.worldState.AddBlock(block); err != nil {
+			return fmt.Errorf("world state genesis addition failed: %v", err)
+		}
+
+		// Force metrics update
+		bc.totalBlocks = 1
+		return nil
 	}
 
-	// Validate block structure
+	// ---------------------------------------------------------------
+	// Standard Validation (Block 1+)
+	// ---------------------------------------------------------------
+
 	if err := bc.validateBlockStructure(block); err != nil {
 		return fmt.Errorf("block structure validation failed: %v", err)
 	}
 
-	// Validate block with consensus engine if available
 	if bc.consensusEngine != nil {
 		if err := bc.consensusEngine.ValidateBlock(block); err != nil {
 			return fmt.Errorf("consensus validation failed: %v", err)
 		}
 	}
 
-	// Check if block already exists in WorldState
+	// Double-check WorldState (Redundant but safe)
 	if existingBlock := bc.worldState.GetCurrentBlock(); existingBlock != nil && existingBlock.Hash == block.Hash {
 		return fmt.Errorf("block %s already exists", block.Hash)
 	}
 
-	// Let WorldState handle the block addition (includes transaction execution)
+	// Execute and Add
 	if err := bc.worldState.AddBlock(block); err != nil {
 		return fmt.Errorf("world state block addition failed: %v", err)
 	}
 
-	// ✅ EXISTING: Process validator unbondings
+	// Post-processing
 	if bc.validatorManager != nil {
 		if err := bc.validatorManager.ProcessUnbondings(); err != nil {
-			// Log warning but don't fail block addition
-			fmt.Printf("Warning: failed to process validator unbondings at block %d: %v\n", block.Header.Index, err)
+			fmt.Printf("Warning: failed to process validator unbondings: %v\n", err)
 		}
 	}
 
-	// ✅ NEW: Process staking unbonding queue (delegator unstaking)
 	if err := bc.worldState.ProcessUnbondingQueue(); err != nil {
-		// Log warning but don't fail block addition
-		// This is defensive - unbonding processing shouldn't block chain progress
-		log.Printf("⚠️ Warning: Failed to process staking unbonding queue at block %d: %v", block.Header.Index, err)
+		log.Printf("⚠️ Warning: Failed to process staking unbonding queue: %v", err)
 	}
 
-	// Update blockchain metrics
+	// Metrics
 	bc.totalBlocks++
 	bc.updateAverageBlockTime(block)
-
-	// Count transactions
 	bc.totalTransactions += int64(len(block.Transactions))
 
-	// Send block added event
 	select {
 	case bc.blockAddedChan <- block:
 	default:
-		// Channel full, skip event
 	}
 
 	return nil
@@ -627,6 +658,11 @@ func (bc *Blockchain) GetHeight() int64 {
 func (bc *Blockchain) GetGenesisBlock() *core.Block {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
+	return bc.genesisBlock
+}
+
+// getGenesisBlockUnsafe returns genesis block without locking (caller must hold lock)
+func (bc *Blockchain) getGenesisBlockUnsafe() *core.Block {
 	return bc.genesisBlock
 }
 

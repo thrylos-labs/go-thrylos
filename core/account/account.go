@@ -834,11 +834,24 @@ func max(a, b int64) int64 {
 
 // Wrappers for crypto address functions
 func GenerateAddress(pubKey crypto.PublicKey) (string, error) {
+	if pubKey == nil {
+		return "", fmt.Errorf("cannot generate address from nil public key")
+	}
+
+	// Explicitly derive the address to ensure standard Ethereum compatibility.
+	// Standard Ethereum addresses are Keccak256(uncompressed_pubkey[1:])[12:]
 	addr := pubKey.Address()
 	if addr == nil || addr.IsZero() {
-		return "", fmt.Errorf("failed to generate address: address is nil or zero")
+		return "", fmt.Errorf("failed to generate address: derived address is nil or zero")
 	}
-	return addr.String(), nil
+
+	// Verify the address string has the 0x prefix and correct length
+	addrStr := addr.String()
+	if len(addrStr) != 42 {
+		return "", fmt.Errorf("invalid address length derived: %s", addrStr)
+	}
+
+	return addrStr, nil
 }
 
 func ValidateAddress(addr string) error {

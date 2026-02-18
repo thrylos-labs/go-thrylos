@@ -229,31 +229,19 @@ func (p *PublicKeyImpl) Unmarshal(data []byte) error {
 }
 
 // Equal checks if two public keys are equal
+// After (crypto/public_key.go)
 func (p *PublicKeyImpl) Equal(other PublicKey) bool {
 	if other == nil {
 		return p.pubKey == nil
 	}
-
-	// Get bytes from both keys (using compressed format for comparison)
-	pBytes := p.Bytes()
-	oBytes := other.Bytes()
-
-	if pBytes == nil || oBytes == nil {
-		return pBytes == nil && oBytes == nil
-	}
-
-	if len(pBytes) != len(oBytes) {
+	otherImpl, ok := other.(*PublicKeyImpl)
+	if !ok || p.pubKey == nil || otherImpl.pubKey == nil {
 		return false
 	}
 
-	// Byte-by-byte comparison
-	for i := 0; i < len(pBytes); i++ {
-		if pBytes[i] != oBytes[i] {
-			return false
-		}
-	}
-
-	return true
+	// Compare mathematical points, NOT raw bytes
+	return p.pubKey.X.Cmp(otherImpl.pubKey.X) == 0 &&
+		p.pubKey.Y.Cmp(otherImpl.pubKey.Y) == 0
 }
 
 // IsOnCurve verifies that the public key point is on the secp256k1 curve

@@ -399,28 +399,42 @@ func (bp *BlockProposer) constructBlock(transactions []*core.Transaction, slot u
 	currentBlock := bp.worldState.GetCurrentBlock()
 	var prevHash string
 	var blockIndex int64
+	var prevTimestamp int64
 
 	if currentBlock != nil {
 		prevHash = currentBlock.Hash
 		blockIndex = currentBlock.Header.Index + 1
+		prevTimestamp = currentBlock.Header.Timestamp
 	} else {
 		prevHash = ""
 		blockIndex = 0
+		prevTimestamp = 0
 	}
 
 	totalGasUsed, err := bp.calculateTotalGas(transactions)
 	if err != nil {
-		return nil, err // or return nil, err depending on function signature
+		return nil, err
 	}
-	// totalFees is a string (BigInt)
+
 	totalFees := bp.calculateTotalFees(transactions)
 	merkleRoot := bp.calculateMerkleRoot(transactions)
 
-	// ✅ FIX: Use string directly (since BlockHeader is updated)
-	// No need to convert to Int64() anymore!
+	// 1. Get current system time
+	now := time.Now().Unix()
+
+	// 2. FORCE INCREMENT: If the clock is at or behind the parent, push it forward.
+	if now <= prevTimestamp {
+		now = prevTimestamp + 1
+	}
+
+	// ✅ DEBUG LOG: This will prove the logic is working in your terminal
+	if now == prevTimestamp+1 && time.Now().Unix() <= prevTimestamp {
+		log.Printf("⏰ TIMESTAMP GUARD TRIGGERED: Parent=%d, New=%d", prevTimestamp, now)
+	}
+
 	header := &core.BlockHeader{
 		Index:      blockIndex,
-		Timestamp:  time.Now().Unix(),
+		Timestamp:  now,
 		PrevHash:   prevHash,
 		Validator:  bp.nodeAddress,
 		TxRoot:     merkleRoot,
@@ -429,7 +443,7 @@ func (bp *BlockProposer) constructBlock(transactions []*core.Transaction, slot u
 		GasLimit:   bp.maxBlockSize,
 		Slot:       slot,
 		Epoch:      epoch,
-		TotalFees:  totalFees, // ✅ Passed as string (BigInt)
+		TotalFees:  totalFees,
 		MerkleRoot: merkleRoot,
 	}
 
@@ -439,7 +453,6 @@ func (bp *BlockProposer) constructBlock(transactions []*core.Transaction, slot u
 	}
 
 	block.Hash = bp.calculateBlockHash(block)
-
 	return block, nil
 }
 

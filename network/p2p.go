@@ -448,6 +448,10 @@ func (n *P2PNetwork) DisconnectPeer(peerID string) error {
 	return n.manager.DisconnectPeer(peerID)
 }
 
+func (n *P2PNetwork) GetValidatorChannel() <-chan *core.Validator {
+	return n.manager.ValidatorChan
+}
+
 // ============================================================================
 // VALIDATOR DISCOVERY
 // ============================================================================

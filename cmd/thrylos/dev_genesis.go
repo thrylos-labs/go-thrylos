@@ -8,9 +8,6 @@ import (
 	"fmt"
 	"time"
 
-	// ✅ Import for Decompression (Fixes Signature Mismatch)
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
-
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
@@ -22,7 +19,7 @@ import (
 func getNodeSpecificPrivateKey(nodeID int) (crypto.PrivateKey, error) {
 	seedStr := fmt.Sprintf("thrylos-development-node-key-%d-2024", nodeID)
 	hash := sha256.Sum256([]byte(seedStr))
-	// Internal wrapper usage
+	// Use internal wrapper
 	return crypto.NewPrivateKeyFromBytes(hash[:])
 }
 
@@ -49,32 +46,25 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 			return nil, nil, nil, fmt.Errorf("failed to derive dev private key for node %d: %w", nodeID, err)
 		}
 
-		// --- FIX 1: KEY DECOMPRESSION (Solves Signature Mismatch) ---
+		// --- STEP 1: GET COMPRESSED BYTES (33 BYTES) ---
+		pubKey := priv.PublicKey()
+		pubBytes := pubKey.Bytes() // This is 33 bytes per your crypto implementation
 
-		// 1. Get default key bytes (likely 33 bytes compressed)
-		defaultPubBytes := priv.PublicKey().Bytes()
-
-		// 2. Decompress to 65 bytes using go-ethereum
-		// This ensures the key format matches what the consensus engine expects.
-		ecdsaPub, err := ethcrypto.DecompressPubkey(defaultPubBytes)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to decompress pubkey for node %d: %w", nodeID, err)
-		}
-
-		// 3. Serialize back to 65 uncompressed bytes
-		uncompressedPubBytes := ethcrypto.FromECDSAPub(ecdsaPub)
-
-		// -----------------------------------------------------------
-
-		addr, err := account.GenerateAddress(priv.PublicKey())
+		// --- STEP 2: GENERATE ADDRESS ---
+		// Passing the pubKey object is best; it handles internal formatting.
+		addr, err := account.GenerateAddress(pubKey)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to derive address for node %d: %w", nodeID, err)
 		}
 
+		// ✅ DEBUG: Verify alignment
+		// Note: len(pubBytes) should be 33
+		fmt.Printf("🔑 Node %d | PubKeyLen: %d | Address: %s\n", nodeID, len(pubBytes), addr)
+
 		meta := metadata[nodeID]
 		validator := &core.Validator{
 			Address:        addr,
-			Pubkey:         uncompressedPubBytes, // Store the 65-byte version
+			Pubkey:         pubBytes, // Consistently storing 33 bytes now
 			Stake:          "3000000000000000000000",
 			SelfStake:      "3000000000000000000000",
 			DelegatedStake: "0",
@@ -108,11 +98,8 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 
 	nodePrivateKey := allPrivateKeys[nodeID-1]
 
-	// --- FIX 2: STATIC GENESIS ACCOUNT (Solves "Fetching blocks 0 to 0" loop) ---
-	// We force ALL nodes to recognize the FIRST validator (Node 1) as the Genesis Account.
-	// This ensures everyone generates the exact same Genesis Block Hash.
+	// Use Node 1 as the static genesis account to prevent sync forks
 	genesisAccount := allAddresses[0]
-	// -----------------------------------------------------------------------------
 
 	nodeConfig := &node.NodeConfig{
 		Config:            cfg,
@@ -121,7 +108,7 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 		TotalShards:       1,
 		IsValidator:       isValidator,
 		DataDir:           dataDir,
-		GenesisAccount:    genesisAccount, // Static account
+		GenesisAccount:    genesisAccount,
 		GenesisSupply:     cfg.Genesis.TotalGenesis,
 		GenesisValidators: allValidators,
 		EnableP2P:         cfg.P2P.Enabled,
@@ -139,6 +126,5 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 		return nil, fmt.Errorf("failed to start dev node: %w", err)
 	}
 
-	fmt.Printf("✅ Dev node %d started. Genesis Account: %s\n", nodeID, genesisAccount)
 	return n, nil
 }

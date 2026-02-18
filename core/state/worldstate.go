@@ -704,19 +704,23 @@ func (ws *WorldState) GetValidator(address string) (*core.Validator, error) {
 	return validator, nil
 }
 
-// GetActiveValidators returns all active validators
 func (ws *WorldState) GetActiveValidators() []*core.Validator {
 	ws.validatorMu.RLock()
 	defer ws.validatorMu.RUnlock()
 
-	var active []*core.Validator
-	for _, validator := range ws.validators {
-		if validator.Active && !ws.isValidatorJailed(validator) {
-			active = append(active, validator)
+	validators := make([]*core.Validator, 0, len(ws.validators))
+	for _, v := range ws.validators {
+		if v.Active {
+			validators = append(validators, v)
 		}
 	}
 
-	return active
+	// 🔴 CRITICAL FIX: Sort validators to ensure deterministic order across all nodes
+	sort.Slice(validators, func(i, j int) bool {
+		return validators[i].Address < validators[j].Address
+	})
+
+	return validators
 }
 
 // UpdateValidator updates an existing validator

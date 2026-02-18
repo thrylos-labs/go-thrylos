@@ -940,3 +940,22 @@ func GenerateSeedFromBlocks(blockHashes [][]byte, slot uint64) []byte {
 
 	return hash.Keccak256(combined)
 }
+
+// Clear removes all validators and resets the set state
+func (vs *Set) Clear() {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	// Initialize as a map, not a slice
+	vs.validators = make(map[string]*core.Validator)
+
+	// Reset the active list slice
+	vs.activeList = make([]*core.Validator, 0)
+
+	// Reset total stake string
+	vs.totalStake = "0"
+
+	// Optional: If you want a truly fresh start, reset history and multipliers too
+	vs.selectionHistory = make(map[string]*SelectionStats)
+	vs.performanceMultipliers = make(map[string]float64)
+}

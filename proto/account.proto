@@ -50,6 +50,7 @@ message Block {
   repeated Transaction transactions = 2;
   string hash = 3;
   bytes signature = 4;
+  bytes proposal_signature = 5;  // ADD THIS
 }
 
 message BlockHeader {
