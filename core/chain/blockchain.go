@@ -237,7 +237,7 @@ func (bc *Blockchain) InitializeGenesis(genesisAccount string, genesisValidator 
 	// ✅ FIX: Use config timestamp for deterministic genesis
 	genesisTimestamp := bc.config.GenesisTimestamp
 	if genesisTimestamp == 0 {
-		genesisTimestamp = 1770000000 // Fixed fallback for dev
+		genesisTimestamp = time.Now().Unix()
 	}
 
 	// Create genesis block with deterministic timestamp

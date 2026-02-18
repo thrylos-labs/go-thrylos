@@ -413,7 +413,6 @@ func (n *Node) Start() error {
 			time.Sleep(15 * time.Second)
 			log.Println("📡 Attempting genesis sync now that P2P is running...")
 			if err := n.syncGenesisFromNetwork(); err != nil {
-				log.Printf("❌ CRITICAL: Failed to sync genesis: %v", err)
 				return fmt.Errorf("genesis sync failed: %v", err)
 			}
 			log.Println("✅ Genesis synced successfully!")
@@ -446,6 +445,16 @@ func (n *Node) Start() error {
 
 	if err := n.syncManager.Start(); err != nil {
 		return fmt.Errorf("failed to start sync manager: %v", err)
+	}
+
+	// Wait for chain sync AFTER sync manager is running
+	nodeID := os.Getenv("NODE_ID")
+	if nodeID != "1" && nodeID != "" {
+		log.Println("⏳ Waiting for chain sync to complete...")
+		if err := n.waitForChainSync(30 * time.Second); err != nil {
+			log.Printf("⚠️ Chain sync incomplete: %v, proceeding anyway", err)
+		}
+		log.Println("✅ Chain sync complete, ready to produce blocks")
 	}
 
 	// Start background processes
@@ -555,6 +564,28 @@ func (n *Node) Stop() error {
 
 	fmt.Println("✅ Node stopped gracefully")
 	return nil
+}
+
+func (n *Node) waitForChainSync(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastHeight int64
+	stableCount := 0
+
+	for time.Now().Before(deadline) {
+		current := n.blockchain.GetHeight()
+		if current == lastHeight {
+			stableCount++
+			if stableCount >= 3 {
+				log.Printf("✅ Chain stable at height %d", current)
+				return nil
+			}
+		} else {
+			stableCount = 0
+			lastHeight = current
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("timeout waiting for chain sync at height %d", lastHeight)
 }
 
 // SubmitTransaction accepts a transaction from external sources (e.g., wallets via RPC)

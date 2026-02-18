@@ -154,7 +154,7 @@ func (bc *Creator) CreateGenesisBlock(genesisValidator string, timestamp int64) 
 
 	// ✅ FIX: Use fixed timestamp for deterministic genesis in dev
 	if timestamp <= 0 {
-		timestamp = 1770000000 // Fixed epoch for dev network
+		timestamp = time.Now().Unix()
 	}
 
 	header := &core.BlockHeader{
