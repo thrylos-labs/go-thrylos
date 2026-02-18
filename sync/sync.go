@@ -4,6 +4,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -568,4 +569,44 @@ func (sm *SyncManager) IsUpToDate() bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.currentHeight >= sm.targetHeight
+}
+
+func (sm *SyncManager) SyncToNetworkTip() error {
+	sm.mu.RLock()
+	peers := make([]string, 0, len(sm.syncPeers))
+	for peerID := range sm.syncPeers {
+		peers = append(peers, peerID)
+	}
+	sm.mu.RUnlock()
+
+	if len(peers) == 0 {
+		return fmt.Errorf("no peers available")
+	}
+
+	// Find best height across peers
+	var bestHeight int64
+	var bestPeer string
+	for _, peerID := range peers {
+		height, err := sm.p2pNetwork.RequestPeerHeight(peerID)
+		if err != nil {
+			continue
+		}
+		log.Printf("📡 Peer %s is at height %d", peerID[:12], height)
+		if height > bestHeight {
+			bestHeight = height
+			bestPeer = peerID
+		}
+	}
+
+	if bestHeight == 0 || bestPeer == "" {
+		return fmt.Errorf("no peers with blocks to sync from")
+	}
+
+	currentHeight := sm.blockchain.GetHeight()
+	if currentHeight >= bestHeight {
+		return nil // already caught up
+	}
+
+	log.Printf("🔄 Syncing from height %d to %d via peer %s", currentHeight, bestHeight, bestPeer[:12])
+	return sm.synchronizer.SyncToHeight(bestHeight, []string{bestPeer})
 }

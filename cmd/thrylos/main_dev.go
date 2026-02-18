@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
 )
@@ -41,7 +42,7 @@ func main() {
 	cfg.Network.ChainID = "thrylos-devnet-1337"
 
 	// Fixed genesis timestamp for deterministic genesis across all nodes
-	cfg.GenesisTimestamp = 1770000000
+	cfg.GenesisTimestamp = time.Now().Unix()
 
 	// Prepare bootstrap peers
 	var bootstrapPeers []string

@@ -51,6 +51,27 @@ func CanonicalBlockHash(b *core.Block) (string, error) {
 	binary.BigEndian.PutUint64(gasLimitBytes, uint64(h.GasLimit))
 	buf.Write(gasLimitBytes)
 
+	slotBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(slotBytes, h.Slot)
+	buf.Write(slotBytes)
+
+	// Epoch
+	epochBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(epochBytes, h.Epoch)
+	buf.Write(epochBytes)
+
+	// TotalFees
+	buf.WriteString(h.TotalFees)
+
+	// MerkleRoot
+	buf.WriteString(h.MerkleRoot)
+
+	// VRF Output
+	buf.Write(h.VrfOutput)
+
+	// VRF Proof
+	buf.Write(h.VrfProof)
+
 	hashBytes, err := hash.HashData(buf.Bytes())
 	if err != nil {
 		return "", fmt.Errorf("failed to hash block: %w", err)

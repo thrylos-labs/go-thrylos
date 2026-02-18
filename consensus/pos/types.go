@@ -131,6 +131,8 @@ type ConsensusEngine struct {
 
 	validatorsSynced bool // true after first quorum + propagation delay
 
+	isSyncing bool // set true during chain sync
+
 }
 
 // ForkChoice implements fork choice with memory management

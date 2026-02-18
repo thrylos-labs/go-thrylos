@@ -447,13 +447,26 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to start sync manager: %v", err)
 	}
 
+	go func() {
+		time.Sleep(1 * time.Second)
+		if err := n.syncManager.SyncToNetworkTip(); err != nil {
+			log.Printf("⚠️ SyncToNetworkTip: %v", err)
+		}
+	}()
+
 	// Wait for chain sync AFTER sync manager is running
 	nodeID := os.Getenv("NODE_ID")
+	// Wait for chain sync AFTER sync manager is running
 	if nodeID != "1" && nodeID != "" {
+		n.consensusEngine.SetSyncing(true) // ← block proposals
+
 		log.Println("⏳ Waiting for chain sync to complete...")
+		time.Sleep(5 * time.Second)
 		if err := n.waitForChainSync(30 * time.Second); err != nil {
 			log.Printf("⚠️ Chain sync incomplete: %v, proceeding anyway", err)
 		}
+
+		n.consensusEngine.SetSyncing(false) // ← allow proposals
 		log.Println("✅ Chain sync complete, ready to produce blocks")
 	}
 
@@ -568,12 +581,15 @@ func (n *Node) Stop() error {
 
 func (n *Node) waitForChainSync(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	var lastHeight int64
+	var lastHeight int64 = -1
 	stableCount := 0
 
 	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
 		current := n.blockchain.GetHeight()
-		if current == lastHeight {
+
+		// Must be above 0 AND stable
+		if current > 0 && current == lastHeight {
 			stableCount++
 			if stableCount >= 3 {
 				log.Printf("✅ Chain stable at height %d", current)
@@ -583,7 +599,7 @@ func (n *Node) waitForChainSync(timeout time.Duration) error {
 			stableCount = 0
 			lastHeight = current
 		}
-		time.Sleep(2 * time.Second)
+		log.Printf("⏳ Chain sync: height=%d, stable=%d/3", current, stableCount)
 	}
 	return fmt.Errorf("timeout waiting for chain sync at height %d", lastHeight)
 }

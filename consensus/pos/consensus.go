@@ -211,6 +211,12 @@ func (ce *ConsensusEngine) consensusLoop() {
 	}
 }
 
+func (ce *ConsensusEngine) SetSyncing(syncing bool) {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+	ce.isSyncing = syncing
+}
+
 func (ce *ConsensusEngine) ValidateBlock(block *core.Block) error {
 	if ce.blockValidator == nil {
 		return fmt.Errorf("block validator not initialized")
@@ -240,6 +246,12 @@ func (ce *ConsensusEngine) processSlot() {
 		log.Printf("⏳ Waiting for validators to join... (Have %d, Need %d)",
 			ce.validatorSet.Size(), expectedValidators)
 		ce.mu.Unlock() // Must unlock before returning
+		return
+	}
+
+	if ce.isSyncing {
+		log.Printf("⏳ Skipping slot %d - chain sync in progress", ce.currentSlot)
+		ce.mu.Unlock()
 		return
 	}
 
