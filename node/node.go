@@ -448,12 +448,19 @@ func (n *Node) Start() error {
 						log.Printf("❌ PANIC in SyncToNetworkTip: %v", r)
 					}
 				}()
-				time.Sleep(1 * time.Second)
-				log.Printf("🔄 SyncToNetworkTip goroutine firing...")
-				if err := n.syncManager.SyncToNetworkTip(); err != nil {
-					log.Printf("⚠️ SyncToNetworkTip: %v", err)
+				for {
+					time.Sleep(2 * time.Second)
+					log.Printf("🔄 SyncToNetworkTip attempting...")
+					if err := n.syncManager.SyncToNetworkTip(); err != nil {
+						log.Printf("⚠️ SyncToNetworkTip: %v", err)
+						continue
+					}
+					// Check if we actually caught up
+					if n.blockchain.GetHeight() > 0 {
+						log.Printf("✅ SyncToNetworkTip complete at height %d", n.blockchain.GetHeight())
+						return
+					}
 				}
-				log.Printf("✅ SyncToNetworkTip complete")
 			}()
 			log.Println("⏳ Waiting for chain sync to complete...")
 			if err := n.waitForChainSync(30 * time.Second); err != nil {
