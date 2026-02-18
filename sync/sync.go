@@ -398,38 +398,50 @@ func (sm *SyncManager) checkSyncStatus() {
 	}
 }
 
-// discoverSyncPeers discovers peers available for synchronization
 func (sm *SyncManager) discoverSyncPeers() error {
 	if sm.p2pNetwork == nil {
 		return fmt.Errorf("P2P network not available")
 	}
 
-	// Get connected peers
 	connectedPeers := sm.p2pNetwork.GetConnectedPeerIDs()
+	log.Printf("📡 discoverSyncPeers: found %d connected peers", len(connectedPeers))
 
+	if len(connectedPeers) == 0 {
+		return fmt.Errorf("no connected peers")
+	}
+
+	// Query heights OUTSIDE the lock to avoid blocking
+	type peerResult struct {
+		peerID string
+		height int64
+	}
+	results := make([]peerResult, 0, len(connectedPeers))
+
+	for _, peerID := range connectedPeers {
+		height, err := sm.p2pNetwork.RequestPeerHeight(peerID)
+		if err != nil {
+			log.Printf("⚠️ RequestPeerHeight failed for %s: %v", peerID[:12], err)
+			continue
+		}
+		log.Printf("📡 Peer %s reported height %d", peerID[:12], height)
+		results = append(results, peerResult{peerID, height})
+	}
+
+	// Now lock only to update the map
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Update peer list
 	newPeers := make(map[string]*SyncPeer)
-
-	for _, peerID := range connectedPeers {
-		// Get peer height
-		height, err := sm.p2pNetwork.RequestPeerHeight(peerID)
-		if err != nil {
-			continue
-		}
-
-		// Update or create peer
-		if existingPeer, exists := sm.syncPeers[peerID]; exists {
-			existingPeer.Height = height
+	for _, r := range results {
+		if existingPeer, exists := sm.syncPeers[r.peerID]; exists {
+			existingPeer.Height = r.height
 			existingPeer.LastSeen = time.Now()
 			existingPeer.IsResponsive = true
-			newPeers[peerID] = existingPeer
+			newPeers[r.peerID] = existingPeer
 		} else {
-			newPeers[peerID] = &SyncPeer{
-				PeerID:       peerID,
-				Height:       height,
+			newPeers[r.peerID] = &SyncPeer{
+				PeerID:       r.peerID,
+				Height:       r.height,
 				LastSeen:     time.Now(),
 				Reliability:  1.0,
 				IsResponsive: true,
@@ -438,6 +450,7 @@ func (sm *SyncManager) discoverSyncPeers() error {
 	}
 
 	sm.syncPeers = newPeers
+	log.Printf("📡 discoverSyncPeers: updated %d responsive peers", len(newPeers))
 	return nil
 }
 
@@ -572,18 +585,20 @@ func (sm *SyncManager) IsUpToDate() bool {
 }
 
 func (sm *SyncManager) SyncToNetworkTip() error {
-	// Discover peers first before checking syncPeers map
 	if err := sm.discoverSyncPeers(); err != nil {
-		return fmt.Errorf("peer discovery failed: %v", err)
+		log.Printf("⚠️ discoverSyncPeers failed: %v", err)
+		return err
 	}
 
 	sm.mu.RLock()
+	log.Printf("📡 SyncToNetworkTip: %d sync peers discovered", len(sm.syncPeers))
 	peers := make([]string, 0, len(sm.syncPeers))
-	for peerID := range sm.syncPeers {
+	for peerID, peer := range sm.syncPeers {
+		log.Printf("📡 Peer %s: height=%d responsive=%v", peerID[:12], peer.Height, peer.IsResponsive)
 		peers = append(peers, peerID)
 	}
 	sm.mu.RUnlock()
-
+	log.Printf("📡 SyncToNetworkTip: peer slice has %d entries", len(peers))
 	if len(peers) == 0 {
 		return fmt.Errorf("no peers available")
 	}
@@ -594,6 +609,7 @@ func (sm *SyncManager) SyncToNetworkTip() error {
 	for _, peerID := range peers {
 		height, err := sm.p2pNetwork.RequestPeerHeight(peerID)
 		if err != nil {
+			log.Printf("⚠️ RequestPeerHeight failed for %s: %v", peerID[:12], err)
 			continue
 		}
 		log.Printf("📡 Peer %s is at height %d", peerID[:12], height)

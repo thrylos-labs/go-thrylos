@@ -699,11 +699,17 @@ func (m *Manager) RequestPeerHeight(peerID string) (int64, error) {
 		return 0, fmt.Errorf("peer %s not connected", peerID)
 	}
 
-	stream, err := m.Host.NewStream(m.Ctx, pid, ProtocolHeightRequest)
+	ctx, cancel := context.WithTimeout(m.Ctx, 5*time.Second)
+	defer cancel()
+
+	stream, err := m.Host.NewStream(ctx, pid, ProtocolHeightRequest)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open stream: %v", err)
 	}
 	defer stream.Close()
+
+	// Set deadline on the stream itself
+	stream.SetDeadline(time.Now().Add(5 * time.Second))
 
 	// Send height request
 	writer := NewJSONStreamWriter(stream)
@@ -946,17 +952,19 @@ func (m *Manager) handleHeightRequest(s network.Stream) {
 	}
 
 	// Get current height from blockchain
-	responseCh := make(chan Response)
+	responseCh := make(chan Response, 1)
 	m.MessageBus <- Message{
 		Type:       GetBlockchainInfo,
 		Data:       "height",
 		ResponseCh: responseCh,
 	}
 
-	resp := <-responseCh
-	if resp.Error != nil {
-		stdlog.Printf("Error getting blockchain height: %v", resp.Error)
-		writer.WriteJSON(&HeightResponse{Error: resp.Error.Error()})
+	var resp Response
+	select {
+	case resp = <-responseCh:
+	case <-time.After(3 * time.Second):
+		log.Printf("⚠️ Timeout getting blockchain height for peer %s", peerID)
+		writer.WriteJSON(&HeightResponse{Error: "timeout"})
 		return
 	}
 

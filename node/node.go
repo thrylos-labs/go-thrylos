@@ -1486,7 +1486,14 @@ func (n *Node) processP2PMessageBus() {
 
 		// Handle String messages (Heartbeats/Status) - Silence the warning
 		case string:
-			// Do nothing, just consume the message
+			// Check if this is a height request
+			if data == "height" && msg.ResponseCh != nil {
+				var height int64
+				if n.blockchain != nil {
+					height = n.blockchain.GetHeight()
+				}
+				msg.ResponseCh <- network.Response{Data: height}
+			}
 
 			// Unknown types
 			// Handle ValidatorAnnouncement
