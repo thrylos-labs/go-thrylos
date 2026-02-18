@@ -328,7 +328,6 @@ func parsePortFromAddr(addr string) int {
 	return 8080
 }
 
-// Start starts the blockchain node with full initialization
 func (n *Node) Start() error {
 	if n.isRunning {
 		return fmt.Errorf("node is already running")
@@ -351,24 +350,18 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to start consensus engine: %v", err)
 	}
 
-	// ✅ MOVE IT HERE: Reset jail status AFTER consensus engine starts
+	// Reset jail status AFTER consensus engine starts
 	if os.Getenv("THRYLOS_ENVIRONMENT") == "development" && n.consensusEngine != nil {
 		log.Println("🔓 Development mode: Resetting jail status for all validators...")
 		validators := n.consensusEngine.GetAllValidators()
-
 		for _, v := range validators {
-			// Reset jail status in validator object
 			v.JailUntil = 0
 			v.Active = true
-
-			// Update the validator in WorldState
 			if err := n.blockchain.GetWorldState().UpdateValidator(v); err != nil {
 				log.Printf("⚠️ Failed to reset jail status for validator %s: %v", v.Address, err)
 			} else {
 				log.Printf("✅ Reset jail status for validator %s (Active: true, JailUntil: 0)", v.Address)
 			}
-
-			// Also clear slashing info via the slashing module
 			slashingModule := n.consensusEngine.GetSlashingModule()
 			if slashingModule != nil {
 				slashingModule.ClearJailStatus(v.Address)
@@ -378,7 +371,7 @@ func (n *Node) Start() error {
 		log.Println("✅ All validators unjailed and reactivated for development")
 	}
 
-	// ✅ Connect P2P to consensus engine
+	// Connect P2P to consensus engine
 	if n.p2pNetwork != nil && n.consensusEngine != nil {
 		n.p2pNetwork.SetConsensusEngine(n.consensusEngine)
 	}
@@ -400,17 +393,22 @@ func (n *Node) Start() error {
 
 	// Start P2P network
 	if n.p2pNetwork != nil {
+		nodeID := os.Getenv("NODE_ID")
+		log.Printf("🔍 DEBUG Node startup: NODE_ID=%q", nodeID)
+
+		// Block proposals immediately for non-node-1 before anything else
+		if nodeID != "1" && nodeID != "" {
+			n.consensusEngine.SetSyncing(true)
+		}
+
 		if err := n.p2pNetwork.Start(); err != nil {
 			return fmt.Errorf("failed to start P2P network: %v", err)
 		}
 		go n.processP2PMessages()
 		go n.processP2PMessageBus()
 
-		nodeID := os.Getenv("NODE_ID")
+		// Genesis sync for non-node-1 nodes
 		if nodeID != "1" && nodeID != "" {
-			// Block proposals immediately before anything else
-			n.consensusEngine.SetSyncing(true)
-
 			log.Println("⏳ Waiting for P2P peers before syncing genesis...")
 			time.Sleep(15 * time.Second)
 			log.Println("📡 Attempting genesis sync now that P2P is running...")
@@ -420,7 +418,7 @@ func (n *Node) Start() error {
 			log.Println("✅ Genesis synced successfully!")
 		}
 
-		// ✅ Announce validator AFTER P2P is up AND genesis is synced
+		// Announce validator AFTER P2P is up AND genesis is synced (all nodes)
 		if n.consensusEngine != nil {
 			validator, err := n.consensusEngine.GetLocalValidator()
 			if err == nil && validator != nil {
@@ -429,8 +427,6 @@ func (n *Node) Start() error {
 				} else {
 					log.Printf("✅ Announced validator %s to network", validator.Address)
 				}
-
-				// Re-announce every 10 seconds for the first minute
 				go func() {
 					for i := 0; i < 6; i++ {
 						time.Sleep(10 * time.Second)
@@ -439,7 +435,6 @@ func (n *Node) Start() error {
 						n.p2pNetwork.AnnounceValidator(validator)
 					}
 				}()
-
 				n.p2pNetwork.RequestValidatorSync()
 			}
 		}
@@ -447,19 +442,23 @@ func (n *Node) Start() error {
 		// Chain sync for non-node-1 only
 		if nodeID != "1" && nodeID != "" {
 			n.syncManager.Start()
-
 			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("❌ PANIC in SyncToNetworkTip: %v", r)
+					}
+				}()
 				time.Sleep(1 * time.Second)
+				log.Printf("🔄 SyncToNetworkTip goroutine firing...")
 				if err := n.syncManager.SyncToNetworkTip(); err != nil {
 					log.Printf("⚠️ SyncToNetworkTip: %v", err)
 				}
+				log.Printf("✅ SyncToNetworkTip complete")
 			}()
-
 			log.Println("⏳ Waiting for chain sync to complete...")
 			if err := n.waitForChainSync(30 * time.Second); err != nil {
 				log.Printf("⚠️ Chain sync incomplete: %v, proceeding anyway", err)
 			}
-
 			n.consensusEngine.SetSyncing(false)
 			log.Println("✅ Chain sync complete, ready to produce blocks")
 		} else {
@@ -467,24 +466,6 @@ func (n *Node) Start() error {
 			n.syncManager.Start()
 		}
 	}
-
-	// node.go - non-node-1 startup sequence
-	n.consensusEngine.SetSyncing(true) // ← BEFORE syncManager starts
-
-	n.syncManager.Start()
-
-	go func() {
-		time.Sleep(1 * time.Second)
-		if err := n.syncManager.SyncToNetworkTip(); err != nil {
-			log.Printf("⚠️ SyncToNetworkTip: %v", err)
-		}
-	}()
-
-	if err := n.waitForChainSync(30 * time.Second); err != nil {
-		log.Printf("⚠️ Chain sync incomplete: %v, proceeding anyway", err)
-	}
-
-	n.consensusEngine.SetSyncing(false) // ← only after sync completes
 
 	// Start background processes
 	go n.rewardDistributionLoop()
