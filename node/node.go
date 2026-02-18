@@ -406,9 +406,11 @@ func (n *Node) Start() error {
 		go n.processP2PMessages()
 		go n.processP2PMessageBus()
 
-		// Genesis sync for non-node-1 nodes
 		nodeID := os.Getenv("NODE_ID")
 		if nodeID != "1" && nodeID != "" {
+			// Block proposals immediately before anything else
+			n.consensusEngine.SetSyncing(true)
+
 			log.Println("⏳ Waiting for P2P peers before syncing genesis...")
 			time.Sleep(15 * time.Second)
 			log.Println("📡 Attempting genesis sync now that P2P is running...")
@@ -441,11 +443,35 @@ func (n *Node) Start() error {
 				n.p2pNetwork.RequestValidatorSync()
 			}
 		}
+
+		// Chain sync for non-node-1 only
+		if nodeID != "1" && nodeID != "" {
+			n.syncManager.Start()
+
+			go func() {
+				time.Sleep(1 * time.Second)
+				if err := n.syncManager.SyncToNetworkTip(); err != nil {
+					log.Printf("⚠️ SyncToNetworkTip: %v", err)
+				}
+			}()
+
+			log.Println("⏳ Waiting for chain sync to complete...")
+			if err := n.waitForChainSync(30 * time.Second); err != nil {
+				log.Printf("⚠️ Chain sync incomplete: %v, proceeding anyway", err)
+			}
+
+			n.consensusEngine.SetSyncing(false)
+			log.Println("✅ Chain sync complete, ready to produce blocks")
+		} else {
+			// Node 1 still needs syncManager started
+			n.syncManager.Start()
+		}
 	}
 
-	if err := n.syncManager.Start(); err != nil {
-		return fmt.Errorf("failed to start sync manager: %v", err)
-	}
+	// node.go - non-node-1 startup sequence
+	n.consensusEngine.SetSyncing(true) // ← BEFORE syncManager starts
+
+	n.syncManager.Start()
 
 	go func() {
 		time.Sleep(1 * time.Second)
@@ -454,21 +480,11 @@ func (n *Node) Start() error {
 		}
 	}()
 
-	// Wait for chain sync AFTER sync manager is running
-	nodeID := os.Getenv("NODE_ID")
-	// Wait for chain sync AFTER sync manager is running
-	if nodeID != "1" && nodeID != "" {
-		n.consensusEngine.SetSyncing(true) // ← block proposals
-
-		log.Println("⏳ Waiting for chain sync to complete...")
-		time.Sleep(5 * time.Second)
-		if err := n.waitForChainSync(30 * time.Second); err != nil {
-			log.Printf("⚠️ Chain sync incomplete: %v, proceeding anyway", err)
-		}
-
-		n.consensusEngine.SetSyncing(false) // ← allow proposals
-		log.Println("✅ Chain sync complete, ready to produce blocks")
+	if err := n.waitForChainSync(30 * time.Second); err != nil {
+		log.Printf("⚠️ Chain sync incomplete: %v, proceeding anyway", err)
 	}
+
+	n.consensusEngine.SetSyncing(false) // ← only after sync completes
 
 	// Start background processes
 	go n.rewardDistributionLoop()

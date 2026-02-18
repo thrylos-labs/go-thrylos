@@ -572,6 +572,11 @@ func (sm *SyncManager) IsUpToDate() bool {
 }
 
 func (sm *SyncManager) SyncToNetworkTip() error {
+	// Discover peers first before checking syncPeers map
+	if err := sm.discoverSyncPeers(); err != nil {
+		return fmt.Errorf("peer discovery failed: %v", err)
+	}
+
 	sm.mu.RLock()
 	peers := make([]string, 0, len(sm.syncPeers))
 	for peerID := range sm.syncPeers {
