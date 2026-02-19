@@ -455,9 +455,10 @@ func (n *Node) Start() error {
 						log.Printf("⚠️ SyncToNetworkTip: %v", err)
 						continue
 					}
-					// Check if we actually caught up
-					if n.blockchain.GetHeight() > 0 {
-						log.Printf("✅ SyncToNetworkTip complete at height %d", n.blockchain.GetHeight())
+					currentHeight := n.blockchain.GetHeight()
+					networkTip := n.syncManager.GetMaxPeerHeight() // expose getMaxPeerHeight publicly
+					if currentHeight >= networkTip && networkTip > 0 {
+						log.Printf("✅ SyncToNetworkTip complete at height %d", currentHeight)
 						return
 					}
 				}

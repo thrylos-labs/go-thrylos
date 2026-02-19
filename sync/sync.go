@@ -454,6 +454,12 @@ func (sm *SyncManager) discoverSyncPeers() error {
 	return nil
 }
 
+// expose it publicly (capital G)
+// Another fun is used so it doesn't interfere with the existing func
+func (sm *SyncManager) GetMaxPeerHeight() int64 {
+	return sm.getMaxPeerHeight()
+}
+
 // Helper methods
 
 func (sm *SyncManager) getMaxPeerHeight() int64 {

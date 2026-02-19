@@ -272,6 +272,84 @@ func (bc *Blockchain) InitializeGenesis(genesisAccount string, genesisValidator 
 	return nil
 }
 
+// AddBlockFromSync adds a block during sync, skipping consensus validation
+func (bc *Blockchain) AddBlockFromSync(block *core.Block) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	return bc.addBlockFromSyncUnsafe(block)
+}
+
+func (bc *Blockchain) addBlockFromSyncUnsafe(block *core.Block) error {
+	if block == nil {
+		return fmt.Errorf("block cannot be nil")
+	}
+
+	currentTip := bc.worldState.GetCurrentBlock()
+
+	// Idempotency check
+	if currentTip != nil && block.Header.Index <= currentTip.Header.Index {
+		existingBlock, err := bc.GetBlockByIndex(block.Header.Index)
+		if err == nil && existingBlock != nil {
+			if existingBlock.Hash == block.Hash {
+				return nil
+			}
+			return fmt.Errorf("fork at height %d: have %s, received %s",
+				block.Header.Index, existingBlock.Hash, block.Hash)
+		}
+	}
+
+	// Genesis handling (same as before)
+	if block.Header.Index == 0 {
+		currentGenesis := bc.getGenesisBlockUnsafe()
+		if currentGenesis != nil {
+			if currentGenesis.Hash == block.Hash {
+				return nil
+			}
+			return fmt.Errorf("CRITICAL GENESIS MISMATCH: Local %s vs Remote %s", currentGenesis.Hash, block.Hash)
+		}
+		fmt.Printf("🌱 Accepting New Genesis Block via Sync (Hash: %s)\n", block.Hash)
+		if err := bc.worldState.AddBlock(block); err != nil {
+			return fmt.Errorf("world state genesis addition failed: %v", err)
+		}
+		bc.totalBlocks = 1
+		return nil
+	}
+
+	// Structural validation only — NO consensusEngine.ValidateBlock call
+	if err := bc.validateBlockStructure(block); err != nil {
+		return fmt.Errorf("block structure validation failed: %v", err)
+	}
+
+	if existingBlock := bc.worldState.GetCurrentBlock(); existingBlock != nil && existingBlock.Hash == block.Hash {
+		return fmt.Errorf("block %s already exists", block.Hash)
+	}
+
+	if err := bc.worldState.AddBlock(block); err != nil {
+		return fmt.Errorf("world state block addition failed: %v", err)
+	}
+
+	if bc.validatorManager != nil {
+		if err := bc.validatorManager.ProcessUnbondings(); err != nil {
+			fmt.Printf("Warning: failed to process validator unbondings: %v\n", err)
+		}
+	}
+	if err := bc.worldState.ProcessUnbondingQueue(); err != nil {
+		log.Printf("⚠️ Warning: Failed to process staking unbonding queue: %v", err)
+	}
+
+	bc.totalBlocks++
+	bc.updateAverageBlockTime(block)
+	bc.totalTransactions += int64(len(block.Transactions))
+
+	select {
+	case bc.blockAddedChan <- block:
+	default:
+	}
+
+	return nil
+}
+
 // AddBlock adds a new block to the blockchain
 func (bc *Blockchain) AddBlock(block *core.Block) error {
 	bc.mu.Lock()
@@ -279,8 +357,6 @@ func (bc *Blockchain) AddBlock(block *core.Block) error {
 
 	return bc.addBlockUnsafe(block)
 }
-
-// core/chain/blockchain.go
 
 // addBlockUnsafe adds a block without locking (caller must hold lock)
 func (bc *Blockchain) addBlockUnsafe(block *core.Block) error {

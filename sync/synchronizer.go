@@ -292,7 +292,7 @@ func (s *Synchronizer) SyncToHeight(targetHeight int64, preferredPeers []string)
 
 		// Process blocks
 		for _, block := range blocks {
-			if err := s.blockchain.AddBlock(block); err != nil {
+			if err := s.blockchain.AddBlockFromSync(block); err != nil {
 				return fmt.Errorf("failed to add block %d: %v", block.Header.Index, err)
 			}
 			currentHeight = block.Header.Index
