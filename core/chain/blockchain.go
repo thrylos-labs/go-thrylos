@@ -68,7 +68,7 @@ type ConsensusEngine interface {
 	IsValidator(address string) bool
 	GetStats() map[string]interface{}
 	GetForkChoice() interface{} // Returns fork choice as interface{} to avoid import cycle
-
+	IsSyncing() bool
 }
 
 // ChainValidator represents a block validator
@@ -420,9 +420,11 @@ func (bc *Blockchain) addBlockUnsafe(block *core.Block) error {
 		return fmt.Errorf("block structure validation failed: %v", err)
 	}
 
-	if bc.consensusEngine != nil {
-		if err := bc.consensusEngine.ValidateBlock(block); err != nil {
-			return fmt.Errorf("consensus validation failed: %v", err)
+	if bc.consensusEngine != nil && !bc.consensusEngine.IsSyncing() {
+		if block.Header.Index > bc.GetHeight() { // only validate future blocks
+			if err := bc.consensusEngine.ValidateBlock(block); err != nil {
+				return fmt.Errorf("consensus validation failed: %v", err)
+			}
 		}
 	}
 

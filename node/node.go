@@ -453,14 +453,8 @@ func (n *Node) Start() error {
 					log.Printf("🔄 SyncToNetworkTip attempting...")
 					if err := n.syncManager.SyncToNetworkTip(); err != nil {
 						log.Printf("⚠️ SyncToNetworkTip: %v", err)
-						continue
 					}
-					currentHeight := n.blockchain.GetHeight()
-					networkTip := n.syncManager.GetMaxPeerHeight() // expose getMaxPeerHeight publicly
-					if currentHeight >= networkTip && networkTip > 0 {
-						log.Printf("✅ SyncToNetworkTip complete at height %d", currentHeight)
-						return
-					}
+					// No exit - keep syncing in background forever
 				}
 			}()
 			log.Println("⏳ Waiting for chain sync to complete...")
@@ -586,27 +580,31 @@ func (n *Node) Stop() error {
 
 func (n *Node) waitForChainSync(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	var lastHeight int64 = -1
 	stableCount := 0
+	lastHeight := int64(-1)
 
 	for time.Now().Before(deadline) {
-		time.Sleep(2 * time.Second)
-		current := n.blockchain.GetHeight()
+		currentHeight := n.blockchain.GetHeight()
+		networkTip := n.syncManager.GetMaxPeerHeight()
 
-		// Must be above 0 AND stable
-		if current > 0 && current == lastHeight {
+		log.Printf("⏳ Chain sync: height=%d, networkTip=%d, stable=%d/3",
+			currentHeight, networkTip, stableCount)
+
+		// Must be at network tip AND stable
+		if currentHeight >= networkTip && networkTip > 0 && currentHeight == lastHeight {
 			stableCount++
 			if stableCount >= 3 {
-				log.Printf("✅ Chain stable at height %d", current)
+				log.Printf("✅ Chain stable at height %d", currentHeight)
 				return nil
 			}
 		} else {
 			stableCount = 0
-			lastHeight = current
 		}
-		log.Printf("⏳ Chain sync: height=%d, stable=%d/3", current, stableCount)
+
+		lastHeight = currentHeight
+		time.Sleep(2 * time.Second)
 	}
-	return fmt.Errorf("timeout waiting for chain sync at height %d", lastHeight)
+	return fmt.Errorf("timeout")
 }
 
 // SubmitTransaction accepts a transaction from external sources (e.g., wallets via RPC)

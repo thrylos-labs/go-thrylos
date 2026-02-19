@@ -592,38 +592,20 @@ func (sm *SyncManager) IsUpToDate() bool {
 
 func (sm *SyncManager) SyncToNetworkTip() error {
 	if err := sm.discoverSyncPeers(); err != nil {
-		log.Printf("⚠️ discoverSyncPeers failed: %v", err)
 		return err
 	}
 
 	sm.mu.RLock()
-	log.Printf("📡 SyncToNetworkTip: %d sync peers discovered", len(sm.syncPeers))
-	peers := make([]string, 0, len(sm.syncPeers))
-	for peerID, peer := range sm.syncPeers {
-		log.Printf("📡 Peer %s: height=%d responsive=%v", peerID[:12], peer.Height, peer.IsResponsive)
-		peers = append(peers, peerID)
-	}
-	sm.mu.RUnlock()
-	log.Printf("📡 SyncToNetworkTip: peer slice has %d entries", len(peers))
-	if len(peers) == 0 {
-		return fmt.Errorf("no peers available")
-	}
-
-	// Find best height across peers
 	var bestHeight int64
 	var bestPeer string
-	for _, peerID := range peers {
-		height, err := sm.p2pNetwork.RequestPeerHeight(peerID)
-		if err != nil {
-			log.Printf("⚠️ RequestPeerHeight failed for %s: %v", peerID[:12], err)
-			continue
-		}
-		log.Printf("📡 Peer %s is at height %d", peerID[:12], height)
-		if height > bestHeight {
-			bestHeight = height
+	for peerID, peer := range sm.syncPeers {
+		log.Printf("📡 Peer %s: height=%d", peerID[:12], peer.Height)
+		if peer.Height > bestHeight {
+			bestHeight = peer.Height
 			bestPeer = peerID
 		}
 	}
+	sm.mu.RUnlock()
 
 	if bestHeight == 0 || bestPeer == "" {
 		return fmt.Errorf("no peers with blocks to sync from")
@@ -631,7 +613,7 @@ func (sm *SyncManager) SyncToNetworkTip() error {
 
 	currentHeight := sm.blockchain.GetHeight()
 	if currentHeight >= bestHeight {
-		return nil // already caught up
+		return nil
 	}
 
 	log.Printf("🔄 Syncing from height %d to %d via peer %s", currentHeight, bestHeight, bestPeer[:12])

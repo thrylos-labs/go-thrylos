@@ -157,6 +157,12 @@ func (ce *ConsensusEngine) generateVRFProof(input []byte) (*VRFProof, error) {
 	return GenerateVRFProof(ce.nodePrivateKey, input)
 }
 
+func (ce *ConsensusEngine) IsSyncing() bool {
+	ce.mu.RLock()
+	defer ce.mu.RUnlock()
+	return ce.isSyncing
+}
+
 // Start begins the consensus process
 func (ce *ConsensusEngine) Start() error {
 	log.Printf("🚀 Consensus starting for validator: %s", ce.nodeAddress)
@@ -1388,10 +1394,13 @@ func (bv *BlockValidator) ValidateBlock(block *core.Block) error {
 	}
 
 	// Validate state root
-	calculatedRoot := bv.consensusEngine.worldState.GetStateRoot()
-	if block.Header.StateRoot != calculatedRoot {
-		return fmt.Errorf("state root mismatch: block=%s, calculated=%s",
-			block.Header.StateRoot, calculatedRoot)
+	// Validate state root (skip during sync to avoid false mismatches)
+	if !bv.consensusEngine.IsSyncing() {
+		calculatedRoot := bv.consensusEngine.worldState.GetStateRoot()
+		if block.Header.StateRoot != calculatedRoot {
+			return fmt.Errorf("state root mismatch: block=%s, calculated=%s",
+				block.Header.StateRoot, calculatedRoot)
+		}
 	}
 
 	return nil

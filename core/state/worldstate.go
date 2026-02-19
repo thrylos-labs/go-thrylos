@@ -451,6 +451,7 @@ func (ws *WorldState) AddBlockFromSync(block *core.Block) error {
 	ws.stateRootMu.Lock()
 	ws.stateRoot = block.Header.StateRoot
 	ws.stateRootMu.Unlock()
+	log.Printf("✅ AddBlockFromSync: set stateRoot to %s for block %d", block.Header.StateRoot, block.Header.Index)
 
 	if err := ws.db.SaveBlock(block); err != nil {
 		return fmt.Errorf("failed to save block: %v", err)
