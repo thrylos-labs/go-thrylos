@@ -309,7 +309,7 @@ func (bc *Blockchain) addBlockFromSyncUnsafe(block *core.Block) error {
 			return fmt.Errorf("CRITICAL GENESIS MISMATCH: Local %s vs Remote %s", currentGenesis.Hash, block.Hash)
 		}
 		fmt.Printf("🌱 Accepting New Genesis Block via Sync (Hash: %s)\n", block.Hash)
-		if err := bc.worldState.AddBlock(block); err != nil {
+		if err := bc.worldState.AddBlockFromSync(block); err != nil {
 			return fmt.Errorf("world state genesis addition failed: %v", err)
 		}
 		bc.totalBlocks = 1

@@ -419,6 +419,64 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply str
 	return nil
 }
 
+func (ws *WorldState) AddBlockFromSync(block *core.Block) error {
+	ws.chainMu.Lock()
+	defer ws.chainMu.Unlock()
+
+	if err := ws.validateBlockForAddition(block); err != nil {
+		return fmt.Errorf("block validation failed: %v", err)
+	}
+
+	for _, tx := range block.Transactions {
+		receipt, err := ws.ExecuteTransaction(tx)
+		if err != nil {
+			return fmt.Errorf("failed to execute transaction %s: %v", tx.Id, err)
+		}
+		if receipt.Status == 0 {
+			return fmt.Errorf("transaction %s failed: %s", tx.Id, receipt.Error)
+		}
+		if err := ws.db.SaveTransactionWithIndex(tx); err != nil {
+			return fmt.Errorf("failed to save transaction %s with indexing: %v", tx.Id, err)
+		}
+		ws.txPool.RemoveTransaction(tx.Id)
+	}
+
+	ws.currentHash = block.Hash
+	ws.height = block.Header.Index
+	ws.lastTimestamp = block.Header.Timestamp
+	ws.totalTransactions += int64(len(block.Transactions))
+
+	// ✅ Trust the synced block's state root instead of recomputing
+	// Node 2 doesn't have genesis accounts so recomputing gives wrong result
+	ws.stateRootMu.Lock()
+	ws.stateRoot = block.Header.StateRoot
+	ws.stateRootMu.Unlock()
+
+	if err := ws.db.SaveBlock(block); err != nil {
+		return fmt.Errorf("failed to save block: %v", err)
+	}
+	if err := ws.db.SaveBlockByHeight(block); err != nil {
+		return fmt.Errorf("failed to save block by height: %v", err)
+	}
+
+	accounts := ws.accountManager.GetAllAccounts()
+	var updatedAccounts []*core.Account
+	for _, account := range accounts {
+		updatedAccounts = append(updatedAccounts, account)
+	}
+
+	var updatedValidators []*core.Validator
+	for _, validator := range ws.validators {
+		updatedValidators = append(updatedValidators, validator)
+	}
+
+	if err := ws.db.CommitBlock(block, updatedAccounts, updatedValidators, ws.totalTransactions); err != nil {
+		return fmt.Errorf("failed to commit block to storage: %v", err)
+	}
+
+	return nil
+}
+
 func (ws *WorldState) AddBlock(block *core.Block) error {
 	ws.chainMu.Lock()
 	defer ws.chainMu.Unlock()
