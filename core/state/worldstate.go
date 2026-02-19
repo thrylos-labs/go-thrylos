@@ -585,6 +585,66 @@ func (ws *WorldState) ExecuteBatchTransactions(transactions []*core.Transaction)
 	return receipts, nil
 }
 
+// ImportWorldState applies accounts and validators received from a peer during genesis sync.
+// Called on non-genesis nodes after syncing the genesis block, before joining consensus.
+// Guards against double-application: returns an error if accounts already exist locally.
+func (ws *WorldState) ImportWorldState(
+	accounts map[string]*core.Account,
+	validators map[string]*core.Validator,
+) error {
+	if len(accounts) == 0 && len(validators) == 0 {
+		return fmt.Errorf("ImportWorldState: received empty snapshot, refusing to apply")
+	}
+
+	// Guard: do not overwrite an already-populated world state.
+	// This prevents accidental application on Node 1 or on a node that already synced.
+	existing := ws.accountManager.GetAllAccounts()
+	if len(existing) > 0 {
+		return fmt.Errorf(
+			"ImportWorldState: world state already has %d accounts, refusing to overwrite",
+			len(existing),
+		)
+	}
+
+	// Apply accounts via UpdateAccount, which handles both LRU cache and DB persistence.
+	for _, acc := range accounts {
+		if err := ws.accountManager.UpdateAccount(acc); err != nil {
+			return fmt.Errorf("ImportWorldState: failed to import account %s: %w", acc.Address, err)
+		}
+	}
+
+	// Apply validators directly to the in-memory map.
+	// We cannot use UpdateValidator here because it rejects validators that don't already exist.
+	// The in-memory state is sufficient for consensus; validators will be durably persisted
+	// on the next CommitBlock call.
+	ws.validatorMu.Lock()
+	for addr, v := range validators {
+		ws.validators[addr] = v
+	}
+	ws.validatorMu.Unlock()
+
+	// Recalculate totalStaked from imported validators.
+	totalStaked := new(big.Int)
+	ws.validatorMu.RLock()
+	for _, v := range ws.validators {
+		if v.Stake == "" {
+			continue
+		}
+		if stake, ok := new(big.Int).SetString(v.Stake, 10); ok {
+			totalStaked.Add(totalStaked, stake)
+		}
+	}
+	ws.validatorMu.RUnlock()
+
+	ws.chainMu.Lock()
+	ws.totalStaked = totalStaked.String()
+	ws.chainMu.Unlock()
+
+	log.Printf("✅ ImportWorldState: applied %d accounts, %d validators, totalStaked=%s",
+		len(accounts), len(validators), totalStaked.String())
+	return nil
+}
+
 // ValidateTransactionExecution validates that a transaction can be executed
 func (ws *WorldState) ValidateTransactionExecution(tx *core.Transaction) error {
 	if tx.From != "" {

@@ -23,6 +23,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/network"
+	"github.com/thrylos-labs/go-thrylos/network/p2p"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 	thrylosSync "github.com/thrylos-labs/go-thrylos/sync"
@@ -464,8 +465,20 @@ func (n *Node) Start() error {
 			n.consensusEngine.SetSyncing(false)
 			log.Println("✅ Chain sync complete, ready to produce blocks")
 		} else {
-			// Node 1 still needs syncManager started
 			n.syncManager.Start()
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("❌ PANIC in SyncToNetworkTip (node1): %v", r)
+					}
+				}()
+				for {
+					time.Sleep(5 * time.Second) // Slightly longer interval for node 1
+					if err := n.syncManager.SyncToNetworkTip(); err != nil {
+						log.Printf("⚠️ SyncToNetworkTip (node1): %v", err)
+					}
+				}
+			}()
 		}
 	}
 
@@ -1234,13 +1247,39 @@ func (n *Node) syncGenesisFromNetwork() error {
 				}
 			}
 
-			// 2. FORCE VALIDATOR REGISTRATION (Fixes "Signature Mismatch")
+			// 2. Confirm genesis validators are present (proves peer has real state)
 			validators := n.blockchain.GetActiveValidators()
 			if len(validators) == 0 {
 				fmt.Printf("⚠️  Genesis synced but state empty. Retrying...\n")
 				continue
 			}
 
+			// 3. Sync world state (account balances + validator stakes) from the same peer.
+			// Without this, our world state has correct block hashes but zero balances,
+			// causing slashing false-positives and broken reward/faucet logic.
+			log.Printf("📸 Requesting world state snapshot from peer %s...", peerID[:8])
+			snapshot, err := n.p2pNetwork.RequestStateSnapshot(peerID, 0)
+			if err != nil {
+				log.Printf("⚠️ World state snapshot failed (peer %s): %v — balances will be zero until next restart",
+					peerID[:8], err)
+				// Non-fatal: consensus will still function, but balance-dependent operations
+				// (staking rewards, faucet, slashing enforcement) will not work correctly.
+			} else if snapshot == nil || (len(snapshot.Accounts) == 0 && len(snapshot.Validators) == 0) {
+				log.Printf("⚠️ Received empty world state snapshot from peer %s — balances will be zero",
+					peerID[:8])
+			} else {
+				log.Printf("📸 Received snapshot: height=%d, accounts=%d, validators=%d",
+					snapshot.Height, len(snapshot.Accounts), len(snapshot.Validators))
+				if importErr := n.worldState.ImportWorldState(snapshot.Accounts, snapshot.Validators); importErr != nil {
+					// Log but don't abort — the guard fires here if state was already populated
+					// (e.g. on a retry after a previous successful import). That's safe to ignore.
+					log.Printf("⚠️ ImportWorldState: %v", importErr)
+				} else {
+					log.Printf("✅ World state imported successfully")
+				}
+			}
+
+			// 4. Register genesis validators with consensus engine
 			if n.consensusEngine != nil {
 				fmt.Printf("🔄 Force-registering %d genesis validators...\n", len(validators))
 				for _, v := range validators {
@@ -1522,6 +1561,43 @@ func (n *Node) processP2PMessageBus() {
 				if err := n.consensusEngine.SyncValidators(data); err != nil {
 					log.Printf("⚠️ Failed to sync validators: %v", err)
 				}
+			}
+
+		// This handles GetStateSnapshot requests initiated by peers via ProtocolStateSync.
+
+		case int64:
+			// GetStateSnapshot is the only MessageBus path that sends int64 data (the requested height).
+			if msg.ResponseCh == nil {
+				log.Printf("⚠️ GetStateSnapshot: no response channel, dropping request")
+				break
+			}
+
+			accounts := n.worldState.ExportAccounts()
+			validators := n.worldState.ExportValidators()
+
+			if len(accounts) == 0 {
+				log.Printf("⚠️ GetStateSnapshot: world state has no accounts to export")
+				msg.ResponseCh <- network.Response{
+					Success: false,
+					Error:   fmt.Errorf("world state not yet populated"),
+				}
+				break
+			}
+
+			snapshot := &p2p.StateSnapshot{
+				Height:     n.blockchain.GetHeight(),
+				StateRoot:  n.worldState.GetStateRoot(),
+				Timestamp:  time.Now().Unix(),
+				Accounts:   accounts,
+				Validators: validators,
+			}
+
+			log.Printf("📸 Serving world state snapshot: height=%d, accounts=%d, validators=%d",
+				snapshot.Height, len(accounts), len(validators))
+
+			msg.ResponseCh <- network.Response{
+				Success: true,
+				Data:    snapshot,
 			}
 
 		// Unknown types
