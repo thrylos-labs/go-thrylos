@@ -638,8 +638,14 @@ func (n *Node) processP2PMessages() {
 	for {
 		select {
 		case block := <-n.p2pNetwork.BlockChan:
-			// Process received block
-			if err := n.blockchain.AddBlock(block); err != nil {
+			localHeight := n.blockchain.GetHeight()
+			if block.Header.Index > localHeight+1 {
+				// Too far ahead, sync loop will catch up - silently drop
+				log.Printf("⏭️ Dropping out-of-order block %d (local height: %d), sync will catch up",
+					block.Header.Index, localHeight)
+				continue
+			}
+			if err := n.blockchain.AddBlockFromSync(block); err != nil {
 				fmt.Printf("Failed to process P2P block: %v\n", err)
 			} else {
 				fmt.Printf("Processed block %s from P2P network\n", block.Hash)
@@ -1205,7 +1211,7 @@ func (n *Node) syncGenesisFromNetwork() error {
 			// 1. Add to Blockchain (Triggering our new AddBlockUnsafe logic)
 			fmt.Printf("⏳ Adding genesis block to blockchain...\n")
 			addDone := make(chan error, 1)
-			go func() { addDone <- n.blockchain.AddBlock(genesisBlock) }()
+			go func() { addDone <- n.blockchain.AddBlockFromSync(genesisBlock) }()
 
 			select {
 			case err := <-addDone:
