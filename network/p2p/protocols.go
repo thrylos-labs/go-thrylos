@@ -323,26 +323,26 @@ func (m *Manager) readPubSubMessages(topicName string, sub *pubsub.Subscription)
 			}
 
 		case TopicAttestations:
-			var attestation map[string]interface{}
+			var attestation NetworkAttestation
 			if err := json.Unmarshal(msg.Data, &attestation); err != nil {
 				stdlog.Printf("Failed to unmarshal attestation: %v", err)
 				continue
 			}
 			m.BlockchainProcessCh <- Message{
 				Type:       ProcessAttestation,
-				Data:       attestation,
+				Data:       &attestation,
 				FromPeerID: msg.ReceivedFrom,
 			}
 
 		case TopicVotes:
-			var vote map[string]interface{}
+			var vote NetworkVote
 			if err := json.Unmarshal(msg.Data, &vote); err != nil {
 				stdlog.Printf("Failed to unmarshal vote: %v", err)
 				continue
 			}
 			m.BlockchainProcessCh <- Message{
 				Type:       ProcessVote,
-				Data:       vote,
+				Data:       &vote,
 				FromPeerID: msg.ReceivedFrom,
 			}
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/thrylos-labs/go-thrylos/network/p2p"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/types"
 )
@@ -103,9 +104,20 @@ func (cb *ConsensusBridge) forwardNetworkToConsensus() {
 
 		// Forward attestations
 		case attestation := <-cb.network.GetAttestationChannel():
-			if att, ok := attestation.(*types.Attestation); ok {
-				cb.consensus.receiveChan <- att
-				log.Printf("✅ Forwarded attestation from %s to consensus", att.ValidatorAddress[:min(8, len(att.ValidatorAddress))])
+			if att, ok := attestation.(*p2p.NetworkAttestation); ok {
+				// Convert to consensus type
+				consensusAtt := &types.Attestation{
+					ValidatorAddress: att.ValidatorAddress,
+					BlockHash:        att.BlockHash,
+					BlockHeight:      att.BlockHeight,
+					Epoch:            att.Epoch,
+					Slot:             att.Slot,
+					Signature:        att.Signature,
+					Timestamp:        att.Timestamp,
+				}
+				cb.consensus.receiveChan <- consensusAtt
+				log.Printf("✅ Forwarded attestation from %s to consensus",
+					att.ValidatorAddress[:min(8, len(att.ValidatorAddress))])
 			} else {
 				log.Printf("⚠️ Received non-Attestation type from network: %T", attestation)
 			}
@@ -120,9 +132,19 @@ func (cb *ConsensusBridge) forwardNetworkToConsensus() {
 
 		// Forward votes
 		case vote := <-cb.network.GetVoteChannel():
-			if v, ok := vote.(*Vote); ok {
-				cb.consensus.receiveChan <- v
-				log.Printf("🗳️  Forwarded vote from %s to consensus", v.ValidatorAddress[:min(8, len(v.ValidatorAddress))])
+			if v, ok := vote.(*p2p.NetworkVote); ok {
+				// Convert to consensus type
+				consensusVote := &types.Vote{
+					ValidatorAddress: v.ValidatorAddress,
+					SourceBlockHash:  v.SourceBlockHash,
+					TargetBlockHash:  v.TargetBlockHash,
+					SourceEpoch:      v.SourceEpoch,
+					TargetEpoch:      v.TargetEpoch,
+					Signature:        v.Signature,
+				}
+				cb.consensus.receiveChan <- consensusVote
+				log.Printf("🗳️ Forwarded vote from %s to consensus",
+					v.ValidatorAddress[:min(8, len(v.ValidatorAddress))])
 			} else {
 				log.Printf("⚠️ Received non-Vote type from network: %T", vote)
 			}

@@ -7,6 +7,8 @@ import (
 
 	stdlog "log"
 
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
+
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/network/p2p"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -88,12 +90,11 @@ func NewP2PNetwork(cfg *config.Config) (*P2PNetwork, error) {
 }
 
 // NewP2PNetworkWithConfig creates a new P2P network with explicit configuration
-func NewP2PNetworkWithConfig(cfg *config.Config, p2pListenPort int, bootstrapPeers []string, enabled bool) (*P2PNetwork, error) {
+func NewP2PNetworkWithConfig(cfg *config.Config, p2pListenPort int, bootstrapPeers []string, enabled bool, identityKey libp2pcrypto.PrivKey) (*P2PNetwork, error) {
 	if !enabled {
 		return nil, fmt.Errorf("P2P networking is disabled")
 	}
 
-	// ✅ CREATE VALIDATOR (like in NewP2PNetwork)
 	validator := p2p.NewMessageValidator(
 		p2p.DefaultMaxMessageSize,
 		p2p.DefaultMaxBlockRangeSize,
@@ -104,6 +105,7 @@ func NewP2PNetworkWithConfig(cfg *config.Config, p2pListenPort int, bootstrapPee
 	p2pConfig := &p2p.Config{
 		ListenPort:     p2pListenPort,
 		BootstrapPeers: bootstrapPeers,
+		IdentityKey:    identityKey, // ← add this
 	}
 
 	manager, err := p2p.NewManager(p2pConfig)

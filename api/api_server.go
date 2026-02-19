@@ -94,16 +94,12 @@ func (s *APIServer) Start() error {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	log.Printf("🚀 API Server starting on %s", addr)
-	log.Println("📝 Endpoints: /health, /api/stats, /api/validators, /api/v1/points, /api/v1/leaderboard, /fund")
+	log.Printf("🌐 HTTP API Server starting on port %s", s.config.Port)
 
-	// Start in goroutine so it doesn't block
-	go func() {
-		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("❌ API Server error: %v", err)
-		}
-	}()
-
+	// Block here — APIManager.Start() owns the goroutine
+	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
 	return nil
 }
 

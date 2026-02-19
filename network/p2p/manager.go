@@ -1,7 +1,9 @@
 package p2p
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"sync"
@@ -11,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -226,12 +229,12 @@ type Config struct {
 	ListenPort     int
 	BootstrapPeers []string
 	EnableMDNS     bool
+	IdentityKey    crypto.PrivKey // ← add this
 
-	// CRITICAL-4: Message validation config
-	MaxMessageSize     int64         // 10MB default
-	MaxBlockRangeSize  int           // 100 blocks default
-	StreamReadTimeout  time.Duration // 30s default
-	StreamWriteTimeout time.Duration // 30s default
+	MaxMessageSize     int64
+	MaxBlockRangeSize  int
+	StreamReadTimeout  time.Duration
+	StreamWriteTimeout time.Duration
 }
 
 // NewManager initializes a new libp2p manager for Thrylos
@@ -256,6 +259,10 @@ func NewManager(config *Config) (*Manager, error) {
 		libp2p.EnableRelay(),
 	}
 
+	// Use deterministic identity if provided
+	if config.IdentityKey != nil {
+		opts = append(opts, libp2p.Identity(config.IdentityKey))
+	}
 	h, err := libp2p.New(opts...)
 	if err != nil {
 		cancel()
@@ -327,6 +334,15 @@ func NewManager(config *Config) (*Manager, error) {
 	}
 
 	return manager, nil
+}
+
+func getNodeP2PKey(nodeID int) (crypto.PrivKey, error) {
+	seedStr := fmt.Sprintf("thrylos-development-p2p-key-%d-2024", nodeID)
+	hash := sha256.Sum256([]byte(seedStr))
+	privKey, _, err := crypto.GenerateEd25519Key(
+		bytes.NewReader(hash[:]),
+	)
+	return privKey, err
 }
 
 // Start starts all P2P services

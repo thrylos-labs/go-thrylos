@@ -3066,3 +3066,103 @@ func (ws *WorldState) GetAllValidators() []*core.Validator {
 
 	return allValidators
 }
+
+// SimulateStateRoot executes the block's transactions against an in-memory overlay
+// and returns the state root that results, without committing any changes.
+// This is used by ValidateBlock to verify that a proposer's claimed state root is correct.
+func (ws *WorldState) SimulateStateRoot(block *core.Block) (string, error) {
+	// Take a read lock on chain state for the duration of simulation.
+	// This prevents the real state from changing under us while we read accounts.
+	ws.chainMu.RLock()
+	defer ws.chainMu.RUnlock()
+
+	log.Printf("🔬 SimulateStateRoot: block=%d, txs=%d", block.Header.Index, len(block.Transactions))
+
+	store := newSimulationStore(ws)
+	executor := &simulationExecutor{store: store}
+
+	for _, tx := range block.Transactions {
+		if err := executor.applyTransaction(tx); err != nil {
+			// A simulation failure means the block contains an invalid transaction.
+			// Return the error so ValidateBlock can reject the block.
+			return "", fmt.Errorf("SimulateStateRoot: tx %s failed: %w", tx.Id, err)
+		}
+	}
+
+	return ws.calculateStateRootFromOverlay(store)
+}
+
+// calculateStateRootFromOverlay runs the same hashing logic as updateStateRoot,
+// but merges the simulation overlay with the real account set before hashing.
+func (ws *WorldState) calculateStateRootFromOverlay(store *simulationStore) (string, error) {
+	// Build the merged account map: real accounts + overlay (overlay wins on conflict)
+	realAccounts := ws.accountManager.GetAllAccounts()
+
+	merged := make(map[string]*core.Account, len(realAccounts)+len(store.overlay))
+	for addr, acc := range realAccounts {
+		merged[addr] = acc
+	}
+	// Overlay accounts overwrite real ones — these are the post-execution versions
+	for addr, acc := range store.overlay {
+		merged[addr] = acc
+	}
+
+	// Sort for deterministic ordering — mirrors updateStateRoot exactly
+	addresses := make([]string, 0, len(merged))
+	for addr := range merged {
+		addresses = append(addresses, addr)
+	}
+	sort.Strings(addresses)
+
+	var stateData []byte
+
+	for _, addr := range addresses {
+		acc := merged[addr]
+		stateData = append(stateData, []byte(acc.Address)...)
+		stateData = append(stateData, []byte(acc.Balance)...)
+
+		nonceBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(nonceBytes, acc.Nonce)
+		stateData = append(stateData, nonceBytes...)
+
+		stateData = append(stateData, []byte(acc.StakedAmount)...)
+		stateData = append(stateData, []byte(acc.Rewards)...)
+
+		if len(acc.DelegatedTo) > 0 {
+			valAddrs := make([]string, 0, len(acc.DelegatedTo))
+			for valAddr := range acc.DelegatedTo {
+				valAddrs = append(valAddrs, valAddr)
+			}
+			sort.Strings(valAddrs)
+			for _, valAddr := range valAddrs {
+				stateData = append(stateData, []byte(valAddr)...)
+				stateData = append(stateData, []byte(acc.DelegatedTo[valAddr])...)
+			}
+		}
+	}
+
+	// Add validator data — same as updateStateRoot
+	ws.validatorMu.RLock()
+	validatorAddresses := make([]string, 0, len(ws.validators))
+	for addr := range ws.validators {
+		validatorAddresses = append(validatorAddresses, addr)
+	}
+
+	sort.Strings(validatorAddresses)
+
+	for _, addr := range validatorAddresses {
+		v := ws.validators[addr]
+		stateData = append(stateData, []byte(v.Address)...)
+		stateData = append(stateData, v.Pubkey...)
+		stateData = append(stateData, []byte(v.Stake)...)
+		if v.Active {
+			stateData = append(stateData, 1)
+		} else {
+			stateData = append(stateData, 0)
+		}
+	}
+	ws.validatorMu.RUnlock()
+
+	hashBytes := hash.Keccak256(stateData)
+	return fmt.Sprintf("%x", hashBytes), nil
+}

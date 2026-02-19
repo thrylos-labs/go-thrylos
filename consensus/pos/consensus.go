@@ -1393,13 +1393,15 @@ func (bv *BlockValidator) ValidateBlock(block *core.Block) error {
 		return fmt.Errorf("proposer validation failed: %v", err)
 	}
 
-	// Validate state root
 	// Validate state root (skip during sync to avoid false mismatches)
-	if !bv.consensusEngine.IsSyncing() {
-		calculatedRoot := bv.consensusEngine.worldState.GetStateRoot()
-		if block.Header.StateRoot != calculatedRoot {
-			return fmt.Errorf("state root mismatch: block=%s, calculated=%s",
-				block.Header.StateRoot, calculatedRoot)
+	if !bv.consensusEngine.IsSyncing() && block.Header.Index > 0 {
+		simulatedRoot, err := bv.consensusEngine.worldState.SimulateStateRoot(block)
+		if err != nil {
+			return fmt.Errorf("state root simulation failed: %v", err)
+		}
+		if block.Header.StateRoot != simulatedRoot {
+			return fmt.Errorf("state root mismatch: block=%s, simulated=%s",
+				block.Header.StateRoot, simulatedRoot)
 		}
 	}
 

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"time"
@@ -86,6 +87,15 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 	return validators, privateKeys, addresses, nil
 }
 
+func getNodeP2PKey(nodeID int) (libp2pcrypto.PrivKey, error) {
+	seedStr := fmt.Sprintf("thrylos-development-p2p-key-%d-2024", nodeID)
+	hash := sha256.Sum256([]byte(seedStr))
+	privKey, _, err := libp2pcrypto.GenerateEd25519Key(
+		bytes.NewReader(hash[:]),
+	)
+	return privKey, err
+}
+
 func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []string, isValidator bool, cfg *config.Config) (*node.Node, error) {
 	allValidators, allPrivateKeys, allAddresses, err := createAllValidators(cfg)
 	if err != nil {
@@ -96,31 +106,41 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 		return nil, fmt.Errorf("invalid nodeID %d", nodeID)
 	}
 
-	nodePrivateKey := allPrivateKeys[nodeID-1]
+	// Derive stable P2P identity key for this node
+	p2pKey, err := getNodeP2PKey(nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive p2p key for node %d: %w", nodeID, err)
+	}
 
-	// Use Node 1 as the static genesis account to prevent sync forks
-	genesisAccount := allAddresses[0]
+nodePrivateKey := allPrivateKeys[nodeID-1]
+genesisAccount := allAddresses[0]
 
-	nodeConfig := &node.NodeConfig{
-		Config:            cfg,
-		PrivateKey:        nodePrivateKey,
-		ShardID:           account.ShardID(0),
-		TotalShards:       1,
-		IsValidator:       isValidator,
-		DataDir:           dataDir,
-		GenesisAccount:    genesisAccount,
-		GenesisSupply:     cfg.Genesis.TotalGenesis,
-		GenesisValidators: allValidators,
-		EnableP2P:         cfg.P2P.Enabled,
-		P2PListenPort:     p2pPort,
-		BootstrapPeers:    bootstrapPeers,
-		EnableAPI:         cfg.API.EnableAPI,
+nodeConfig := &node.NodeConfig{
+    Config:            cfg,
+    PrivateKey:        nodePrivateKey,
+    ShardID:           account.ShardID(0),
+    TotalShards:       1,
+    IsValidator:       isValidator,
+    DataDir:           dataDir,
+    GenesisAccount:    genesisAccount,
+    GenesisSupply:     cfg.Genesis.TotalGenesis,
+    GenesisValidators: allValidators,
+    EnableP2P:         cfg.P2P.Enabled,
+    P2PListenPort:     p2pPort,
+    BootstrapPeers:    bootstrapPeers,
+    EnableAPI:         cfg.API.EnableAPI,
+    P2PIdentityKey:    p2pKey,
+}
+
 	}
 
 	n, err := node.NewNode(nodeConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create dev node: %w", err)
 	}
+
+	// Remove the temporary peer ID log — it's now predictable
+	// log.Printf("🔑 Node 1 Peer ID: %s", n.GetP2PHost().ID().String())
 
 	if err := n.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start dev node: %w", err)

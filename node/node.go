@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/thrylos-labs/go-thrylos/api"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/consensus/pos"
@@ -105,8 +106,10 @@ type NodeConfig struct {
 	EnableP2P         bool
 	P2PListenPort     int
 	BootstrapPeers    []string
-	EnableAPI         bool `json:"enable_api"`
-	APIPort           int  `json:"api_port"`
+	EnableAPI         bool                 `json:"enable_api"`
+	APIPort           int                  `json:"api_port"`
+	P2PIdentityKey    libp2pcrypto.PrivKey // ← add this
+
 }
 
 func (n *Node) StartAPI() error { // Add (n *Node) - it's a method!
@@ -236,6 +239,8 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 			nodeConfig.P2PListenPort,
 			nodeConfig.BootstrapPeers,
 			nodeConfig.EnableP2P,
+			nodeConfig.P2PIdentityKey, // ← add this
+
 		)
 		if err != nil {
 			storage.Close() // Clean up storage
@@ -463,7 +468,7 @@ func (n *Node) Start() error {
 				log.Printf("⚠️ Chain sync incomplete: %v, proceeding anyway", err)
 			}
 			n.consensusEngine.SetSyncing(false)
-			log.Println("✅ Chain sync complete, ready to produce blocks")
+
 		} else {
 			n.syncManager.Start()
 			go func() {
@@ -653,15 +658,25 @@ func (n *Node) processP2PMessages() {
 		case block := <-n.p2pNetwork.BlockChan:
 			localHeight := n.blockchain.GetHeight()
 			if block.Header.Index > localHeight+1 {
-				// Too far ahead, sync loop will catch up - silently drop
 				log.Printf("⏭️ Dropping out-of-order block %d (local height: %d), sync will catch up",
 					block.Header.Index, localHeight)
 				continue
 			}
-			if err := n.blockchain.AddBlockFromSync(block); err != nil {
-				fmt.Printf("Failed to process P2P block: %v\n", err)
+
+			if n.consensusEngine.IsSyncing() {
+				// During sync: trust incoming blocks unconditionally
+				if err := n.blockchain.AddBlockFromSync(block); err != nil {
+					fmt.Printf("Failed to process sync block: %v\n", err)
+				} else {
+					fmt.Printf("Processed sync block %s from P2P network\n", block.Hash)
+				}
 			} else {
-				fmt.Printf("Processed block %s from P2P network\n", block.Hash)
+				// Live block: validate through consensus engine including SimulateStateRoot
+				if err := n.blockchain.AddBlock(block); err != nil {
+					fmt.Printf("Failed to process live block: %v\n", err)
+				} else {
+					fmt.Printf("Processed live block %s from P2P network\n", block.Hash)
+				}
 			}
 
 		case tx := <-n.p2pNetwork.TransactionChan:

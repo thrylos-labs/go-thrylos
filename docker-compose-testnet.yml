@@ -38,7 +38,7 @@ services:
       - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
       - P2P_PORT=9000
       - DATA_DIR=/app/data
-      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000
+      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000/p2p/12D3KooWR1PxFnT2FwWFZtpzuTWEVPmHaCZXBjMiZQrC4SjkNuSM
       - THRYLOS_ENVIRONMENT=development
     ports:
       - "8081:8080"
@@ -70,7 +70,7 @@ services:
       - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
       - P2P_PORT=9000
       - DATA_DIR=/app/data
-      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000,/ip4/172.25.0.11/tcp/9000
+      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000/p2p/12D3KooWR1PxFnT2FwWFZtpzuTWEVPmHaCZXBjMiZQrC4SjkNuSM,/ip4/172.25.0.11/tcp/9000/p2p/12D3KooWJtqxVZLaEqcBrKDGCffwuRuFU1Ug7gaC63tbx7gZjSMn
       - THRYLOS_ENVIRONMENT=development
     ports:
       - "8082:8080"
@@ -103,7 +103,7 @@ services:
       - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
       - P2P_PORT=9000
       - DATA_DIR=/app/data
-      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000
+      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000/p2p/12D3KooWR1PxFnT2FwWFZtpzuTWEVPmHaCZXBjMiZQrC4SjkNuSM
       - THRYLOS_ENVIRONMENT=development
     ports:
       - "8083:8080"

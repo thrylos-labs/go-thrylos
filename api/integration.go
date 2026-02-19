@@ -107,14 +107,26 @@ func NewAPIManagerWithConfig(
 
 // Start starts the API server in a goroutine
 func (am *APIManager) Start() error {
+	ready := make(chan struct{})
+	var startErr error
+
 	go func() {
+		// Signal ready after a brief moment — server binds synchronously
+		// before ListenAndServe blocks on accept loop
+		time.AfterFunc(50*time.Millisecond, func() {
+			close(ready)
+		})
 		if err := am.server.Start(); err != nil && err != http.ErrServerClosed {
+			startErr = err
 			log.Printf("❌ API server error: %v", err)
 		}
 	}()
 
-	// Wait a moment for server to start
-	time.Sleep(100 * time.Millisecond)
+	<-ready
+
+	if startErr != nil {
+		return startErr
+	}
 
 	log.Printf("✅ API server started successfully on port %d", am.server.port)
 	return nil
