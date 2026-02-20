@@ -109,7 +109,6 @@ type NodeConfig struct {
 	EnableAPI         bool                 `json:"enable_api"`
 	APIPort           int                  `json:"api_port"`
 	P2PIdentityKey    libp2pcrypto.PrivKey // ← add this
-
 }
 
 func (n *Node) StartAPI() error { // Add (n *Node) - it's a method!
@@ -319,8 +318,6 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 
 	return node, nil
 }
-
-// ... [Rest of the file remains unchanged, port helper, Start, Stop etc.] ...
 
 func parsePortFromAddr(addr string) int {
 	if addr == "" {
