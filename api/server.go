@@ -15,6 +15,7 @@ package api
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 	"github.com/thrylos-labs/go-thrylos/config"
@@ -653,6 +655,13 @@ func (s *Server) submitStakeTransaction(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// ✅ C-01 FIX: Cryptographically verify the signature proves ownership of req.From
+	if err := verifyStakingSignature(req.From, req.To, req.Amount, req.Timestamp, req.Signature); err != nil {
+		log.Printf("❌ Signature verification failed for stake from %s: %v", req.From, err)
+		s.writeError(w, "Invalid signature", http.StatusUnauthorized)
+		return
+	}
+
 	amountBig, ok := new(big.Int).SetString(req.Amount, 10)
 	if !ok || amountBig.Sign() <= 0 {
 		log.Printf("❌ Parse failed: ok=%v, sign=%d", ok, amountBig.Sign())
@@ -749,6 +758,13 @@ func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request
 	// Validate signature
 	if req.Signature == "" {
 		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
+		return
+	}
+
+	// ✅ C-01 FIX: Cryptographically verify the signature proves ownership of req.From
+	if err := verifyStakingSignature(req.From, req.To, req.Amount, req.Timestamp, req.Signature); err != nil {
+		log.Printf("❌ Signature verification failed for unstake from %s: %v", req.From, err)
+		s.writeError(w, "Invalid signature", http.StatusUnauthorized)
 		return
 	}
 
@@ -2440,4 +2456,57 @@ func (s *Server) getValidatorActivityEnhanced(w http.ResponseWriter, r *http.Req
 	}
 
 	s.writeJSON(w, response)
+}
+
+// verifyStakingSignature verifies that the request was signed by the owner of fromAddr.
+// The frontend must sign the canonical payload string with the user's Ethereum private key.
+// Canonical payload: "<from>:<to>:<amount>:<timestamp>"  (same fields the tx hash uses)
+func verifyStakingSignature(fromAddr, toAddr, amount string, timestamp int64, sigHex string) error {
+	// 1. Strip 0x prefix if present
+	sigHex = strings.TrimPrefix(sigHex, "0x")
+	sigBytes, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return fmt.Errorf("invalid signature hex: %w", err)
+	}
+	if len(sigBytes) != 65 {
+		return fmt.Errorf("invalid signature length: got %d, want 65", len(sigBytes))
+	}
+
+	// Reject requests older than 5 minutes or more than 30s in the future
+	now := time.Now().Unix()
+	if timestamp < now-300 || timestamp > now+30 {
+		return fmt.Errorf("request timestamp out of acceptable window")
+	}
+
+	// 2. Build the exact same payload the frontend signed
+	payload := fmt.Sprintf("%s:%s:%s:%d", fromAddr, toAddr, amount, timestamp)
+
+	// 3. Ethereum personal_sign prefixes the message before hashing
+	// This matches MetaMask's eth_sign / personal_sign behaviour
+	prefixed := fmt.Sprintf("\x19Ethereum Signed Message:\n%d%s", len(payload), payload)
+	hash := crypto.Keccak256([]byte(prefixed))
+
+	// 4. Normalise recovery ID: Ethereum uses 27/28, go-ethereum expects 0/1
+	if sigBytes[64] >= 27 {
+		sigBytes[64] -= 27
+	}
+
+	// 5. Recover the public key from the signature
+	pubKeyBytes, err := crypto.Ecrecover(hash, sigBytes)
+	if err != nil {
+		return fmt.Errorf("failed to recover public key: %w", err)
+	}
+
+	pubKey, err := crypto.UnmarshalPubkey(pubKeyBytes)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal public key: %w", err)
+	}
+
+	// 6. Derive address from recovered key and compare
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey).Hex()
+	if !strings.EqualFold(recoveredAddr, fromAddr) {
+		return fmt.Errorf("signature mismatch: signed by %s, claimed %s", recoveredAddr, fromAddr)
+	}
+
+	return nil
 }
