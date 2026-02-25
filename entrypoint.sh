@@ -26,9 +26,10 @@ fi
 
 echo "🔥 Launching Thrylos..."
 # If not node-1, wait for P2P port 9000 on node-1 to be reachable before starting
+# Uses /dev/tcp bash built-in — no netcat needed in Alpine
 if [ "$NODE_ID" != "1" ]; then
     echo "⏳ Waiting for node-1 P2P..."
-    while ! nc -z 172.25.0.10 9000; do
+    while ! bash -c "echo > /dev/tcp/172.25.0.10/9000" 2>/dev/null; do
       sleep 1
     done
     echo "✅ Node-1 P2P reachable"

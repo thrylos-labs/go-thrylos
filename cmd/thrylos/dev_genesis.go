@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/crypto"
@@ -113,7 +114,15 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 	}
 
 	nodePrivateKey := allPrivateKeys[nodeID-1]
-	genesisAccount := allAddresses[0]
+
+	// Use the treasury address from genesis.json as the genesis account.
+	// allAddresses[0] is a validator address, not the funded treasury account.
+	var genesisAccount string
+	if len(cfg.Genesis.Accounts) > 0 && cfg.Genesis.Accounts[0].Address != "" {
+		genesisAccount = cfg.Genesis.Accounts[0].Address
+	} else {
+		genesisAccount = allAddresses[0]
+	}
 
 	nodeConfig := &node.NodeConfig{
 		Config:            cfg,

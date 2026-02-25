@@ -451,13 +451,16 @@ func (n *Node) Start() error {
 						log.Printf("❌ PANIC in SyncToNetworkTip: %v", r)
 					}
 				}()
+				interval := 2 * time.Second // fast during initial sync
 				for {
-					time.Sleep(2 * time.Second)
-					log.Printf("🔄 SyncToNetworkTip attempting...")
+					time.Sleep(interval)
 					if err := n.syncManager.SyncToNetworkTip(); err != nil {
 						log.Printf("⚠️ SyncToNetworkTip: %v", err)
 					}
-					// No exit - keep syncing in background forever
+					// Once synced, back off to 30s polling
+					if !n.consensusEngine.IsSyncing() {
+						interval = 30 * time.Second
+					}
 				}
 			}()
 			log.Println("⏳ Waiting for chain sync to complete...")

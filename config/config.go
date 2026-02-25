@@ -76,8 +76,9 @@ type GenesisAccount struct {
 
 // GenesisAllocation represents the genesis token allocation
 type GenesisAllocation struct {
-	TotalGenesis string           `json:"total_genesis"` // ✅ Changed from int64 to string
-	Accounts     []GenesisAccount `json:"accounts"`
+	TotalGenesis     string           `json:"total_genesis"`
+	GenesisTimestamp int64            `json:"genesis_timestamp"`
+	Accounts         []GenesisAccount `json:"accounts"`
 }
 
 type Config struct {
@@ -537,6 +538,10 @@ func loadGenesisFromFile(path string, cfg *Config) error {
 	}
 
 	cfg.Genesis = allocation
+	// Propagate genesis_timestamp so all nodes use the same value for genesis block hashing
+	if allocation.GenesisTimestamp != 0 {
+		cfg.GenesisTimestamp = allocation.GenesisTimestamp
+	}
 	return nil
 }
 

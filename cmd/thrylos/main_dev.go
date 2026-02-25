@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
 )
@@ -20,7 +19,7 @@ func main() {
 	var bootstraps = flag.String("bootstrap", "", "Comma-separated bootstrap peers")
 	var dataDir = flag.String("data", "", "Data directory (default: ./data-nodeN)")
 	var validator = flag.Bool("validator", true, "Run as validator")
-	var enableAPI = flag.Bool("api", true, "Enable embedded API server")
+	// enableAPI flag removed — API is started inside node.Start() when EnableAPI=true in config
 
 	flag.Parse()
 
@@ -37,14 +36,13 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	// Force dev environment
 	cfg.Environment = "development"
 	cfg.Network.ChainID = "thrylos-devnet-1337"
 
-	// Fixed genesis timestamp for deterministic genesis across all nodes
-	cfg.GenesisTimestamp = time.Now().Unix()
+	if cfg.GenesisTimestamp == 0 {
+		cfg.GenesisTimestamp = 1772016307
+	}
 
-	// Prepare bootstrap peers
 	var bootstrapPeers []string
 	if *bootstraps != "" {
 		for _, p := range strings.Split(*bootstraps, ",") {
@@ -57,19 +55,11 @@ func main() {
 		bootstrapPeers = append(bootstrapPeers, cfg.P2P.BootstrapPeers...)
 	}
 
-	// Start the Node
-	node, err := startDevNode(*nodeID, *dataDir, *p2pPort, bootstrapPeers, *validator, cfg)
+	_, err = startDevNode(*nodeID, *dataDir, *p2pPort, bootstrapPeers, *validator, cfg)
 	if err != nil {
 		log.Fatalf("dev node failed: %v", err)
 	}
 
-	// ✅ NEW: Start embedded API server
-	if *enableAPI {
-		if err := node.StartAPI(); err != nil { // No apiConfig arg needed
-			log.Printf("⚠️  Failed to start API server: %v", err)
-		}
-	}
-
-	log.Println("✅ Node running with embedded API")
-	select {} // keep node running
+	log.Println("✅ Node running")
+	select {}
 }

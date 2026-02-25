@@ -116,9 +116,13 @@ func NewConsensusEngine(
 		log.Printf("⚠️ GenesisTimestamp not set in config, using current time: %d\n", genesisTime)
 	}
 
+	maxDrift := int64(300)
+	if engine.config != nil && engine.config.Environment == "development" {
+		maxDrift = 3600
+	}
 	engine.timestampValidator = NewTimestampValidator(
-		300, // maxDriftSeconds - allow ±30 seconds drift
-		6,   // slotDurationSeconds
+		maxDrift, // ±5min production, ±1hr development
+		6,        // slotDurationSeconds
 		genesisTime,
 	)
 

@@ -86,6 +86,11 @@ type WorldState struct {
 
 	unbondingQueue []types.UnbondingEntry
 	unbondingMu    sync.RWMutex
+
+	// genesisCommitted is set to true once block 0 has been saved to the DB,
+	// either via InitializeGenesis (node-1) or AddBlockFromSync (nodes 2-4).
+	// Used to distinguish in-memory defaults from committed state in ImportWorldState.
+	genesisCommitted bool
 }
 
 func (ws *WorldState) calculateBlockHash(b *core.Block) string {
@@ -200,9 +205,11 @@ func (ws *WorldState) InitializeFromConfig() error {
 	}
 
 	// Save genesis block
+	// Save genesis block
 	if err := ws.db.SaveBlock(genesisBlock); err != nil {
 		return fmt.Errorf("failed to save genesis block: %v", err)
 	}
+	ws.genesisCommitted = true
 
 	// Calculate readable total supply for print
 	readableTotal := new(big.Int).Div(totalGenesisBalanceBig, baseUnit)
@@ -456,6 +463,9 @@ func (ws *WorldState) AddBlockFromSync(block *core.Block) error {
 	if err := ws.db.SaveBlock(block); err != nil {
 		return fmt.Errorf("failed to save block: %v", err)
 	}
+	if block.Header.Index == 0 {
+		ws.genesisCommitted = true
+	}
 	if err := ws.db.SaveBlockByHeight(block); err != nil {
 		return fmt.Errorf("failed to save block by height: %v", err)
 	}
@@ -596,10 +606,11 @@ func (ws *WorldState) ImportWorldState(
 		return fmt.Errorf("ImportWorldState: received empty snapshot, refusing to apply")
 	}
 
-	// Guard: do not overwrite an already-populated world state.
-	// This prevents accidental application on Node 1 or on a node that already synced.
+	// Guard: only refuse to overwrite if genesis has been committed to the DB.
+	// In-memory defaults from internal config (when genesis.json is missing) are
+	// not committed state and should be replaced by a peer's full snapshot.
 	existing := ws.accountManager.GetAllAccounts()
-	if len(existing) > 0 {
+	if len(existing) > 0 && ws.genesisCommitted {
 		return fmt.Errorf(
 			"ImportWorldState: world state already has %d accounts, refusing to overwrite",
 			len(existing),
