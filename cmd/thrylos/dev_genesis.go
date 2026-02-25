@@ -112,26 +112,24 @@ func startDevNode(nodeID int, dataDir string, p2pPort int, bootstrapPeers []stri
 		return nil, fmt.Errorf("failed to derive p2p key for node %d: %w", nodeID, err)
 	}
 
-nodePrivateKey := allPrivateKeys[nodeID-1]
-genesisAccount := allAddresses[0]
+	nodePrivateKey := allPrivateKeys[nodeID-1]
+	genesisAccount := allAddresses[0]
 
-nodeConfig := &node.NodeConfig{
-    Config:            cfg,
-    PrivateKey:        nodePrivateKey,
-    ShardID:           account.ShardID(0),
-    TotalShards:       1,
-    IsValidator:       isValidator,
-    DataDir:           dataDir,
-    GenesisAccount:    genesisAccount,
-    GenesisSupply:     cfg.Genesis.TotalGenesis,
-    GenesisValidators: allValidators,
-    EnableP2P:         cfg.P2P.Enabled,
-    P2PListenPort:     p2pPort,
-    BootstrapPeers:    bootstrapPeers,
-    EnableAPI:         cfg.API.EnableAPI,
-    P2PIdentityKey:    p2pKey,
-}
-
+	nodeConfig := &node.NodeConfig{
+		Config:            cfg,
+		PrivateKey:        nodePrivateKey,
+		ShardID:           account.ShardID(0),
+		TotalShards:       1,
+		IsValidator:       isValidator,
+		DataDir:           dataDir,
+		GenesisAccount:    genesisAccount,
+		GenesisSupply:     cfg.Genesis.TotalGenesis,
+		GenesisValidators: allValidators,
+		EnableP2P:         cfg.P2P.Enabled,
+		P2PListenPort:     p2pPort,
+		BootstrapPeers:    bootstrapPeers,
+		EnableAPI:         cfg.API.EnableAPI,
+		P2PIdentityKey:    p2pKey,
 	}
 
 	n, err := node.NewNode(nodeConfig)
