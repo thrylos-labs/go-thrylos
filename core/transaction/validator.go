@@ -1493,11 +1493,10 @@ func (v *Validator) ValidateReplayProtection(tx *core.Transaction, currentHeight
 		}
 	}
 
-	// VALIDATION 3: Nonce must be present (prevents replay with missing nonce)
-	// This is already checked elsewhere, but belt-and-suspenders
-	if tx.Nonce == 0 {
-		return fmt.Errorf("transaction missing nonce (required for replay protection)")
-	}
+	// VALIDATION 3: Nonce validation is handled by validateNonce() which
+	// compares tx.Nonce against the sender's stored account nonce.
+	// Rejecting Nonce==0 here is wrong — it is the legitimate first-transaction
+	// nonce for every new account and would block all new wallets.
 
 	return nil
 }

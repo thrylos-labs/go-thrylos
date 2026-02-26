@@ -451,16 +451,17 @@ func (n *Node) Start() error {
 						log.Printf("❌ PANIC in SyncToNetworkTip: %v", r)
 					}
 				}()
-				interval := 2 * time.Second // fast during initial sync
+				interval := 2 * time.Second
 				for {
 					time.Sleep(interval)
+					log.Printf("🔄 SyncToNetworkTip attempting...")
 					if err := n.syncManager.SyncToNetworkTip(); err != nil {
 						log.Printf("⚠️ SyncToNetworkTip: %v", err)
+						interval = 2 * time.Second // back-off on error: retry fast
+					} else if !n.consensusEngine.IsSyncing() {
+						interval = 30 * time.Second // fully synced: poll slowly
 					}
-					// Once synced, back off to 30s polling
-					if !n.consensusEngine.IsSyncing() {
-						interval = 30 * time.Second
-					}
+					// No exit - keep syncing in background forever
 				}
 			}()
 			log.Println("⏳ Waiting for chain sync to complete...")
@@ -477,10 +478,14 @@ func (n *Node) Start() error {
 						log.Printf("❌ PANIC in SyncToNetworkTip (node1): %v", r)
 					}
 				}()
+				interval := 5 * time.Second
 				for {
-					time.Sleep(5 * time.Second) // Slightly longer interval for node 1
+					time.Sleep(interval)
 					if err := n.syncManager.SyncToNetworkTip(); err != nil {
 						log.Printf("⚠️ SyncToNetworkTip (node1): %v", err)
+						interval = 5 * time.Second
+					} else if !n.consensusEngine.IsSyncing() {
+						interval = 30 * time.Second
 					}
 				}
 			}()

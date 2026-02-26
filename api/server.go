@@ -165,9 +165,13 @@ func NewServerWithConfig(
 	// ✅ FIX: Only initialize PointsManager if Faucet is enabled (Dev Mode)
 	var pm *PointsManager
 	if cfg.API.EnableFaucet {
-		pm = NewPointsManager("points.json")
+		path := os.Getenv("POINTS_FILE_PATH")
+		if path == "" {
+			path = "points.json"
+		}
+		pm = NewPointsManager(path)
 	} else {
-		pm = nil // No points in production
+		pm = nil
 	}
 
 	server := &Server{
@@ -466,14 +470,16 @@ func (s *Server) setupRoutes() {
 		"https://app.thrylos.org",
 	}
 
-	// Add localhost for development
-	allowedOrigins = append(allowedOrigins,
-		"http://localhost:3000",
-		"http://localhost:5173",
-		"http://localhost:8080",
-		"http://127.0.0.1:5173",
-		"http://127.0.0.1:3000",
-	)
+	// Add localhost origins only in dev/testnet environments
+	if isDevEnvironment() {
+		allowedOrigins = append(allowedOrigins,
+			"http://localhost:3000",
+			"http://localhost:5173",
+			"http://localhost:8080",
+			"http://127.0.0.1:5173",
+			"http://127.0.0.1:3000",
+		)
+	}
 
 	c := cors.New(cors.Options{
 		AllowedOrigins: allowedOrigins,
@@ -674,23 +680,8 @@ func (s *Server) submitStakeTransaction(w http.ResponseWriter, r *http.Request) 
 	log.Printf("   BigInt sign: %d", amountBig.Sign())
 	log.Printf("   BigInt bits: %d", amountBig.BitLen())
 
-	// Check if user has enough balance
-	account, err := s.worldState.GetAccount(req.From)
-	if err != nil {
-		s.writeError(w, fmt.Sprintf("Account not found: %s", req.From), http.StatusNotFound)
-		return
-	}
-
-	balanceBig, ok := new(big.Int).SetString(account.Balance, 10)
-	if !ok {
-		s.writeError(w, "Invalid account balance format", http.StatusInternalServerError)
-		return
-	}
-
-	if amountBig.Cmp(balanceBig) > 0 {
-		s.writeError(w, fmt.Sprintf("Insufficient balance: have %s wei, need %s wei", account.Balance, req.Amount), http.StatusBadRequest)
-		return
-	}
+	// Balance sufficiency is checked atomically inside stakingManager.Delegate()
+	// under its mutex — do not pre-check here to avoid a TOCTOU race.
 
 	// Verify validator exists
 	validator, err := s.worldState.GetValidator(req.To)
@@ -880,14 +871,26 @@ func (s *Server) getNetworkStats(w http.ResponseWriter, r *http.Request) {
 		networkStatus = "initializing"
 	}
 
-	// Calculate APY (simplified - you can make this more sophisticated)
-	apy := "10.5" // Placeholder - calculate based on your staking rewards
+	// Calculate a live APY estimate from active validator commission rates.
+	// Formula: base annual rate (10%) minus the average commission across validators.
+	// Replace with rewards.Distributor.GetCurrentAPY() once wired to the Server struct.
+	const baseAnnualRate = 10.0
+	apy := baseAnnualRate
+	if len(validators) > 0 {
+		var totalCommission float64
+		for _, v := range validators {
+			totalCommission += v.Commission
+		}
+		avgCommission := totalCommission / float64(len(validators))
+		apy = baseAnnualRate * (1 - avgCommission)
+	}
+	apyStr := fmt.Sprintf("%.2f", apy)
 
 	response := map[string]interface{}{
 		"current_height":    height,
 		"active_validators": activeValidators,
 		"network_status":    networkStatus,
-		"apy":               apy,
+		"apy":               apyStr,
 	}
 
 	s.writeJSON(w, response)
@@ -1210,16 +1213,20 @@ func isDevEnvironment() bool {
 	env := strings.ToLower(os.Getenv("THRYLOS_ENVIRONMENT"))
 
 	switch env {
-	case "development", "dev", "devnet", "testnet", "test":
+	case "development", "dev", "devnet":
+		return true
+	case "testnet", "test":
+		// Testnet: faucet intentionally open during incentive programme.
+		// IMPORTANT: flip this to false (or set THRYLOS_ENVIRONMENT=mainnet)
+		// before deploying the production binary.
+		log.Println("⚠️  THRYLOS_ENVIRONMENT=testnet — dev features (faucet, points) are ENABLED")
 		return true
 	case "production", "prod", "mainnet":
 		return false
 	case "":
-		// No env set: BE SAFE, not permissive
 		log.Println("⚠️  THRYLOS_ENVIRONMENT is not set, assuming PRODUCTION (dev-only features disabled)")
 		return false
 	default:
-		// Unknown environment string: also be safe
 		log.Printf("⚠️  Unknown THRYLOS_ENVIRONMENT=%q, assuming PRODUCTION (dev-only features disabled)\n", env)
 		return false
 	}

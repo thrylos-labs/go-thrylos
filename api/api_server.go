@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -29,7 +30,12 @@ func NewAPIServer(worldState *state.WorldState, config *APIConfig) *APIServer {
 	}
 
 	// Initialize points manager
-	pointsManager := NewPointsManager(config.PointsFile)
+	path := os.Getenv("POINTS_FILE_PATH")
+	if path == "" {
+		path = "points.json"
+	}
+	pointsManager := NewPointsManager(path)
+
 	log.Println("🏆 Points Manager initialized")
 
 	// Setup Gin router
