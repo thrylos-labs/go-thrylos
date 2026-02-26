@@ -121,7 +121,7 @@ func (n *Node) StartAPI() error { // Add (n *Node) - it's a method!
 	}
 
 	n.apiManager = api.NewAPIManagerWithConfig(
-		n.worldState, n.blockchain, n.evmExecutor, n.config, apiConfig)
+		n.worldState, n.blockchain, n.evmExecutor, n.config, apiConfig, n.GetPeerID)
 
 	return n.apiManager.Start()
 }
@@ -310,6 +310,7 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 			revmExecutor,
 			nodeConfig.Config,
 			apiConfig,
+			node.GetPeerID,
 		)
 	}
 

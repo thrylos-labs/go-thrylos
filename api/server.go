@@ -64,6 +64,8 @@ type Server struct {
 	rateLimitConfig *RateLimitConfig
 	endpointLimiter *EndpointLimiter
 	ethHandler      *EthereumRPCHandler
+	peerIDFunc      func() string // FIND-04: returns this node's libp2p peer ID
+
 }
 
 // ServerConfig represents server configuration
@@ -143,10 +145,10 @@ func NewServerWithServerConfig(worldState *state.WorldState, serverConfig *Serve
 
 func NewServerWithConfig(
 	worldState *state.WorldState,
-	blockchain *chain.Blockchain, // <--- Add arg
+	blockchain *chain.Blockchain,
 	evmExecutor *evm.RevmExecutor,
-
-	cfg *config.Config, // <--- Add arg
+	cfg *config.Config, // 4th
+	peerIDFunc func() string, // 5th
 ) *Server {
 
 	// Create rate limit config from main config
@@ -186,6 +188,7 @@ func NewServerWithConfig(
 		keyFile:         cfg.API.KeyFile,
 		rateLimitConfig: rateLimitConfig,
 		enableFaucet:    cfg.API.EnableFaucet,
+		peerIDFunc:      peerIDFunc, // this line must be present
 	}
 
 	server.rateLimiter = NewRateLimiter(server.rateLimitConfig)

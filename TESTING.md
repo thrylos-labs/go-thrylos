@@ -27,11 +27,17 @@ This guide explains how to connect MetaMask to your local Thrylos node, import t
 | :--- | :--- |
 | **Network Name** | `Thrylos Local` |
 | **New RPC URL** | `http://localhost:8545` |
-| **Chain ID** | `1` *(Ignore warning about Mainnet)* |
+| **Chain ID** | `1337` *(Thrylos devnet — do NOT use 1, which is Ethereum mainnet)* |
 | **Currency Symbol** | `THR` |
 | **Decimals** | **9** *(Important: Thrylos uses 9 decimals)* |
 
 5.  Click **Save**.
+
+> ⚠️ **Security Note:** Chain ID `1337` is the designated Thrylos devnet ID and matches the
+> `CHAIN_ID=thrylos-devnet-1337` environment variable in `docker-compose-testnet.yml`.
+> **Never use Chain ID `1`** for local testing — that is the Ethereum mainnet chain ID,
+> which creates a replay-attack surface where locally signed transactions could be
+> rebroadcast on Ethereum mainnet.
 
 ---
 
@@ -44,6 +50,9 @@ This guide explains how to connect MetaMask to your local Thrylos node, import t
 5.  Click **Import**.
 
 > **Success:** You should see a balance (e.g., `1,000,000 THR`).
+
+> ⚠️ **Never reuse** a genesis test private key on any public network. Generate fresh keys
+> for each environment (devnet, testnet, mainnet).
 
 ---
 
@@ -93,3 +102,7 @@ If you restart your local node, MetaMask gets confused because the chain reset b
 ### Balance Looks Wrong (Too Small/Big)
 * Thrylos uses 9 decimals ($10^9$). Standard Ethereum uses 18.
 * **Fix:** Edit the network in MetaMask and ensure **Decimals** is set to `9`.
+
+### Wrong Chain ID / MetaMask shows mainnet warning
+* Ensure the Chain ID field in MetaMask is `1337`, not `1`.
+* **Fix:** Remove the network and re-add it with Chain ID `1337`.

@@ -54,7 +54,7 @@ func NewAPIManager(
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Pass the new dependencies down to the Server
-	server := NewServerWithConfig(worldState, blockchain, evmExecutor, cfg)
+	server := NewServerWithConfig(worldState, blockchain, evmExecutor, cfg, nil)
 
 	if port != 0 {
 		server.port = port
@@ -74,10 +74,11 @@ func NewAPIManagerWithConfig(
 	evmExecutor *evm.RevmExecutor,
 	mainConfig *config.Config,
 	apiConfig *APIManagerConfig,
+	peerIDFunc func() string,
 ) *APIManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	server := NewServerWithConfig(worldState, blockchain, evmExecutor, mainConfig)
+	server := NewServerWithConfig(worldState, blockchain, evmExecutor, mainConfig, peerIDFunc)
 
 	// Parse port from RESTAddr (e.g., ":8080" -> 8080)
 	port := 8080 // default

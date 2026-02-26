@@ -1,5 +1,18 @@
 version: "3.8"
 
+# -----------------------------------------------------------------------
+# Thrylos Testnet — docker-compose
+#
+# SECURITY: Bootstrap peer IDs are no longer hardcoded in this file.
+# Instead, each node derives its peer ID at runtime from its persistent
+# identity key (stored in the node's key volume). Node 1 acts as the
+# bootstrap; nodes 2–4 learn its multiaddr via the health-check endpoint
+# rather than a compiled-in peer ID string.
+#
+# To see a running node's peer ID:
+#   docker exec thrylos-node-1 thrylos peer-id
+# -----------------------------------------------------------------------
+
 services:
   node-1:
     build: .
@@ -7,11 +20,12 @@ services:
     hostname: node-1
     environment:
       - NODE_ID=1
-      - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
+      - CHAIN_ID=thrylos-devnet-1337
       - P2P_PORT=9000
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
       - POINTS_FILE_PATH=/app/data/points.json
+      # No BOOTSTRAP_PEERS for node-1 (it IS the bootstrap)
     ports:
       - "8080:8080"
       - "9001:9000"
@@ -30,17 +44,44 @@ services:
       start_period: 40s
     restart: unless-stopped
 
+  # -----------------------------------------------------------------------
+  # peer-id-resolver: a tiny helper that runs once after node-1 is healthy,
+  # queries its peer-id endpoint, and writes a shared bootstrap multiaddr
+  # that nodes 2-4 consume. This removes any hardcoded peer IDs.
+  # -----------------------------------------------------------------------
+  peer-id-resolver:
+    image: alpine:latest
+    container_name: thrylos-peer-id-resolver
+    depends_on:
+      node-1:
+        condition: service_healthy
+    networks:
+      - thrylos-net
+    volumes:
+      - shared-config-v3:/app/config
+    # Query node-1's peer-id API and write the resolved multiaddr to a shared
+    # config file. Nodes 2-4 read BOOTSTRAP_PEERS from this file at startup.
+    command: >
+      sh -c "
+        PEER_ID=$(wget -qO- http://172.25.0.10:8080/api/v1/peer-id) &&
+        echo \"/ip4/172.25.0.10/tcp/9000/p2p/$${PEER_ID}\" > /app/config/bootstrap_peers.txt &&
+        echo \"Bootstrap peer resolved: $${PEER_ID}\"
+      "
+    restart: "no"
+
   node-2:
     build: .
     container_name: thrylos-node-2
     hostname: node-2
     environment:
       - NODE_ID=2
-      - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
+      - CHAIN_ID=thrylos-devnet-1337
       - P2P_PORT=9000
       - DATA_DIR=/app/data
-      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000/p2p/12D3KooWBUvhGhW9vCqhxXwTtiVxBZRwzczLXGZpFfGUGrfzuu5g
       - THRYLOS_ENVIRONMENT=development
+      # BOOTSTRAP_PEERS is read from the shared config file at entrypoint,
+      # not hardcoded here. See entrypoint.sh for how this is consumed.
+      - BOOTSTRAP_PEERS_FILE=/app/config/bootstrap_peers.txt
     ports:
       - "8081:8080"
       - "9002:9000"
@@ -52,14 +93,14 @@ services:
       thrylos-net:
         ipv4_address: 172.25.0.11
     depends_on:
-      node-1:
-        condition: service_healthy
+      peer-id-resolver:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]  
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s 
+      start_period: 60s
     restart: unless-stopped
 
   node-3:
@@ -68,11 +109,11 @@ services:
     hostname: node-3
     environment:
       - NODE_ID=3
-      - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
+      - CHAIN_ID=thrylos-devnet-1337
       - P2P_PORT=9000
       - DATA_DIR=/app/data
-      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000/p2p/12D3KooWR1PxFnT2FwWFZtpzuTWEVPmHaCZXBjMiZQrC4SjkNuSM,/ip4/172.25.0.11/tcp/9000/p2p/12D3KooWBUvhGhW9vCqhxXwTtiVxBZRwzczLXGZpFfGUGrfzuu5g
       - THRYLOS_ENVIRONMENT=development
+      - BOOTSTRAP_PEERS_FILE=/app/config/bootstrap_peers.txt
     ports:
       - "8082:8080"
       - "9003:9000"
@@ -84,10 +125,10 @@ services:
       thrylos-net:
         ipv4_address: 172.25.0.12
     depends_on:
-      node-1:
-        condition: service_healthy
+      peer-id-resolver:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]  
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -101,11 +142,11 @@ services:
     hostname: node-4
     environment:
       - NODE_ID=4
-      - CHAIN_ID=thrylos-devnet-1337  # Add this line to all nodes
+      - CHAIN_ID=thrylos-devnet-1337
       - P2P_PORT=9000
       - DATA_DIR=/app/data
-      - BOOTSTRAP_PEERS=/ip4/172.25.0.10/tcp/9000/p2p/12D3KooWBUvhGhW9vCqhxXwTtiVxBZRwzczLXGZpFfGUGrfzuu5g
       - THRYLOS_ENVIRONMENT=development
+      - BOOTSTRAP_PEERS_FILE=/app/config/bootstrap_peers.txt
     ports:
       - "8083:8080"
       - "9004:9000"
@@ -117,10 +158,10 @@ services:
       thrylos-net:
         ipv4_address: 172.25.0.13
     depends_on:
-      node-1:
-        condition: service_healthy
+      peer-id-resolver:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"] 
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3

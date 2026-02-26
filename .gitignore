@@ -36,3 +36,41 @@ revm_wrapper/target/
 *.pem
 *.crt
 certs/
+
+# TLS certificates and private keys
+# The /certs directory should ONLY ever contain a README explaining
+# how to generate/obtain certificates — never actual cert/key files.
+certs/*.key
+certs/*.pem
+certs/*.crt
+certs/*.p12
+certs/*.pfx
+
+# Node private keys and keystores
+keys/
+*.keystore
+*.key
+
+# Secrets and credentials
+.env
+.env.*
+secrets/
+*.secret
+
+# Data directories (contain live chain state and keys)
+data/
+data-node*/
+
+# Snapshot files used in points migration
+# These contain real user balances — never commit them
+points_snapshot.json
+*_snapshot.json
+
+# Build artifacts
+bin/
+lib/*.a
+lib/*.so
+lib/*.dylib
+
+# Rust build output
+revm_wrapper/target/
