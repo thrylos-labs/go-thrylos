@@ -291,6 +291,14 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 	return ws, nil
 }
 
+func (ws *WorldState) SetMetadata(key, value string) error {
+	return ws.state.SetMetadata(key, value)
+}
+
+func (ws *WorldState) GetMetadata(key string) (string, error) {
+	return ws.state.GetMetadata(key)
+}
+
 func (ws *WorldState) AtomicIncrementNonce(address string, expectedNonce uint64) (success bool, currentNonce uint64, err error) {
 	// Delegate to the state storage's atomic nonce method
 	return ws.state.AtomicIncrementNonce(address, expectedNonce)

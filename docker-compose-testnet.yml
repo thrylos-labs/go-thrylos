@@ -11,6 +11,7 @@ services:
       - P2P_PORT=9000
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
+      - POINTS_FILE_PATH=/app/data/points.json
     ports:
       - "8080:8080"
       - "9001:9000"

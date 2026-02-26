@@ -81,6 +81,12 @@ type GenesisAllocation struct {
 	Accounts         []GenesisAccount `json:"accounts"`
 }
 
+type PointsConfig struct {
+	ConversionRatio float64 `json:"conversion_ratio"`
+	ConversionCap   string  `json:"conversion_cap"`
+	SnapshotPath    string  `json:"snapshot_path"`
+}
+
 type Config struct {
 	// Node configuration
 	NodeID   string `json:"node_id"`
@@ -101,6 +107,9 @@ type Config struct {
 
 	// Economics configuration with dynamic inflation
 	Economics EconomicsConfig `json:"economics"`
+
+	// Points config
+	Points PointsConfig `json:"points"`
 
 	// Sharding configuration
 	Sharding ShardingConfig `json:"sharding"`
@@ -334,6 +343,12 @@ func Load() (*Config, error) {
 			DowntimeJailDuration:       10 * time.Minute,
 			MinSignedPerWindow:         0.05,
 			SignedBlocksWindow:         30000,
+		},
+
+		Points: PointsConfig{
+			ConversionRatio: 0.001,                         // 1000 points → 1 THRYLOS
+			ConversionCap:   "100000000000000000000000000", // 100M THRYLOS in Wei
+			SnapshotPath:    "",
 		},
 
 		Economics: EconomicsConfig{

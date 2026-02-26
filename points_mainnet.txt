@@ -1,0 +1,11 @@
+At mainnet launch
+
+Start mainnet node normally
+When ready, run the migration script once:
+
+bashgo run cmd/thrylos/migrate_points.go \
+  -data ./data \
+  -snapshot ./points_snapshot.json
+
+Script reads ratio/cap from config, credits all accounts, sets the one-time flag
+Done — users' testnet points become real THRYLOS balances

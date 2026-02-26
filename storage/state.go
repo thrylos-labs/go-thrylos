@@ -279,3 +279,18 @@ func (ss *StateStorage) GetNonce(address string) (uint64, error) {
 	nonce := binary.BigEndian.Uint64(val)
 	return nonce, nil
 }
+
+func (ss *StateStorage) SetMetadata(key, value string) error {
+	return ss.storage.Set([]byte("meta:"+key), []byte(value))
+}
+
+func (ss *StateStorage) GetMetadata(key string) (string, error) {
+	data, err := ss.storage.Get([]byte("meta:" + key))
+	if err != nil {
+		if err == ErrKeyNotFound {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(data), nil
+}

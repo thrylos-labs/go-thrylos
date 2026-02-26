@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sort"
 	"sync"
@@ -243,4 +244,14 @@ func (pm *PointsManager) load() {
 	if err == nil {
 		_ = json.Unmarshal(data, &pm.Users)
 	}
+}
+
+func (pm *PointsManager) ExportSnapshot(path string) error {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	data, err := json.MarshalIndent(pm.Users, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal snapshot: %w", err)
+	}
+	return os.WriteFile(path, data, 0644)
 }

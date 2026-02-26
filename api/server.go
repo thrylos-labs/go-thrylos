@@ -2517,3 +2517,22 @@ func verifyStakingSignature(fromAddr, toAddr, amount string, timestamp int64, si
 
 	return nil
 }
+
+// POST /api/v1/admin/export-points-snapshot
+// Protected by admin auth / dev environment gate
+func (s *Server) handleExportPointsSnapshot(w http.ResponseWriter, r *http.Request) {
+	if !isDevEnvironment() {
+		s.writeError(w, "Not available", http.StatusForbidden)
+		return
+	}
+	path := os.Getenv("POINTS_SNAPSHOT_PATH")
+	if path == "" {
+		path = "points_snapshot.json"
+	}
+	if err := s.pointsManager.ExportSnapshot(path); err != nil {
+		s.writeError(w, "Export failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "exported", "path": path})
+}
