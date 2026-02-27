@@ -4,7 +4,7 @@ FROM golang:1.24-alpine AS builder
 WORKDIR /app
 
 # Install build dependencies including Rust
-RUN apk add --no-cache make git gcc musl-dev linux-headers curl
+RUN apk add --no-cache make git gcc musl-dev linux-headers curl llvm
 
 # ── FIND-09: Pinned Rust installation with checksum verification ──────────────
 #
@@ -21,7 +21,7 @@ RUN apk add --no-cache make git gcc musl-dev linux-headers curl
 # Architecture-aware: detects x86_64 vs aarch64 at build time so the same
 # Dockerfile works on both Intel/AMD and Apple Silicon/ARM servers.
 # ─────────────────────────────────────────────────────────────────────────────
-ARG RUST_VERSION=1.82.0
+ARG RUST_VERSION=1.85.0
 
 RUN set -eux; \
     ARCH="$(uname -m)"; \
@@ -55,21 +55,19 @@ COPY . .
 
 # ── Build REVM library ───────────────────────────────────────────────────────
 WORKDIR /app/revm_wrapper
-RUN cargo build --release --verbose 2>&1 | tail -20
-
-RUN mkdir -p /app/lib
-RUN if [ -f target/release/libthrylos_revm.a ]; then \
-        echo "Found .a file (static library)"; \
-        cp target/release/libthrylos_revm.a /app/lib/libthrylos_revm.a; \
-    elif [ -f target/release/libthrylos_revm.so ]; then \
-        echo "Found .so file (shared library)"; \
-        cp target/release/libthrylos_revm.so /app/lib/libthrylos_revm.so; \
+RUN AR=ar cargo build --release --verbose 2>&1 | tail -20 && \
+    mkdir -p /app/lib && \
+    if [ -f target/release/libthrylos_revm.a ]; then \
+        # Check if thin archive and convert to fat if needed
+        if ar t target/release/libthrylos_revm.a 2>&1 | grep -q "thin"; then \
+            ar -rcT /app/lib/libthrylos_revm.a target/release/libthrylos_revm.a; \
+        else \
+            cp target/release/libthrylos_revm.a /app/lib/libthrylos_revm.a; \
+        fi; \
+        ar s /app/lib/libthrylos_revm.a; \
     else \
         echo "ERROR: No REVM library found!" && exit 1; \
     fi
-
-# FIND-09 / ARM fix: regenerate the archive index so the Go linker can read it
-RUN ranlib /app/lib/libthrylos_revm.a 2>/dev/null || true
 
 # ── Build Go binary ──────────────────────────────────────────────────────────
 WORKDIR /app

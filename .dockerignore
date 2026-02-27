@@ -6,3 +6,4 @@ node_modules/
 *.crt
 certs/
 debug-multi-nodes.sh
+revm_wrapper/target
