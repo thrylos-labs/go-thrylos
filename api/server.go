@@ -1117,6 +1117,10 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 	// Support GET ?address= as well as POST JSON body
 	if r.Method == http.MethodGet {
 		req.Address = r.URL.Query().Get("address")
+		req.Amount = r.URL.Query().Get("amount")
+		if req.Amount == "" {
+			req.Amount = "100000000000000000000" // 100 THR (100 * 10^18)
+		}
 	} else {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			s.writeError(w, "Invalid request body", http.StatusBadRequest)
