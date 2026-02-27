@@ -383,7 +383,7 @@ func (s *Server) setupRoutes() {
 	log.Printf("🔍 DEBUG: enableFaucet=%v, isDevEnvironment()=%v", s.enableFaucet, isDevEnvironment())
 	if s.enableFaucet && isDevEnvironment() {
 		log.Println("✅ Registering faucet endpoint at /fund")
-		strict.HandleFunc("/fund", s.fundAddress).Methods("POST", "OPTIONS")
+		permissive.HandleFunc("/fund", s.fundAddress).Methods("GET", "POST", "OPTIONS")
 	} else {
 		log.Println("❌ Faucet endpoint NOT registered")
 	}
@@ -1104,7 +1104,6 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 }
 
 // Development endpoint to fund addresses (for testing)
-// Development endpoint to fund addresses (for testing)
 func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 	if !isDevEnvironment() || !s.enableFaucet {
 		s.writeError(w, "Faucet not available", http.StatusForbidden)
@@ -1115,10 +1114,14 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		Address string `json:"address"`
 		Amount  string `json:"amount"`
 	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, "Invalid request body", http.StatusBadRequest)
-		return
+	// Support GET ?address= as well as POST JSON body
+	if r.Method == http.MethodGet {
+		req.Address = r.URL.Query().Get("address")
+	} else {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
 	}
 
 	if req.Address == "" {

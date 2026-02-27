@@ -18,20 +18,22 @@ RUN apk add --no-cache make git gcc musl-dev linux-headers curl
 # AFTER: Download rustup-init and its official SHA-256 separately, verify
 # the digest before executing, then confirm the installed version matches.
 #
-# To upgrade Rust: change RUST_VERSION below. The SHA-256 is fetched from
-# Rust's own CDN (static.rust-lang.org) so it automatically matches the
-# version — no manual hash update needed.
+# Architecture-aware: detects x86_64 vs aarch64 at build time so the same
+# Dockerfile works on both Intel/AMD and Apple Silicon/ARM servers.
 # ─────────────────────────────────────────────────────────────────────────────
 ARG RUST_VERSION=1.82.0
 
 RUN set -eux; \
-    RUSTUP_URL="https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-musl/rustup-init"; \
-    # Download the binary and its official SHA-256 in parallel
+    ARCH="$(uname -m)"; \
+    case "${ARCH}" in \
+        x86_64)  TRIPLE="x86_64-unknown-linux-musl" ;; \
+        aarch64) TRIPLE="aarch64-unknown-linux-musl" ;; \
+        *) echo "Unsupported arch: ${ARCH}" && exit 1 ;; \
+    esac; \
+    RUSTUP_URL="https://static.rust-lang.org/rustup/dist/${TRIPLE}/rustup-init"; \
     curl -Lo /tmp/rustup-init        "${RUSTUP_URL}"; \
     curl -Lo /tmp/rustup-init.sha256 "${RUSTUP_URL}.sha256"; \
-    # Verify — aborts the build if the digest does not match
-    sha256sum -c /tmp/rustup-init.sha256; \
-    # Install the pinned toolchain
+    cd /tmp && sha256sum -c rustup-init.sha256; \
     chmod +x /tmp/rustup-init; \
     /tmp/rustup-init -y \
       --default-toolchain "${RUST_VERSION}" \
@@ -65,6 +67,9 @@ RUN if [ -f target/release/libthrylos_revm.a ]; then \
     else \
         echo "ERROR: No REVM library found!" && exit 1; \
     fi
+
+# FIND-09 / ARM fix: regenerate the archive index so the Go linker can read it
+RUN ranlib /app/lib/libthrylos_revm.a 2>/dev/null || true
 
 # ── Build Go binary ──────────────────────────────────────────────────────────
 WORKDIR /app
