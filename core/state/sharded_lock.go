@@ -1,6 +1,11 @@
 // core/state/sharded_lock.go
+//
+// FIND-08: Added documentation for shard count rationale, deadlock
+// prevention guarantees, and rebalancing strategy. All original logic
+// is preserved unchanged — this fix adds comments only.
+//
 // SECURITY FIX: Enhanced locking for CertiK Audit Finding #2
-// Implements atomic batch operations and prevents race conditions
+// Implements atomic batch operations and prevents race conditions.
 
 package state
 
@@ -13,9 +18,51 @@ import (
 
 // ShardCount defines the number of locks to use for sharding.
 // 64 is a good balance for CPU cache lines and concurrency.
+//
+// # Why 64?
+//
+// A single global mutex serialises all account reads and writes, creating
+// a bottleneck under concurrent transaction processing. Sharding distributes
+// contention across N mutexes so that transactions touching different
+// accounts can proceed in parallel.
+//
+//   - On a 4–8 core machine, expected lock contention ≈ 1/64 per goroutine.
+//   - 64 × sizeof(sync.RWMutex) ≈ 1.5 KB — negligible memory overhead.
+//   - A power-of-two count means the FNV hash % ShardCount compiles to
+//     a bitmask on most architectures.
+//
+// # Rebalancing strategy
+//
+// ShardedMutex does NOT support dynamic rebalancing (adding/removing shards
+// at runtime). This is intentional: changing ShardCount would remap all
+// existing keys to different shards, invalidating any held locks and
+// requiring a stop-the-world operation. If throughput profiling shows that
+// 64 shards is insufficient, increase ShardCount in a planned upgrade with
+// a node restart, not at runtime.
+//
+// For the expected testnet and mainnet transaction volumes (up to
+// MaxTransactionsPerBlock = 1000), 64 shards provides sufficient parallelism.
 const ShardCount = 64
 
-// ShardedMutex provides granular locking based on string keys (addresses)
+// ShardedMutex provides granular locking based on string keys (addresses).
+//
+// # Deadlock prevention
+//
+// A deadlock can occur when two goroutines each hold a lock the other needs:
+//
+//	Goroutine A: Lock("alice") then Lock("bob")
+//	Goroutine B: Lock("bob")   then Lock("alice")   ← deadlock
+//
+// ShardedMutex prevents this with a canonical lock ordering:
+//   - All multi-key operations (LockMultiple/BeginBatch) sort keys by their
+//     shard index before acquiring any lock.
+//   - Keys that map to the same shard are deduplicated — the shard is locked
+//     once, not twice.
+//   - Locks are always released in reverse acquisition order.
+//
+// As long as all callers use LockMultiple or BeginBatch for multi-account
+// operations — never calling Lock() on individual keys in an ad-hoc order —
+// deadlocks are structurally impossible.
 type ShardedMutex struct {
 	locks [ShardCount]sync.RWMutex
 
@@ -42,7 +89,8 @@ func (sm *ShardedMutex) getShardIndex(key string) uint32 {
 	return h.Sum32() % ShardCount
 }
 
-// Lock acquires the write lock for a specific key
+// Lock acquires the write lock for a specific key.
+// For multiple keys, use LockMultiple or BeginBatch to avoid deadlocks.
 func (sm *ShardedMutex) Lock(key string) {
 	sm.getLock(key).Lock()
 }
@@ -66,8 +114,8 @@ func (sm *ShardedMutex) RUnlock(key string) {
 // AUDIT FIX: Atomic Batch Operations for Multi-Account Transactions
 // ============================================================================
 
-// LockMultiple locks multiple keys atomically in a consistent order
-// This prevents deadlocks by always acquiring locks in the same order
+// LockMultiple locks multiple keys atomically in a consistent order.
+// This prevents deadlocks by always acquiring locks in the same order.
 func (sm *ShardedMutex) LockMultiple(keys []string) {
 	if len(keys) == 0 {
 		return
@@ -135,22 +183,22 @@ func (sm *ShardedMutex) RUnlockMultiple(keys []string) {
 // AUDIT FIX: Optimistic Locking with Version Checking
 // ============================================================================
 
-// GetVersion returns the current version for a key's shard
-// Used for optimistic locking / Compare-And-Swap operations
+// GetVersion returns the current version for a key's shard.
+// Used for optimistic locking / Compare-And-Swap operations.
 func (sm *ShardedMutex) GetVersion(key string) uint64 {
 	idx := sm.getShardIndex(key)
 	return atomic.LoadUint64(&sm.versions[idx])
 }
 
-// IncrementVersion atomically increments the version for a key's shard
-// Called after successful state update
+// IncrementVersion atomically increments the version for a key's shard.
+// Called after successful state update.
 func (sm *ShardedMutex) IncrementVersion(key string) uint64 {
 	idx := sm.getShardIndex(key)
 	return atomic.AddUint64(&sm.versions[idx], 1)
 }
 
-// CompareAndSwapVersion implements CAS operation for optimistic locking
-// Returns true if version matches and update succeeds
+// CompareAndSwapVersion implements CAS operation for optimistic locking.
+// Returns true if version matches and update succeeds.
 func (sm *ShardedMutex) CompareAndSwapVersion(key string, oldVersion uint64) bool {
 	idx := sm.getShardIndex(key)
 	return atomic.CompareAndSwapUint64(&sm.versions[idx], oldVersion, oldVersion+1)
@@ -221,7 +269,15 @@ func sortKeysByHash(keys []string) []string {
 // AUDIT FIX: Transaction Isolation Helper
 // ============================================================================
 
-// AtomicBatch provides transaction-like semantics for state updates
+// AtomicBatch provides transaction-like semantics for state updates.
+//
+// Usage:
+//
+//	batch := ws.accountMu.BeginBatch(addresses)
+//	batch.Lock()
+//	defer batch.Rollback()
+//	// ... perform updates ...
+//	batch.Commit()
 type AtomicBatch struct {
 	sm       *ShardedMutex
 	keys     []string
@@ -229,7 +285,8 @@ type AtomicBatch struct {
 	versions map[string]uint64
 }
 
-// BeginBatch starts an atomic batch operation
+// BeginBatch starts an atomic batch operation.
+// Records initial versions for optimistic validation.
 func (sm *ShardedMutex) BeginBatch(keys []string) *AtomicBatch {
 	batch := &AtomicBatch{
 		sm:       sm,
@@ -278,8 +335,8 @@ func (ab *AtomicBatch) Rollback() {
 	ab.Unlock()
 }
 
-// ValidateVersions checks if versions haven't changed since batch started
-// Used for optimistic locking validation
+// ValidateVersions checks if versions haven't changed since batch started.
+// Used for optimistic locking validation.
 func (ab *AtomicBatch) ValidateVersions() bool {
 	for key, oldVersion := range ab.versions {
 		if ab.sm.GetVersion(key) != oldVersion {
@@ -293,8 +350,8 @@ func (ab *AtomicBatch) ValidateVersions() bool {
 // AUDIT FIX: Deadlock Detection (Development/Debug Helper)
 // ============================================================================
 
-// LockWithTimeout attempts to acquire a lock with timeout
-// Returns false if timeout occurs (potential deadlock)
+// LockWithTimeout attempts to acquire a lock with timeout.
+// Returns false if timeout occurs (potential deadlock).
 func (sm *ShardedMutex) LockWithTimeout(key string, timeout <-chan struct{}) bool {
 	acquired := make(chan struct{})
 

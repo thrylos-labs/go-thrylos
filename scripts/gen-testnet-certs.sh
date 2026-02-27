@@ -1,4 +1,14 @@
 #!/bin/bash
+# scripts/gen-testnet-certs.sh
+#
+# Generates self-signed TLS certificates for each testnet node.
+# Run this once before `docker-compose up`. The certs/ subdirectories
+# are gitignored and stay local.
+#
+# Usage:
+#   chmod +x scripts/gen-testnet-certs.sh
+#   ./scripts/gen-testnet-certs.sh
+
 set -euo pipefail
 
 NODES=("node1" "node2" "node3" "node4")
