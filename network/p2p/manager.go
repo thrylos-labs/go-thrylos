@@ -272,7 +272,28 @@ func NewManager(config *Config) (*Manager, error) {
 	stdlog.Printf("Libp2p host created with Peer ID: %s, listening on: %s",
 		h.ID().String(), h.Addrs())
 
-	ps, err := pubsub.NewGossipSub(ctx, h)
+	// FIND-06: Initialise validator before pubsub so it can be passed to
+	// NewHardenedGossipSub for RPC-level rate limiting.
+	maxMessageSize := int64(10 * 1024 * 1024)
+	if config.MaxMessageSize > 0 {
+		maxMessageSize = config.MaxMessageSize
+	}
+	maxBlockRange := 100
+	if config.MaxBlockRangeSize > 0 {
+		maxBlockRange = config.MaxBlockRangeSize
+	}
+	readTimeout := 30 * time.Second
+	if config.StreamReadTimeout > 0 {
+		readTimeout = config.StreamReadTimeout
+	}
+	writeTimeout := 30 * time.Second
+	if config.StreamWriteTimeout > 0 {
+		writeTimeout = config.StreamWriteTimeout
+	}
+	validator := NewMessageValidator(maxMessageSize, maxBlockRange, readTimeout, writeTimeout)
+
+	// FIND-06: Replace bare NewGossipSub with hardened version
+	ps, err := NewHardenedGossipSub(ctx, h, validator)
 	if err != nil {
 		h.Close()
 		cancel()
@@ -291,29 +312,6 @@ func NewManager(config *Config) (*Manager, error) {
 		cancel()
 		return nil, fmt.Errorf("failed to bootstrap DHT: %w", err)
 	}
-
-	// CRITICAL-4: Initialize message validator with safe defaults
-	maxMessageSize := int64(10 * 1024 * 1024) // 10MB
-	if config.MaxMessageSize > 0 {
-		maxMessageSize = config.MaxMessageSize
-	}
-
-	maxBlockRange := 100
-	if config.MaxBlockRangeSize > 0 {
-		maxBlockRange = config.MaxBlockRangeSize
-	}
-
-	readTimeout := 30 * time.Second
-	if config.StreamReadTimeout > 0 {
-		readTimeout = config.StreamReadTimeout
-	}
-
-	writeTimeout := 30 * time.Second
-	if config.StreamWriteTimeout > 0 {
-		writeTimeout = config.StreamWriteTimeout
-	}
-
-	validator := NewMessageValidator(maxMessageSize, maxBlockRange, readTimeout, writeTimeout)
 
 	manager := &Manager{
 		Host:                h,
