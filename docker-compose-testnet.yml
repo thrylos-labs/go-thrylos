@@ -3,14 +3,11 @@ version: "3.8"
 # -----------------------------------------------------------------------
 # Thrylos Testnet — docker-compose
 #
-# SECURITY: Bootstrap peer IDs are no longer hardcoded in this file.
-# Instead, each node derives its peer ID at runtime from its persistent
-# identity key (stored in the node's key volume). Node 1 acts as the
-# bootstrap; nodes 2–4 learn its multiaddr via the health-check endpoint
-# rather than a compiled-in peer ID string.
+# FIND-05: TLS is now enabled by default for the API server.
+# Each node expects a cert and key mounted into /app/certs/ at runtime.
+# Generate per-node certs with the script in certs/README.md.
 #
-# To see a running node's peer ID:
-#   docker exec thrylos-node-1 thrylos peer-id
+# FIND-04: Bootstrap peer IDs are resolved dynamically (no hardcoding).
 # -----------------------------------------------------------------------
 
 services:
@@ -25,7 +22,10 @@ services:
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
       - POINTS_FILE_PATH=/app/data/points.json
-      # No BOOTSTRAP_PEERS for node-1 (it IS the bootstrap)
+      # FIND-05: Enable TLS on the API server
+      - ENABLE_TLS=true
+      - CERT_FILE=/app/certs/server.crt
+      - KEY_FILE=/app/certs/server.key
     ports:
       - "8080:8080"
       - "9001:9000"
@@ -33,22 +33,19 @@ services:
       - node1-data-v3:/app/data
       - node1-keys-v3:/app/keys
       - shared-config-v3:/app/config
+      # FIND-05: Mount TLS cert/key (generated locally, gitignored)
+      - ./certs/node1:/app/certs:ro
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.10
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]
+      test: ["CMD", "wget", "--no-check-certificate", "-qO-", "https://localhost:8080/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
     restart: unless-stopped
 
-  # -----------------------------------------------------------------------
-  # peer-id-resolver: a tiny helper that runs once after node-1 is healthy,
-  # queries its peer-id endpoint, and writes a shared bootstrap multiaddr
-  # that nodes 2-4 consume. This removes any hardcoded peer IDs.
-  # -----------------------------------------------------------------------
   peer-id-resolver:
     image: alpine:latest
     container_name: thrylos-peer-id-resolver
@@ -59,11 +56,10 @@ services:
       - thrylos-net
     volumes:
       - shared-config-v3:/app/config
-    # Query node-1's peer-id API and write the resolved multiaddr to a shared
-    # config file. Nodes 2-4 read BOOTSTRAP_PEERS from this file at startup.
     command: >
       sh -c "
-        PEER_ID=$(wget -qO- http://172.25.0.10:8080/api/v1/peer-id) &&
+        apk add --no-cache curl &&
+        PEER_ID=$(curl -sk https://172.25.0.10:8080/api/v1/peer-id) &&
         echo \"/ip4/172.25.0.10/tcp/9000/p2p/$${PEER_ID}\" > /app/config/bootstrap_peers.txt &&
         echo \"Bootstrap peer resolved: $${PEER_ID}\"
       "
@@ -79,9 +75,10 @@ services:
       - P2P_PORT=9000
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
-      # BOOTSTRAP_PEERS is read from the shared config file at entrypoint,
-      # not hardcoded here. See entrypoint.sh for how this is consumed.
       - BOOTSTRAP_PEERS_FILE=/app/config/bootstrap_peers.txt
+      - ENABLE_TLS=true
+      - CERT_FILE=/app/certs/server.crt
+      - KEY_FILE=/app/certs/server.key
     ports:
       - "8081:8080"
       - "9002:9000"
@@ -89,6 +86,7 @@ services:
       - node2-data-v3:/app/data
       - node2-keys-v3:/app/keys
       - shared-config-v3:/app/config
+      - ./certs/node2:/app/certs:ro
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.11
@@ -96,7 +94,7 @@ services:
       peer-id-resolver:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]
+      test: ["CMD", "curl", "-sk", "https://localhost:8080/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -114,6 +112,9 @@ services:
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
       - BOOTSTRAP_PEERS_FILE=/app/config/bootstrap_peers.txt
+      - ENABLE_TLS=true
+      - CERT_FILE=/app/certs/server.crt
+      - KEY_FILE=/app/certs/server.key
     ports:
       - "8082:8080"
       - "9003:9000"
@@ -121,6 +122,7 @@ services:
       - node3-data-v3:/app/data
       - node3-keys-v3:/app/keys
       - shared-config-v3:/app/config
+      - ./certs/node3:/app/certs:ro
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.12
@@ -128,7 +130,7 @@ services:
       peer-id-resolver:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]
+      test: ["CMD", "curl", "-sk", "https://localhost:8080/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -147,6 +149,9 @@ services:
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
       - BOOTSTRAP_PEERS_FILE=/app/config/bootstrap_peers.txt
+      - ENABLE_TLS=true
+      - CERT_FILE=/app/certs/server.crt
+      - KEY_FILE=/app/certs/server.key
     ports:
       - "8083:8080"
       - "9004:9000"
@@ -154,6 +159,7 @@ services:
       - node4-data-v3:/app/data
       - node4-keys-v3:/app/keys
       - shared-config-v3:/app/config
+      - ./certs/node4:/app/certs:ro
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.13
@@ -161,7 +167,7 @@ services:
       peer-id-resolver:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]
+      test: ["CMD", "curl", "-sk", "https://localhost:8080/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3

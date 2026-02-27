@@ -434,6 +434,7 @@ func (s *Server) setupRoutes() {
 	permissive.HandleFunc("/validators/active", s.getActiveValidators).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/status", s.getStatus).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/health", s.getHealth).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/peer-id", s.getPeerID).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/validator/{address}/activity", s.getValidatorActivity).Methods("GET", "OPTIONS")
 
 	permissive.HandleFunc("/stats", s.getNetworkStats).Methods("GET", "OPTIONS")

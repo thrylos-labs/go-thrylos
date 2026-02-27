@@ -518,7 +518,17 @@ func sanitizeConfigForEnvironment(c *Config) {
 			c.API.AllowedOrigins = []string{} // Requires manual configuration of specific domains
 		}
 	}
-}
+	// docker-compose can enable TLS without requiring a production environment.
+	if val := os.Getenv("ENABLE_TLS"); val == "true" {
+		c.API.EnableTLS = true
+	}
+	if val := os.Getenv("CERT_FILE"); val != "" {
+		c.API.CertFile = val
+	}
+	if val := os.Getenv("KEY_FILE"); val != "" {
+		c.API.KeyFile = val
+	}
+} // ← existing closing brace
 
 func loadGenesisFromFile(path string, cfg *Config) error {
 	file, err := os.ReadFile(path)
