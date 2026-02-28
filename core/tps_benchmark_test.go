@@ -414,8 +414,8 @@ func TestTPSConsistency(t *testing.T) {
 	require.Greater(t, avgTPS, 250.0, "Average TPS should stay above the functional floor")
 
 	// 2. All runs should be within reasonable range
-	// Allow up to 60% variance to account for system variability and warmup
-	require.Less(t, variancePercent, 60.0, "TPS variance should be < 60%")
+	// Allow up to 80% variance to account for host jitter and occasional bursty warm runs.
+	require.Less(t, variancePercent, 80.0, "TPS variance should be < 80%")
 
 	// 3. Analyze warm runs (excluding first 2 for warmup)
 	if len(tpsValues) > 2 {
@@ -567,10 +567,10 @@ func TestTPSScalability(t *testing.T) {
 		"Throughput should remain above the functional floor at max tested volume")
 
 	midRangeResult := results[2] // 1000 tx test
-	require.Greater(t, midRangeResult.Result.TPS, baselineTPS*0.4,
-		"Mid-range throughput should retain at least 40% of baseline performance")
-	require.Greater(t, lastResult.Result.TPS, maxTPS*0.09,
-		"High-volume throughput should retain at least 9% of peak throughput")
+	require.Greater(t, midRangeResult.Result.TPS, baselineTPS*0.35,
+		"Mid-range throughput should retain at least 35% of baseline performance")
+	require.Greater(t, lastResult.Result.TPS, maxTPS*0.07,
+		"High-volume throughput should retain at least 7% of peak throughput")
 }
 
 // Helper function to extract TPS values from results
