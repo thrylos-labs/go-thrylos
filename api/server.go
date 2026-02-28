@@ -212,57 +212,116 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	// 2. Decode just the Method
 	var req struct {
 		Method string `json:"method"`
+		ID     json.RawMessage `json:"id"`
 	}
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		s.writeError(w, "Invalid JSON-RPC", http.StatusBadRequest)
 		return
 	}
 
+	// Capture downstream response so we can mirror request id in JSON-RPC output.
+	capture := newJSONRPCResponseCapture()
+	targetWriter := http.ResponseWriter(capture)
+
 	// 3. Dispatch to the correct handler based on the method string
 	switch req.Method {
 	case "eth_chainId":
-		s.ethHandler.ChainId(w, r)
+		s.ethHandler.ChainId(targetWriter, r)
 	case "net_version":
-		s.ethHandler.NetworkId(w, r)
+		s.ethHandler.NetworkId(targetWriter, r)
 	case "web3_clientVersion":
-		s.ethHandler.ClientVersion(w, r)
+		s.ethHandler.ClientVersion(targetWriter, r)
 	case "eth_blockNumber":
-		s.ethHandler.BlockNumber(w, r)
+		s.ethHandler.BlockNumber(targetWriter, r)
 	case "eth_getBalance":
-		s.ethHandler.GetBalance(w, r)
+		s.ethHandler.GetBalance(targetWriter, r)
 	case "eth_getTransactionCount":
-		s.ethHandler.GetTransactionCount(w, r)
+		s.ethHandler.GetTransactionCount(targetWriter, r)
 	case "eth_getCode":
-		s.ethHandler.GetCode(w, r)
+		s.ethHandler.GetCode(targetWriter, r)
 	case "eth_sendRawTransaction":
-		s.ethHandler.SendRawTransaction(w, r)
+		s.ethHandler.SendRawTransaction(targetWriter, r)
 	case "eth_call":
-		s.ethHandler.Call(w, r)
+		s.ethHandler.Call(targetWriter, r)
 	case "eth_estimateGas":
-		s.ethHandler.EstimateGas(w, r)
+		s.ethHandler.EstimateGas(targetWriter, r)
 	case "eth_gasPrice":
-		s.ethHandler.GasPrice(w, r)
+		s.ethHandler.GasPrice(targetWriter, r)
 	case "eth_maxPriorityFeePerGas":
-		s.ethHandler.MaxPriorityFeePerGas(w, r)
+		s.ethHandler.MaxPriorityFeePerGas(targetWriter, r)
 	case "eth_feeHistory":
-		s.ethHandler.FeeHistory(w, r)
+		s.ethHandler.FeeHistory(targetWriter, r)
 	case "eth_getBlockByNumber":
-		s.ethHandler.GetBlockByNumber(w, r)
+		s.ethHandler.GetBlockByNumber(targetWriter, r)
 	case "eth_getBlockByHash":
-		s.ethHandler.GetBlockByHash(w, r)
+		s.ethHandler.GetBlockByHash(targetWriter, r)
 	case "eth_getTransactionByHash":
-		s.ethHandler.GetTransactionByHash(w, r)
+		s.ethHandler.GetTransactionByHash(targetWriter, r)
 	case "eth_getTransactionReceipt":
-		s.ethHandler.GetTransactionReceipt(w, r)
+		s.ethHandler.GetTransactionReceipt(targetWriter, r)
 	case "eth_coinbase":
-		s.ethHandler.Coinbase(w, r)
+		s.ethHandler.Coinbase(targetWriter, r)
 	case "eth_mining":
-		s.ethHandler.Mining(w, r)
+		s.ethHandler.Mining(targetWriter, r)
 	case "eth_syncing":
-		s.ethHandler.Syncing(w, r)
+		s.ethHandler.Syncing(targetWriter, r)
 	default:
 		s.writeError(w, fmt.Sprintf("Method %s not supported", req.Method), http.StatusNotFound)
+		return
 	}
+
+	// Patch jsonrpc id when possible to match the request.
+	responseBody := capture.body.Bytes()
+	if len(req.ID) > 0 && len(responseBody) > 0 {
+		var payload map[string]interface{}
+		if err := json.Unmarshal(responseBody, &payload); err == nil {
+			var reqID interface{}
+			if err := json.Unmarshal(req.ID, &reqID); err == nil {
+				payload["id"] = reqID
+				if patched, err := json.Marshal(payload); err == nil {
+					responseBody = patched
+				}
+			}
+		}
+	}
+
+	// Copy headers/status and write final payload.
+	for k, vals := range capture.Header() {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	if capture.statusCode > 0 {
+		w.WriteHeader(capture.statusCode)
+	}
+	_, _ = w.Write(responseBody)
+}
+
+type jsonRPCResponseCapture struct {
+	header     http.Header
+	body       bytes.Buffer
+	statusCode int
+}
+
+func newJSONRPCResponseCapture() *jsonRPCResponseCapture {
+	return &jsonRPCResponseCapture{
+		header: make(http.Header),
+	}
+}
+
+func (c *jsonRPCResponseCapture) Header() http.Header {
+	return c.header
+}
+
+func (c *jsonRPCResponseCapture) WriteHeader(statusCode int) {
+	c.statusCode = statusCode
+}
+
+func (c *jsonRPCResponseCapture) Write(b []byte) (int, error) {
+	if c.statusCode == 0 {
+		c.statusCode = http.StatusOK
+	}
+	return c.body.Write(b)
 }
 
 // Helper to extract port from config address
@@ -369,6 +428,8 @@ func (s *Server) setupRoutes() {
 	// ✅ ADD POINTS ROUTES HERE (In Permissive section)
 	// ---------------------------------------------------------
 	permissive.HandleFunc("/points", s.getPoints).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/points/stats", s.getPointsStats).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/points/config", s.getPointsConfig).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/leaderboard", s.getLeaderboard).Methods("GET", "OPTIONS")
 
 	permissiveRoot := s.router.PathPrefix("").Subrouter()
@@ -579,11 +640,6 @@ func (s *Server) submitSignedTransaction(w http.ResponseWriter, r *http.Request)
 	if err := s.worldState.AddTransaction(&tx); err != nil {
 		s.writeError(w, fmt.Sprintf("Invalid transaction: %v", err), http.StatusBadRequest)
 		return
-	}
-
-	// ✅ CORRECTED: Only one block, checks for nil, runs in background
-	if s.pointsManager != nil {
-		go s.pointsManager.RecordTransaction(tx.From, tx.To)
 	}
 
 	s.writeJSON(w, map[string]interface{}{"status": "accepted", "tx_hash": tx.Hash})
@@ -1274,7 +1330,13 @@ func (s *Server) getPoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get basic points data
+	// Sync confirmed transfer activity for this wallet first.
+	// This keeps points aligned with chain-finalized transactions (not pending/reverted).
+	if confirmedTxs, err := s.worldState.GetTransactionsByAddress(address, 500); err == nil {
+		s.pointsManager.SyncConfirmedTransfers(address, confirmedTxs)
+	}
+
+	// Get points data after syncing confirmed activity.
 	user := s.pointsManager.GetUserPoints(address)
 
 	// Optional: Check if they have staked in the WorldState to award the "Delegation Bonus"
@@ -1301,6 +1363,32 @@ func (s *Server) getPoints(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, response)
+}
+
+func (s *Server) getPointsStats(w http.ResponseWriter, r *http.Request) {
+	if s.pointsManager == nil {
+		s.writeError(w, "Points system not active on Mainnet", http.StatusNotImplemented)
+		return
+	}
+	s.writeJSON(w, s.pointsManager.GetStats())
+}
+
+func (s *Server) getPointsConfig(w http.ResponseWriter, r *http.Request) {
+	if s.pointsManager == nil {
+		s.writeError(w, "Points system not active on Mainnet", http.StatusNotImplemented)
+		return
+	}
+
+	policy := s.pointsManager.GetPolicy()
+	conversionRatio := 0.001
+	if s != nil && s.config != nil && s.config.Points.ConversionRatio > 0 {
+		conversionRatio = s.config.Points.ConversionRatio
+	}
+
+	s.writeJSON(w, map[string]interface{}{
+		"policy":           policy,
+		"conversion_ratio": conversionRatio,
+	})
 }
 
 func (s *Server) getLeaderboard(w http.ResponseWriter, r *http.Request) {

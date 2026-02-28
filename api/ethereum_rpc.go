@@ -164,33 +164,82 @@ func (h *EthereumRPCHandler) GetTransactionCount(w http.ResponseWriter, r *http.
 	}
 
 	address := common.HexToAddress(req.Address)
-	nonce, err := h.blockchain.GetNonce(address.Hex())
+	addressHex := address.Hex()
+	normalizedAddress := strings.ToLower(addressHex)
+
+	nonce, err := h.blockchain.GetNonce(addressHex)
 	if err != nil {
-		nonce = 0
+		// Some stores may key addresses in normalized form.
+		if fallbackNonce, fallbackErr := h.blockchain.GetNonce(normalizedAddress); fallbackErr == nil {
+			nonce = fallbackNonce
+		} else {
+			nonce = 0
+		}
 	}
 
 	// For "pending", include mempool transactions so wallets don't reuse stale nonce.
 	if req.BlockNumber == "" || req.BlockNumber == "pending" || req.BlockNumber == "latest" {
+		// Track "next nonce" as max(sourceNonce+1) across all known sources.
+		nextNonce := nonce
+
 		// Include replay-detector nonce progression (can advance before account nonce commits).
 		if h.blockchain != nil && h.blockchain.GetWorldState() != nil {
 			if tv := h.blockchain.GetWorldState().GetTransactionValidator(); tv != nil {
-				if replayNonce, ok := tv.GetReplayNonce(address.Hex()); ok && replayNonce >= nonce {
-					nonce = replayNonce + 1
+				if replayNonce, ok := tv.GetReplayNonce(addressHex); ok && replayNonce+1 > nextNonce {
+					nextNonce = replayNonce + 1
+				}
+				if replayNonce, ok := tv.GetReplayNonce(normalizedAddress); ok && replayNonce+1 > nextNonce {
+					nextNonce = replayNonce + 1
 				}
 			}
 		}
 
 		pendingTxs := h.blockchain.GetPendingTransactions()
-		maxPending := nonce
 		for _, tx := range pendingTxs {
 			if tx == nil {
 				continue
 			}
-			if strings.EqualFold(tx.From, address.Hex()) && tx.Nonce >= maxPending {
-				maxPending = tx.Nonce + 1
+			if strings.EqualFold(tx.From, addressHex) && tx.Nonce+1 > nextNonce {
+				nextNonce = tx.Nonce + 1
 			}
 		}
-		nonce = maxPending
+
+		// Include confirmed tx history from storage as a final guard against under-reporting.
+		if h.blockchain != nil && h.blockchain.GetWorldState() != nil {
+			if confirmedTxs, txErr := h.blockchain.GetWorldState().GetTransactionsByAddress(addressHex, 1000); txErr == nil {
+				for _, tx := range confirmedTxs {
+					if tx == nil {
+						continue
+					}
+					if strings.EqualFold(tx.From, addressHex) && tx.Nonce+1 > nextNonce {
+						nextNonce = tx.Nonce + 1
+					}
+				}
+			}
+		}
+
+		// Never return a value lower than the account nonce.
+		if nonce > nextNonce {
+			nextNonce = nonce
+		}
+		nonce = nextNonce
+	}
+
+	// For strict "earliest"/explicit historical tags, keep account-state nonce only.
+	if req.BlockNumber == "earliest" {
+		nonce = 0
+	}
+
+	// Normalize to the highest known monotonic nonce floor when replay detector has state.
+	if h.blockchain != nil && h.blockchain.GetWorldState() != nil {
+		if tv := h.blockchain.GetWorldState().GetTransactionValidator(); tv != nil {
+			if replayNonce, ok := tv.GetReplayNonce(addressHex); ok && replayNonce+1 > nonce {
+				nonce = replayNonce + 1
+			}
+			if replayNonce, ok := tv.GetReplayNonce(normalizedAddress); ok && replayNonce+1 > nonce {
+				nonce = replayNonce + 1
+			}
+		}
 	}
 
 	response := hexutil.Uint64(nonce)

@@ -7,6 +7,7 @@ package transaction
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -625,6 +626,8 @@ func NewReplayDetectorV3(chainID string, config *ReplayProtectionConfig, metrics
 // CheckReplayV3 performs comprehensive replay attack detection with reorg protection
 // M-1 FIX: Explicitly handles deep chain reorganizations
 func (rd *ReplayDetectorV3) CheckReplayV3(txHash, txChainID, from string, nonce uint64, currentBlockHeight int64) error {
+	from = normalizeReplayAddress(from)
+
 	// 1. CRITICAL: Verify chain ID matches (prevents cross-chain replay)
 	if txChainID != rd.chainID {
 		rd.metrics.RecordReplayAttempt()
@@ -718,11 +721,17 @@ func (rd *ReplayDetectorV3) CleanupExpiredV3() {
 
 // GetNonce returns the last known nonce for an account
 func (rd *ReplayDetectorV3) GetNonce(from string) (uint64, bool) {
+	from = normalizeReplayAddress(from)
+
 	rd.mu.RLock()
 	defer rd.mu.RUnlock()
 
 	nonce, exists := rd.accountNonces[from]
 	return nonce, exists
+}
+
+func normalizeReplayAddress(from string) string {
+	return strings.ToLower(strings.TrimSpace(from))
 }
 
 // Stop stops the replay detector
