@@ -19,6 +19,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/big"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -318,9 +320,6 @@ func (v *Validator) validateSignature(tx *core.Transaction) error {
 	if len(tx.Signature) == 0 {
 		return fmt.Errorf("transaction signature cannot be empty")
 	}
-	if len(tx.FromPubkey) == 0 {
-		return fmt.Errorf("transaction from_pubkey cannot be empty")
-	}
 	// ==================== V3 ENHANCEMENT ====================
 	// Validate chain ID before signature verification
 	if err := ValidateChainIDMatch(tx.ChainId, v.config.Network.ChainID); err != nil {
@@ -333,6 +332,16 @@ func (v *Validator) validateSignature(tx *core.Transaction) error {
 	if tx.Type == core.TransactionType_EVM_CONTRACT_CALL ||
 		tx.Type == core.TransactionType_EVM_CONTRACT_DEPLOY {
 		return v.validateEthereumSignature(tx)
+	}
+
+	// Compatibility path for wallet-signed transfers that don't include from_pubkey.
+	// MetaMask-style signatures are 65 bytes [R||S||V].
+	if len(tx.FromPubkey) == 0 && len(tx.Signature) == 65 {
+		return v.validateEthereumSignature(tx)
+	}
+
+	if len(tx.FromPubkey) == 0 {
+		return fmt.Errorf("transaction from_pubkey cannot be empty")
 	}
 
 	// Recreate the public key from bytes
@@ -368,9 +377,14 @@ func (v *Validator) validateEthereumSignature(tx *core.Transaction) error {
 	vByte := tx.Signature[64]
 
 	// 4. Setup ChainID
-	chainIDBig, _ := new(big.Int).SetString(v.config.Network.ChainID, 10)
+	// Parse numeric chain ID from tx.ChainId first (or config fallback) to support
+	// values like "thrylos-devnet-1337".
+	chainIDBig := parseEVMChainID(tx.ChainId)
 	if chainIDBig == nil {
-		chainIDBig = big.NewInt(1) // Default mainnet
+		chainIDBig = parseEVMChainID(v.config.Network.ChainID)
+	}
+	if chainIDBig == nil {
+		chainIDBig = big.NewInt(1) // final fallback
 	}
 
 	// 5. Calculate EIP-155 V value
@@ -445,6 +459,31 @@ func (v *Validator) validateEthereumSignature(tx *core.Transaction) error {
 	// 10. Verify Match
 	if !strings.EqualFold(fromAddr.Hex(), tx.From) {
 		return fmt.Errorf("signature mismatch: recovered %s, expected %s", fromAddr.Hex(), tx.From)
+	}
+
+	return nil
+}
+
+func parseEVMChainID(chainID string) *big.Int {
+	chainID = strings.TrimSpace(chainID)
+	if chainID == "" {
+		return nil
+	}
+
+	// Direct numeric form (e.g., "1337")
+	if direct, ok := new(big.Int).SetString(chainID, 10); ok {
+		return direct
+	}
+
+	// Embedded numeric form (e.g., "thrylos-devnet-1337")
+	re := regexp.MustCompile(`\d+`)
+	matches := re.FindAllString(chainID, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	last := matches[len(matches)-1]
+	if n, err := strconv.ParseInt(last, 10, 64); err == nil {
+		return big.NewInt(n)
 	}
 
 	return nil
@@ -669,6 +708,14 @@ func (v *Validator) GetReplayProtectionMetrics() map[string]interface{} {
 // SetReplayProtectionConfig updates the replay protection configuration
 func (v *Validator) SetReplayProtectionConfig(config *ReplayProtectionConfig) {
 	v.replayConfig = config
+}
+
+// GetReplayNonce returns the latest nonce tracked by replay protection for an address.
+func (v *Validator) GetReplayNonce(address string) (uint64, bool) {
+	if v == nil || v.replayDetector == nil {
+		return 0, false
+	}
+	return v.replayDetector.GetNonce(address)
 }
 
 func (v *Validator) ValidateTransaction(tx *core.Transaction, currentHeight int64, stateReader StateInterface) error {
@@ -1006,6 +1053,9 @@ func (v *Validator) validateBusinessLogic(tx *core.Transaction, stateReader Stat
 		return v.validateUndelegate(tx, sender)
 	case core.TransactionType_CLAIM_REWARDS:
 		return v.validateClaimRewards(tx, sender)
+	case core.TransactionType_EVM_CONTRACT_CALL, core.TransactionType_EVM_CONTRACT_DEPLOY:
+		// EVM txs can have 0-value payload calls; enforce nonce and balance only.
+		return v.validateSufficientBalanceForNonce(tx, sender, stateReader)
 	default:
 		return fmt.Errorf("unknown transaction type: %v", tx.Type)
 	}

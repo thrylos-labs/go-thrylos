@@ -90,7 +90,7 @@ func (s *APIServer) setupRoutes() {
 
 // Start starts the API server
 func (s *APIServer) Start() error {
-	addr := fmt.Sprintf(":%s", s.config.Port)
+	addr := fmt.Sprintf(":%d", s.config.Port)
 
 	s.server = &http.Server{
 		Addr:         addr,
@@ -100,7 +100,7 @@ func (s *APIServer) Start() error {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	log.Printf("🌐 HTTP API Server starting on port %s", s.config.Port)
+	log.Printf("🌐 HTTP API Server starting on port %d", s.config.Port)
 
 	// Block here — APIManager.Start() owns the goroutine
 	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

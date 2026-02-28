@@ -10,6 +10,10 @@ import (
 	"github.com/thrylos-labs/go-thrylos/crypto"
 )
 
+func deriveTestVRFPubKey(privKey crypto.PrivateKey) ed25519.PublicKey {
+	return deriveVRFPublicKeyFromSecp256k1(privKey.PublicKey().Bytes())
+}
+
 // TestVRFBasicFunctionality tests basic VRF proof generation and verification
 // TestVRFBasicFunctionality tests basic VRF proof generation and verification
 func TestVRFBasicFunctionality(t *testing.T) {
@@ -31,11 +35,8 @@ func TestVRFBasicFunctionality(t *testing.T) {
 	require.Equal(t, 32, len(proof.Output), "VRF output should be 32 bytes")
 	require.Equal(t, 64, len(proof.Proof), "Ed25519 VRF proof should be 64 bytes")
 
-	// Derive public key for verification
-	// FIXED: Need to derive Ed25519 public key from Ed25519 private key, not from secp256k1
-	privKeyBytes := privKey.Bytes()
-	ed25519PrivKey := ed25519.NewKeyFromSeed(privKeyBytes)
-	vrfPubKey := ed25519PrivKey.Public().(ed25519.PublicKey)
+	// Derive public key using the same path as production consensus validation.
+	vrfPubKey := deriveTestVRFPubKey(privKey)
 
 	// Verify the proof
 	valid, output, err := VerifyVRFProof(vrfPubKey, input, proof)
@@ -126,8 +127,7 @@ func TestVRFInvalidProof(t *testing.T) {
 	proof, err := GenerateVRFProof(privKey, input)
 	require.NoError(t, err)
 
-	ed25519PrivKey := ed25519.NewKeyFromSeed(privKey.Bytes())
-	vrfPubKey := ed25519PrivKey.Public().(ed25519.PublicKey)
+	vrfPubKey := deriveTestVRFPubKey(privKey)
 
 	// Tamper with proof
 	tamperedProof := &VRFProof{
@@ -160,8 +160,7 @@ func TestVRFWrongMessage(t *testing.T) {
 	proof, err := GenerateVRFProof(privKey, input1)
 	require.NoError(t, err)
 
-	ed25519PrivKey := ed25519.NewKeyFromSeed(privKey.Bytes())
-	vrfPubKey := ed25519PrivKey.Public().(ed25519.PublicKey)
+	vrfPubKey := deriveTestVRFPubKey(privKey)
 
 	// Try to verify with input2
 	valid, _, err := VerifyVRFProof(vrfPubKey, input2, proof)
@@ -175,21 +174,11 @@ func TestVRFKeyDerivation(t *testing.T) {
 	privKey, err := crypto.NewPrivateKey()
 	require.NoError(t, err)
 
-	privKeyBytes := privKey.Bytes()
-
-	// Generate Ed25519 key pair from seed
-	ed25519PrivKey1 := ed25519.NewKeyFromSeed(privKeyBytes)
-	vrfPubKey1 := ed25519PrivKey1.Public().(ed25519.PublicKey)
+	vrfPubKey1 := deriveTestVRFPubKey(privKey)
+	vrfPubKey2 := deriveTestVRFPubKey(privKey)
 
 	// Check sizes
-	assert.Equal(t, 64, len(ed25519PrivKey1), "Ed25519 private key should be 64 bytes")
 	assert.Equal(t, 32, len(vrfPubKey1), "Ed25519 public key should be 32 bytes")
-
-	// Derivation should be deterministic - generate again from same seed
-	ed25519PrivKey2 := ed25519.NewKeyFromSeed(privKeyBytes)
-	vrfPubKey2 := ed25519PrivKey2.Public().(ed25519.PublicKey)
-
-	assert.Equal(t, ed25519PrivKey1, ed25519PrivKey2, "Private key derivation should be deterministic")
 	assert.Equal(t, vrfPubKey1, vrfPubKey2, "Public key derivation should be deterministic")
 }
 
@@ -259,8 +248,7 @@ func BenchmarkVRFVerification(b *testing.B) {
 
 	proof, _ := GenerateVRFProof(privKey, input)
 
-	ed25519PrivKey := ed25519.NewKeyFromSeed(privKey.Bytes())
-	vrfPubKey := ed25519PrivKey.Public().(ed25519.PublicKey)
+	vrfPubKey := deriveTestVRFPubKey(privKey)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

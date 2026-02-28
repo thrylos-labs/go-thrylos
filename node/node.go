@@ -162,6 +162,7 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	// Generate node address from private key
 	nodeAddress, err := account.GenerateAddress(nodeConfig.PrivateKey.PublicKey())
 	if err != nil {
+		cancelFunc()
 		return nil, fmt.Errorf("failed to generate node address: %v", err)
 	}
 
@@ -169,6 +170,7 @@ func NewNode(nodeConfig *NodeConfig) (*Node, error) {
 	dataDir := filepath.Join(nodeConfig.DataDir, fmt.Sprintf("shard-%d", nodeConfig.ShardID))
 	storage, err := storage.NewBadgerStorage(dataDir)
 	if err != nil {
+		cancelFunc()
 		return nil, fmt.Errorf("failed to initialize storage: %v", err)
 	}
 

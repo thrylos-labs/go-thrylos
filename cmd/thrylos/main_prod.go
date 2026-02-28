@@ -51,6 +51,9 @@ func main() {
 	if env == "" {
 		env = "production"
 	}
+	// Keep runtime environment-dependent components (like API route guards)
+	// consistent with the resolved environment from flags/defaults.
+	_ = os.Setenv("THRYLOS_ENVIRONMENT", env)
 	cfg.Environment = env
 	cfg.Network.ChainID = config.GetChainIDForEnvironment(env)
 

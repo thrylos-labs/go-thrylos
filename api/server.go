@@ -244,6 +244,8 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		s.ethHandler.GasPrice(w, r)
 	case "eth_maxPriorityFeePerGas":
 		s.ethHandler.MaxPriorityFeePerGas(w, r)
+	case "eth_feeHistory":
+		s.ethHandler.FeeHistory(w, r)
 	case "eth_getBlockByNumber":
 		s.ethHandler.GetBlockByNumber(w, r)
 	case "eth_getBlockByHash":
@@ -380,12 +382,14 @@ func (s *Server) setupRoutes() {
 
 	// Thrylos Native: Faucet (Dev only)
 	// Thrylos Native: Faucet (Dev only)
-	log.Printf("🔍 DEBUG: enableFaucet=%v, isDevEnvironment()=%v", s.enableFaucet, isDevEnvironment())
-	if s.enableFaucet && isDevEnvironment() {
+	log.Printf("🔍 DEBUG: enableFaucet=%v, isDevEnvironment()=%v", s.enableFaucet, s.isDevEnvironment())
+	if s.enableFaucet {
+		// Always register when enabled; environment gating happens inside handler.
+		// This avoids confusing 404s and returns explicit 403 when faucet is disabled by env.
 		log.Println("✅ Registering faucet endpoint at /fund")
 		permissive.HandleFunc("/fund", s.fundAddress).Methods("GET", "POST", "OPTIONS")
 	} else {
-		log.Println("❌ Faucet endpoint NOT registered")
+		log.Println("❌ Faucet endpoint NOT registered (EnableFaucet=false)")
 	}
 	// Thrylos Native: Broadcast
 	strict.HandleFunc("/transaction/broadcast", s.submitSignedTransaction).Methods("POST", "OPTIONS")
@@ -424,6 +428,8 @@ func (s *Server) setupRoutes() {
 	permissive.HandleFunc("/staking/rewards/{address}", s.getDetailedRewards).Methods("GET", "OPTIONS")
 
 	// General Data endpoints
+	permissive.HandleFunc("/blocks", s.getBlocks).Methods("GET", "OPTIONS")
+	permissive.HandleFunc("/transactions", s.getRecentTransactions).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/transaction/{hash}", s.getTransaction).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/transactions/pending", s.getPendingTransactions).Methods("GET", "OPTIONS")
 	permissive.HandleFunc("/block/{hash}", s.getBlockByHash).Methods("GET", "OPTIONS")
@@ -451,6 +457,7 @@ func (s *Server) setupRoutes() {
 
 	// Gas & blocks
 	permissiveRoot.HandleFunc("/eth_gasPrice", ethAPI.GasPrice).Methods("POST", "OPTIONS")
+	permissiveRoot.HandleFunc("/eth_feeHistory", ethAPI.FeeHistory).Methods("POST", "OPTIONS")
 	permissiveRoot.HandleFunc("/eth_blockNumber", ethAPI.BlockNumber).Methods("POST", "OPTIONS")
 	permissiveRoot.HandleFunc("/eth_getBlockByNumber", ethAPI.GetBlockByNumber).Methods("POST", "OPTIONS")
 	permissiveRoot.HandleFunc("/eth_getBlockByHash", ethAPI.GetBlockByHash).Methods("POST", "OPTIONS")
@@ -475,7 +482,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Add localhost origins only in dev/testnet environments
-	if isDevEnvironment() {
+	if s.isDevEnvironment() {
 		allowedOrigins = append(allowedOrigins,
 			"http://localhost:3000",
 			"http://localhost:5173",
@@ -1105,7 +1112,7 @@ func (s *Server) getAccountTransactions(w http.ResponseWriter, r *http.Request) 
 
 // Development endpoint to fund addresses (for testing)
 func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
-	if !isDevEnvironment() || !s.enableFaucet {
+	if !s.isDevEnvironment() || !s.enableFaucet {
 		s.writeError(w, "Faucet not available", http.StatusForbidden)
 		return
 	}
@@ -1118,14 +1125,16 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		req.Address = r.URL.Query().Get("address")
 		req.Amount = r.URL.Query().Get("amount")
-		if req.Amount == "" {
-			req.Amount = "100000000000000000000" // 100 THR (100 * 10^18)
-		}
 	} else {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			s.writeError(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
+	}
+
+	// Default faucet amount to 100 THR (100 * 10^18) when omitted.
+	if strings.TrimSpace(req.Amount) == "" {
+		req.Amount = "100000000000000000000"
 	}
 
 	if req.Address == "" {
@@ -1220,18 +1229,13 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 
 // isDevEnvironment checks if we're running in a development environment
 // Ethereum/Solana approach: environment-based, not authentication-based
-func isDevEnvironment() bool {
-	env := strings.ToLower(os.Getenv("THRYLOS_ENVIRONMENT"))
-
+func isDevEnvironmentForEnv(env string) bool {
 	switch env {
 	case "development", "dev", "devnet":
 		return true
 	case "testnet", "test":
-		// Testnet: faucet intentionally open during incentive programme.
-		// IMPORTANT: flip this to false (or set THRYLOS_ENVIRONMENT=mainnet)
-		// before deploying the production binary.
-		log.Println("⚠️  THRYLOS_ENVIRONMENT=testnet — dev features (faucet, points) are ENABLED")
-		return true
+		// Public testnet should mirror production safety defaults.
+		return false
 	case "production", "prod", "mainnet":
 		return false
 	case "":
@@ -1241,6 +1245,18 @@ func isDevEnvironment() bool {
 		log.Printf("⚠️  Unknown THRYLOS_ENVIRONMENT=%q, assuming PRODUCTION (dev-only features disabled)\n", env)
 		return false
 	}
+}
+
+func isDevEnvironment() bool {
+	return isDevEnvironmentForEnv(strings.ToLower(os.Getenv("THRYLOS_ENVIRONMENT")))
+}
+
+func (s *Server) isDevEnvironment() bool {
+	env := strings.ToLower(os.Getenv("THRYLOS_ENVIRONMENT"))
+	if env == "" && s != nil && s.config != nil {
+		env = strings.ToLower(strings.TrimSpace(s.config.Environment))
+	}
+	return isDevEnvironmentForEnv(env)
 }
 
 // ========== POINTS SYSTEM HANDLERS ==========
@@ -1422,6 +1438,76 @@ func (s *Server) getLatestBlock(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, response)
 }
 
+func (s *Server) getBlocks(w http.ResponseWriter, r *http.Request) {
+	limit := 10
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 && parsed <= 200 {
+			limit = parsed
+		}
+	}
+
+	height := s.worldState.GetHeight()
+	if height < 0 {
+		s.writeJSON(w, []map[string]interface{}{})
+		return
+	}
+
+	blocks := make([]map[string]interface{}, 0, limit)
+	for i := height; i >= 0 && len(blocks) < limit; i-- {
+		block, err := s.worldState.GetBlock(i)
+		if err != nil || block == nil {
+			continue
+		}
+		blocks = append(blocks, s.formatBlock(block))
+	}
+
+	s.writeJSON(w, blocks)
+}
+
+func (s *Server) getRecentTransactions(w http.ResponseWriter, r *http.Request) {
+	limit := 10
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 && parsed <= 500 {
+			limit = parsed
+		}
+	}
+
+	height := s.worldState.GetHeight()
+	if height < 0 {
+		s.writeJSON(w, []TransactionResponse{})
+		return
+	}
+
+	txs := make([]TransactionResponse, 0, limit)
+	for i := height; i >= 0 && len(txs) < limit; i-- {
+		block, err := s.worldState.GetBlock(i)
+		if err != nil || block == nil {
+			continue
+		}
+
+		for j := len(block.Transactions) - 1; j >= 0 && len(txs) < limit; j-- {
+			tx := block.Transactions[j]
+			txs = append(txs, TransactionResponse{
+				Hash:      tx.Id,
+				From:      tx.From,
+				To:        tx.To,
+				Amount:    tx.Amount,
+				Nonce:     tx.Nonce,
+				Gas:       tx.Gas,
+				GasPrice:  tx.GasPrice,
+				Timestamp: tx.Timestamp,
+				Status:    "confirmed",
+			})
+		}
+	}
+
+	sort.Slice(txs, func(i, j int) bool {
+		return txs[i].Timestamp > txs[j].Timestamp
+	})
+
+	s.writeJSON(w, txs)
+}
+
 func (s *Server) getValidator(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	address := vars["address"]
@@ -1528,6 +1614,7 @@ func (s *Server) formatBlock(block *core.Block) map[string]interface{} {
 	return map[string]interface{}{
 		"hash":         block.Hash,
 		"height":       block.Header.Index,
+		"index":        block.Header.Index,
 		"prev_hash":    block.Header.PrevHash,
 		"state_root":   block.Header.StateRoot,
 		"timestamp":    block.Header.Timestamp,
@@ -2532,7 +2619,7 @@ func verifyStakingSignature(fromAddr, toAddr, amount string, timestamp int64, si
 // POST /api/v1/admin/export-points-snapshot
 // Protected by admin auth / dev environment gate
 func (s *Server) handleExportPointsSnapshot(w http.ResponseWriter, r *http.Request) {
-	if !isDevEnvironment() {
+	if !s.isDevEnvironment() {
 		s.writeError(w, "Not available", http.StatusForbidden)
 		return
 	}

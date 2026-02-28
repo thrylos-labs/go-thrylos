@@ -148,7 +148,7 @@ func IntegrateWithNode() {
 	fmt.Println("// Development setup (HTTP)")
 	fmt.Println("apiManager := api.NewAPIManager(worldState, blockchain, evmExecutor, config, 8080)")
 	fmt.Println("if err := apiManager.Start(); err != nil {")
-	fmt.Println("    log.Fatalf(\"Failed to start API server: %v\", err)")
+	fmt.Println("    log.Fatalf(\"Failed to start API server\", err)")
 	fmt.Println("}")
 	fmt.Println("defer apiManager.Stop()")
 	fmt.Println("")
@@ -161,13 +161,13 @@ func IntegrateWithNode() {
 	fmt.Println("}")
 	fmt.Println("apiManager := api.NewAPIManagerWithConfig(worldState, blockchain, evmExecutor, nodeConfig, apiConfig)")
 	fmt.Println("if err := apiManager.Start(); err != nil {")
-	fmt.Println("    log.Fatalf(\"Failed to start HTTPS API server: %v\", err)")
+	fmt.Println("    log.Fatalf(\"Failed to start HTTPS API server\", err)")
 	fmt.Println("}")
 	fmt.Println("defer apiManager.Stop()")
 	fmt.Println("")
 	fmt.Println("// Auto-generate development certificates")
 	fmt.Println("if err := api.GenerateSelfSignedCert(\"./certs/server.crt\", \"./certs/server.key\"); err != nil {")
-	fmt.Println("    log.Printf(\"Certificate generation failed: %v\", err)")
+	fmt.Println("    log.Printf(\"Certificate generation failed\", err)")
 	fmt.Println("}")
 }
 
@@ -183,12 +183,12 @@ func WalletExample() {
     
     // Add user's addresses
     poller.AddAddress("0x1111111111111111111111111111111111111111", func(oldBalance, newBalance int64) {
-        fmt.Printf("Main wallet: %d → %d\n", oldBalance, newBalance)
+        fmt.Printf("Main wallet updated: oldBalance=<old> newBalance=<new>\n")
         // Update UI
     })
     
     poller.AddAddress("0x2222222222222222222222222222222222222222", func(oldBalance, newBalance int64) {
-        fmt.Printf("Savings: %d → %d\n", oldBalance, newBalance)
+        fmt.Printf("Savings updated: oldBalance=<old> newBalance=<new>\n")
         // Update UI
     })
     

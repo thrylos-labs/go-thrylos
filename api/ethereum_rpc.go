@@ -6,9 +6,11 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -131,10 +133,33 @@ func (h *EthereumRPCHandler) GetTransactionCount(w http.ResponseWriter, r *http.
 	var req struct {
 		Address     string `json:"address"`
 		BlockNumber string `json:"blockNumber"`
+		Params      []json.RawMessage `json:"params"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		respondError(w, -32700, "Parse error")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	// JSON-RPC standard shape: params = [address, blockTag]
+	if len(req.Params) > 0 {
+		var addr string
+		if err := json.Unmarshal(req.Params[0], &addr); err == nil && addr != "" {
+			req.Address = addr
+		}
+	}
+	if len(req.Params) > 1 {
+		var blockTag string
+		if err := json.Unmarshal(req.Params[1], &blockTag); err == nil && blockTag != "" {
+			req.BlockNumber = blockTag
+		}
+	}
+	if req.Address == "" {
+		respondError(w, -32602, "Invalid params")
 		return
 	}
 
@@ -142,6 +167,30 @@ func (h *EthereumRPCHandler) GetTransactionCount(w http.ResponseWriter, r *http.
 	nonce, err := h.blockchain.GetNonce(address.Hex())
 	if err != nil {
 		nonce = 0
+	}
+
+	// For "pending", include mempool transactions so wallets don't reuse stale nonce.
+	if req.BlockNumber == "" || req.BlockNumber == "pending" || req.BlockNumber == "latest" {
+		// Include replay-detector nonce progression (can advance before account nonce commits).
+		if h.blockchain != nil && h.blockchain.GetWorldState() != nil {
+			if tv := h.blockchain.GetWorldState().GetTransactionValidator(); tv != nil {
+				if replayNonce, ok := tv.GetReplayNonce(address.Hex()); ok && replayNonce >= nonce {
+					nonce = replayNonce + 1
+				}
+			}
+		}
+
+		pendingTxs := h.blockchain.GetPendingTransactions()
+		maxPending := nonce
+		for _, tx := range pendingTxs {
+			if tx == nil {
+				continue
+			}
+			if strings.EqualFold(tx.From, address.Hex()) && tx.Nonce >= maxPending {
+				maxPending = tx.Nonce + 1
+			}
+		}
+		nonce = maxPending
 	}
 
 	response := hexutil.Uint64(nonce)
@@ -152,10 +201,27 @@ func (h *EthereumRPCHandler) GetCode(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Address     string `json:"address"`
 		BlockNumber string `json:"blockNumber"`
+		Params      []json.RawMessage `json:"params"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		respondError(w, -32700, "Parse error")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	// JSON-RPC standard shape: params = [address, blockTag]
+	if len(req.Params) > 0 {
+		var addr string
+		if err := json.Unmarshal(req.Params[0], &addr); err == nil && addr != "" {
+			req.Address = addr
+		}
+	}
+	if req.Address == "" {
+		respondError(w, -32602, "Invalid params")
 		return
 	}
 
@@ -170,11 +236,28 @@ func (h *EthereumRPCHandler) GetCode(w http.ResponseWriter, r *http.Request) {
 
 func (h *EthereumRPCHandler) SendRawTransaction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Data string `json:"data"`
+		Data   string            `json:"data"`
+		Params []json.RawMessage `json:"params"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		respondError(w, -32700, "Parse error")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	// JSON-RPC standard shape: params = [rawTxHex]
+	if len(req.Params) > 0 {
+		var rawTx string
+		if err := json.Unmarshal(req.Params[0], &rawTx); err == nil && rawTx != "" {
+			req.Data = rawTx
+		}
+	}
+	if req.Data == "" {
+		respondError(w, -32602, "Invalid transaction data")
 		return
 	}
 
@@ -221,7 +304,7 @@ func (h *EthereumRPCHandler) SendRawTransaction(w http.ResponseWriter, r *http.R
 	}
 
 	// Return the Hash (MetaMask uses this to poll for receipt)
-	response := thrylosTx.Hash
+	response := toRPCTxHash(thrylosTx.Hash)
 	respondJSON(w, response)
 }
 
@@ -283,17 +366,38 @@ func (h *EthereumRPCHandler) Call(w http.ResponseWriter, r *http.Request) {
 func (h *EthereumRPCHandler) EstimateGas(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CallData CallArgs `json:"callData"`
+		Params   []json.RawMessage `json:"params"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		respondError(w, -32700, "Parse error")
 		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	// JSON-RPC standard shape: params = [callObject, blockTag?]
+	if len(req.Params) > 0 {
+		var callData CallArgs
+		if err := json.Unmarshal(req.Params[0], &callData); err == nil {
+			req.CallData = callData
+		}
 	}
 
 	// SECURITY: Validate gas if provided
 	const maxGasLimit = 30000000
 	if req.CallData.Gas > 0 && uint64(req.CallData.Gas) > maxGasLimit {
 		respondError(w, -32602, fmt.Sprintf("Gas limit %d exceeds maximum %d", req.CallData.Gas, maxGasLimit))
+		return
+	}
+
+	// Fast path for plain value transfers (EOA -> EOA, no calldata):
+	// return canonical intrinsic gas instead of invoking REVM estimation.
+	if req.CallData.To != "" && len(req.CallData.Data) == 0 {
+		response := hexutil.Uint64(21000)
+		respondJSON(w, response)
 		return
 	}
 
@@ -317,6 +421,13 @@ func (h *EthereumRPCHandler) EstimateGas(w http.ResponseWriter, r *http.Request)
 	)
 
 	if err != nil {
+		// Safety fallback: if REVM estimation panics/fails for empty calldata,
+		// still provide intrinsic transfer gas to keep wallets functional.
+		if req.CallData.To != "" && len(req.CallData.Data) == 0 {
+			response := hexutil.Uint64(21000)
+			respondJSON(w, response)
+			return
+		}
 		respondError(w, -32000, fmt.Sprintf("Gas estimation failed: %v", err))
 		return
 	}
@@ -340,6 +451,137 @@ func (h *EthereumRPCHandler) MaxPriorityFeePerGas(w http.ResponseWriter, r *http
 	respondJSON(w, response)
 }
 
+// FeeHistory returns EIP-1559-style fee history metadata.
+// Thrylos currently uses a legacy gas model, so we provide deterministic
+// synthetic base fee and reward values for wallet compatibility.
+func (h *EthereumRPCHandler) FeeHistory(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BlockCount        string            `json:"blockCount"`
+		NewestBlock       string            `json:"newestBlock"`
+		RewardPercentiles []float64         `json:"rewardPercentiles"`
+		Params            []json.RawMessage `json:"params"`
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+
+	// JSON-RPC standard shape: params = [blockCount, newestBlock, rewardPercentiles]
+	if len(req.Params) > 0 {
+		var blockCount string
+		if err := json.Unmarshal(req.Params[0], &blockCount); err == nil && blockCount != "" {
+			req.BlockCount = blockCount
+		}
+	}
+	if len(req.Params) > 1 {
+		var newest string
+		if err := json.Unmarshal(req.Params[1], &newest); err == nil && newest != "" {
+			req.NewestBlock = newest
+		}
+	}
+	if len(req.Params) > 2 {
+		var p []float64
+		if err := json.Unmarshal(req.Params[2], &p); err == nil {
+			req.RewardPercentiles = p
+		}
+	}
+
+	// Parse block count (hex quantity), cap to keep payload bounded.
+	blockCount := uint64(10)
+	if req.BlockCount != "" {
+		if parsed, err := hexutil.DecodeUint64(req.BlockCount); err == nil {
+			blockCount = parsed
+		}
+	}
+	if blockCount == 0 {
+		blockCount = 1
+	}
+	if blockCount > 1024 {
+		blockCount = 1024
+	}
+
+	// Resolve newest block.
+	latest := uint64(h.blockchain.GetHeight())
+	newest := latest
+	switch req.NewestBlock {
+	case "", "latest", "pending":
+		newest = latest
+	case "earliest":
+		newest = 0
+	default:
+		if parsed, err := hexutil.DecodeUint64(req.NewestBlock); err == nil {
+			newest = parsed
+		}
+	}
+
+	var oldest uint64
+	if newest+1 > blockCount {
+		oldest = newest + 1 - blockCount
+	} else {
+		oldest = 0
+		blockCount = newest + 1
+	}
+
+	baseGasPrice := math.ParseBigInt(h.blockchain.GetConfig().Economics.BaseGasPrice)
+	if baseGasPrice.Sign() <= 0 {
+		baseGasPrice = big.NewInt(1)
+	}
+	priorityTip := big.NewInt(1)
+
+	baseFee := make([]string, 0, blockCount+1)
+	gasUsedRatio := make([]float64, 0, blockCount)
+	reward := make([][]string, 0, blockCount)
+
+	// Build history for [oldest..newest]
+	for i := uint64(0); i < blockCount; i++ {
+		height := int64(oldest + i)
+		block, err := h.blockchain.GetBlockByIndex(height)
+
+		// Legacy chain: keep base fee stable at base gas price.
+		baseFee = append(baseFee, (*hexutil.Big)(baseGasPrice).String())
+
+		if err != nil || block == nil || block.Header == nil || block.Header.GasLimit == 0 {
+			gasUsedRatio = append(gasUsedRatio, 0)
+		} else {
+			ratio := float64(block.Header.GasUsed) / float64(block.Header.GasLimit)
+			if ratio < 0 {
+				ratio = 0
+			}
+			if ratio > 1 {
+				ratio = 1
+			}
+			gasUsedRatio = append(gasUsedRatio, ratio)
+		}
+
+		if len(req.RewardPercentiles) > 0 {
+			row := make([]string, len(req.RewardPercentiles))
+			for j := range req.RewardPercentiles {
+				row[j] = (*hexutil.Big)(priorityTip).String()
+			}
+			reward = append(reward, row)
+		}
+	}
+	// Append "next block" base fee as required by eth_feeHistory.
+	baseFee = append(baseFee, (*hexutil.Big)(baseGasPrice).String())
+
+	resp := map[string]interface{}{
+		"oldestBlock":  hexutil.Uint64(oldest).String(),
+		"baseFeePerGas": baseFee,
+		"gasUsedRatio": gasUsedRatio,
+	}
+	if len(req.RewardPercentiles) > 0 {
+		resp["reward"] = reward
+	}
+
+	respondJSON(w, resp)
+}
+
 // ===== Block Information =====
 
 func (h *EthereumRPCHandler) BlockNumber(w http.ResponseWriter, r *http.Request) {
@@ -352,10 +594,44 @@ func (h *EthereumRPCHandler) GetBlockByNumber(w http.ResponseWriter, r *http.Req
 	var req struct {
 		BlockNumber string `json:"blockNumber"`
 		FullTx      bool   `json:"fullTx"`
+		Params      []json.RawMessage `json:"params"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	if len(req.Params) > 0 {
+		var blockTag string
+		if err := json.Unmarshal(req.Params[0], &blockTag); err == nil {
+			req.BlockNumber = blockTag
+		}
+	}
+	if len(req.Params) > 1 {
+		var fullTx bool
+		if err := json.Unmarshal(req.Params[1], &fullTx); err == nil {
+			req.FullTx = fullTx
+		}
+	}
 
-	blockNum, _ := parseBlockNumber(req.BlockNumber)
+	var blockNum uint64
+	switch req.BlockNumber {
+	case "", "latest", "pending":
+		blockNum = uint64(h.blockchain.GetHeight())
+	case "earliest":
+		blockNum = 0
+	default:
+		parsed, err := parseBlockNumber(req.BlockNumber)
+		if err != nil {
+			respondJSON(w, nil)
+			return
+		}
+		blockNum = parsed
+	}
 	block, err := h.blockchain.GetBlockByIndex(int64(blockNum))
 	if err != nil {
 		respondJSON(w, nil)
@@ -369,8 +645,29 @@ func (h *EthereumRPCHandler) GetBlockByHash(w http.ResponseWriter, r *http.Reque
 	var req struct {
 		BlockHash string `json:"blockHash"`
 		FullTx    bool   `json:"fullTx"`
+		Params    []json.RawMessage `json:"params"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	if len(req.Params) > 0 {
+		var blockHash string
+		if err := json.Unmarshal(req.Params[0], &blockHash); err == nil {
+			req.BlockHash = blockHash
+		}
+	}
+	if len(req.Params) > 1 {
+		var fullTx bool
+		if err := json.Unmarshal(req.Params[1], &fullTx); err == nil {
+			req.FullTx = fullTx
+		}
+	}
 
 	block, err := h.blockchain.GetBlock(req.BlockHash)
 	if err != nil {
@@ -385,18 +682,24 @@ func (h *EthereumRPCHandler) GetBlockByHash(w http.ResponseWriter, r *http.Reque
 
 func (h *EthereumRPCHandler) GetTransactionByHash(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		TxHash string `json:"txHash"` // Some clients send it as parameter
+		TxHash string            `json:"txHash"` // non-standard fallback
+		Params []json.RawMessage `json:"params"` // JSON-RPC standard: [hash]
 	}
-	// MetaMask might send params as array, this handler assumes body or manual parsing
-	// Standard JSON-RPC 2.0 params are [hash]
-	var params []interface{}
-	if err := json.NewDecoder(r.Body).Decode(&params); err == nil && len(params) > 0 {
-		if hashStr, ok := params[0].(string); ok {
-			req.TxHash = hashStr
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	if len(req.Params) > 0 {
+		var hash string
+		if err := json.Unmarshal(req.Params[0], &hash); err == nil && hash != "" {
+			req.TxHash = hash
 		}
-	} else if req.TxHash == "" {
-		// Fallback for body parsing
-		json.NewDecoder(r.Body).Decode(&req)
 	}
 
 	if req.TxHash == "" {
@@ -406,32 +709,67 @@ func (h *EthereumRPCHandler) GetTransactionByHash(w http.ResponseWriter, r *http
 		return
 	}
 
-	// 1. Try to find in storage (Mined)
-	tx, err := h.blockchain.GetWorldState().GetTransactionFromStorage(req.TxHash)
-	if err == nil && tx != nil {
-		respondJSON(w, h.convertToEthTx(tx))
+	normalizedHash := normalizeTxHash(req.TxHash)
+	if normalizedHash == "" {
+		respondJSON(w, nil)
 		return
 	}
 
-	// 2. Try to find in mempool (Pending)
+	// 1. Try mempool first (pending transaction)
 	pendingTxs := h.blockchain.GetPendingTransactions()
 	for _, pTx := range pendingTxs {
-		if pTx.Id == req.TxHash || pTx.Hash == req.TxHash {
-			respondJSON(w, h.convertToEthTx(pTx))
+		if pTx == nil {
+			continue
+		}
+		if normalizeTxHash(pTx.Id) == normalizedHash || normalizeTxHash(pTx.Hash) == normalizedHash {
+			respondJSON(w, h.convertToEthPendingTx(pTx))
 			return
 		}
+	}
+
+	// 2. Try to find mined tx location by scanning canonical chain
+	loc, err := h.findMinedTxLocation(normalizedHash)
+	if err == nil && loc != nil && loc.Tx != nil {
+		respondJSON(w, h.convertToEthMinedTx(loc.Tx, loc.Block, loc.TxIndex))
+		return
+	}
+
+	// 3. Final fallback: direct storage lookup (if hash key matches legacy format)
+	tx, err := h.blockchain.GetWorldState().GetTransactionFromStorage(req.TxHash)
+	if err == nil && tx != nil {
+		respondJSON(w, h.convertToEthPendingTx(tx))
+		return
+	}
+	tx, err = h.blockchain.GetWorldState().GetTransactionFromStorage(normalizedHash)
+	if err == nil && tx != nil {
+		respondJSON(w, h.convertToEthPendingTx(tx))
+		return
 	}
 
 	respondJSON(w, nil)
 }
 
 func (h *EthereumRPCHandler) GetTransactionReceipt(w http.ResponseWriter, r *http.Request) {
-	var params []interface{}
-	var txHash string
+	var req struct {
+		TxHash string            `json:"txHash"` // non-standard fallback
+		Params []json.RawMessage `json:"params"` // JSON-RPC standard: [hash]
+	}
 
-	if err := json.NewDecoder(r.Body).Decode(&params); err == nil && len(params) > 0 {
-		if hashStr, ok := params[0].(string); ok {
-			txHash = hashStr
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		respondError(w, -32700, "Parse error")
+		return
+	}
+
+	txHash := req.TxHash
+	if len(req.Params) > 0 {
+		var hash string
+		if err := json.Unmarshal(req.Params[0], &hash); err == nil && hash != "" {
+			txHash = hash
 		}
 	}
 
@@ -439,35 +777,44 @@ func (h *EthereumRPCHandler) GetTransactionReceipt(w http.ResponseWriter, r *htt
 		respondJSON(w, nil)
 		return
 	}
+	normalizedHash := normalizeTxHash(txHash)
 
-	// Check if transaction exists and is confirmed
-	tx, err := h.blockchain.GetWorldState().GetTransactionFromStorage(txHash)
-	if err != nil || tx == nil {
+	// Pending txs do not have receipts yet.
+	pendingTxs := h.blockchain.GetPendingTransactions()
+	for _, pTx := range pendingTxs {
+		if pTx == nil {
+			continue
+		}
+		if normalizeTxHash(pTx.Id) == normalizedHash || normalizeTxHash(pTx.Hash) == normalizedHash {
+			respondJSON(w, nil)
+			return
+		}
+	}
+
+	// Find mined tx with exact block + index.
+	loc, err := h.findMinedTxLocation(normalizedHash)
+	if err != nil || loc == nil || loc.Tx == nil || loc.Block == nil || loc.Block.Header == nil {
 		respondJSON(w, nil)
 		return
 	}
 
-	// NOTE: Since Thrylos DB currently doesn't map TxHash -> BlockHash directly in a fast index,
-	// and we don't have block info in the Tx struct, we fake the block info for the Testnet.
-	// For Mainnet, you MUST add BlockNumber/Hash to the stored Transaction struct or a separate index.
-
 	// Construct Receipt
 	receipt := map[string]interface{}{
-		"transactionHash":   tx.Hash,
-		"transactionIndex":  hexutil.Uint64(0),
-		"blockHash":         "0x0000000000000000000000000000000000000000000000000000000000000000", // Unknown without index
-		"blockNumber":       hexutil.Uint64(h.blockchain.GetHeight()),                             // Approx
-		"from":              tx.From,
-		"to":                tx.To,
-		"cumulativeGasUsed": hexutil.Uint64(tx.Gas),
-		"gasUsed":           hexutil.Uint64(tx.Gas),
+		"transactionHash":   toRPCTxHash(loc.Tx.Hash),
+		"transactionIndex":  hexutil.Uint64(loc.TxIndex),
+		"blockHash":         toRPCTxHash(loc.Block.Hash),
+		"blockNumber":       hexutil.Uint64(loc.Block.Header.Index),
+		"from":              loc.Tx.From,
+		"to":                loc.Tx.To,
+		"cumulativeGasUsed": hexutil.Uint64(loc.Tx.Gas),
+		"gasUsed":           hexutil.Uint64(loc.Tx.Gas),
 		"contractAddress":   nil, // Populate if Deploy
 		"logs":              []interface{}{},
-		"logsBloom":         "0x0000000000000000000000000000000000000000",
+		"logsBloom":         "0x" + strings.Repeat("0", 512),
 		"status":            "0x1", // Success (Thrylos only commits success)
 	}
 
-	if tx.Type == core.TransactionType_EVM_CONTRACT_DEPLOY {
+	if loc.Tx.Type == core.TransactionType_EVM_CONTRACT_DEPLOY {
 		// Calculate contract address if it was a deployment
 		// (Optional enhancement: Store this in Tx metadata)
 	}
@@ -515,9 +862,13 @@ func (h *EthereumRPCHandler) convertEthTxToThrylosTx(ethTx *types.Transaction) (
 	}
 
 	var txType core.TransactionType
-	if ethTx.To() == nil {
+	switch {
+	case ethTx.To() == nil:
 		txType = core.TransactionType_EVM_CONTRACT_DEPLOY
-	} else {
+	case len(ethTx.Data()) == 0:
+		// Plain value transfer from MetaMask should follow native transfer rules.
+		txType = core.TransactionType_TRANSFER
+	default:
 		txType = core.TransactionType_EVM_CONTRACT_CALL
 	}
 
@@ -555,7 +906,18 @@ func (h *EthereumRPCHandler) convertEthTxToThrylosTx(ethTx *types.Transaction) (
 	}
 	sigBytes[64] = vByte
 
+	chainID := h.chainID.String()
+	if h.blockchain != nil && h.blockchain.GetConfig() != nil {
+		if cfgChainID := strings.TrimSpace(h.blockchain.GetConfig().Network.ChainID); cfgChainID != "" {
+			chainID = cfgChainID
+		}
+	}
+
 	thrylosTx := &core.Transaction{
+		// Use the Ethereum transaction hash as stable transaction ID.
+		// IMPORTANT: Id participates in Thrylos hash calculation, so it must be set
+		// before calling CalculateTransactionHash.
+		Id:        ethTx.Hash().Hex(),
 		From:      sender.Hex(),
 		To:        "", // Set below
 		Amount:    ethTx.Value().String(),
@@ -566,7 +928,7 @@ func (h *EthereumRPCHandler) convertEthTxToThrylosTx(ethTx *types.Transaction) (
 		Type:      txType,
 		Timestamp: time.Now().Unix(),
 		Signature: sigBytes, // ✅ Crucial: Pass the signature!
-		ChainId:   h.chainID.String(),
+		ChainId:   chainID,
 	}
 
 	if ethTx.To() != nil {
@@ -585,8 +947,6 @@ func (h *EthereumRPCHandler) convertEthTxToThrylosTx(ethTx *types.Transaction) (
 			hash, err := tv.CalculateTransactionHash(thrylosTx)
 			if err == nil {
 				thrylosTx.Hash = hash
-				// Also set ID to hash for consistency
-				thrylosTx.Id = hash
 			} else {
 				return nil, fmt.Errorf("failed to calculate tx hash: %v", err)
 			}
@@ -620,13 +980,13 @@ func (h *EthereumRPCHandler) convertToEthBlock(block *core.Block, fullTx bool) m
 	if fullTx {
 		txs := make([]interface{}, len(block.Transactions))
 		for i, tx := range block.Transactions {
-			txs[i] = h.convertToEthTx(tx)
+			txs[i] = h.convertToEthMinedTx(tx, block, i)
 		}
 		result["transactions"] = txs
 	} else {
 		txHashes := make([]string, len(block.Transactions))
 		for i, tx := range block.Transactions {
-			txHashes[i] = tx.Hash
+			txHashes[i] = toRPCTxHash(tx.Hash)
 		}
 		result["transactions"] = txHashes
 	}
@@ -634,9 +994,9 @@ func (h *EthereumRPCHandler) convertToEthBlock(block *core.Block, fullTx bool) m
 	return result
 }
 
-func (h *EthereumRPCHandler) convertToEthTx(tx *core.Transaction) map[string]interface{} {
+func (h *EthereumRPCHandler) convertToEthPendingTx(tx *core.Transaction) map[string]interface{} {
 	return map[string]interface{}{
-		"hash":             tx.Hash,
+		"hash":             toRPCTxHash(tx.Hash),
 		"nonce":            hexutil.Uint64(tx.Nonce),
 		"from":             tx.From,
 		"to":               tx.To,
@@ -647,10 +1007,54 @@ func (h *EthereumRPCHandler) convertToEthTx(tx *core.Transaction) map[string]int
 		"v":                "0x1c", // Placeholder
 		"r":                "0x0",  // Placeholder
 		"s":                "0x0",  // Placeholder
-		"transactionIndex": hexutil.Uint64(0),
-		"blockHash":        "",
-		"blockNumber":      hexutil.Uint64(0),
+		"transactionIndex": nil,
+		"blockHash":        nil,
+		"blockNumber":      nil,
 	}
+}
+
+func (h *EthereumRPCHandler) convertToEthMinedTx(tx *core.Transaction, block *core.Block, txIndex int) map[string]interface{} {
+	result := h.convertToEthPendingTx(tx)
+	result["transactionIndex"] = hexutil.Uint64(txIndex)
+	if block != nil && block.Header != nil {
+		result["blockHash"] = toRPCTxHash(block.Hash)
+		result["blockNumber"] = hexutil.Uint64(block.Header.Index)
+	}
+	return result
+}
+
+type txLocation struct {
+	Tx      *core.Transaction
+	Block   *core.Block
+	TxIndex int
+}
+
+func (h *EthereumRPCHandler) findMinedTxLocation(targetHash string) (*txLocation, error) {
+	if h == nil || h.blockchain == nil {
+		return nil, fmt.Errorf("blockchain unavailable")
+	}
+
+	height := h.blockchain.GetHeight()
+	for i := height; i >= 0; i-- {
+		block, err := h.blockchain.GetBlockByIndex(i)
+		if err != nil || block == nil {
+			continue
+		}
+		for idx, tx := range block.Transactions {
+			if tx == nil {
+				continue
+			}
+			if normalizeTxHash(tx.Hash) == targetHash || normalizeTxHash(tx.Id) == targetHash {
+				return &txLocation{
+					Tx:      tx,
+					Block:   block,
+					TxIndex: idx,
+				}, nil
+			}
+		}
+	}
+
+	return nil, nil
 }
 
 // Helpers
@@ -659,7 +1063,7 @@ func parseBlockNumber(blockNumber string) (uint64, error) {
 	case "latest", "pending":
 		return 0, nil
 	case "earliest":
-		return 1, nil
+		return 0, nil
 	default:
 		num, err := hexutil.DecodeUint64(blockNumber)
 		if err != nil {
@@ -667,6 +1071,20 @@ func parseBlockNumber(blockNumber string) (uint64, error) {
 		}
 		return num, nil
 	}
+}
+
+func normalizeTxHash(hash string) string {
+	hash = strings.TrimSpace(strings.ToLower(hash))
+	hash = strings.TrimPrefix(hash, "0x")
+	return hash
+}
+
+func toRPCTxHash(hash string) string {
+	norm := normalizeTxHash(hash)
+	if norm == "" {
+		return "0x"
+	}
+	return "0x" + norm
 }
 
 func respondJSON(w http.ResponseWriter, data interface{}) {
