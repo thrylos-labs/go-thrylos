@@ -458,18 +458,26 @@ func (am *AccountManager) AddRewards(addr string, rewards int64) error {
 		return fmt.Errorf("rewards must be positive: %d", rewards)
 	}
 
+	return am.AddRewardsBig(addr, big.NewInt(rewards))
+}
+
+// AddRewardsBig adds rewards to an account using full big.Int precision.
+func (am *AccountManager) AddRewardsBig(addr string, rewards *big.Int) error {
+	if rewards == nil || rewards.Sign() <= 0 {
+		return fmt.Errorf("rewards must be positive")
+	}
+
 	account, err := am.GetAccount(addr)
 	if err != nil {
 		return fmt.Errorf("failed to get account: %v", err)
 	}
 
-	rewardsBig := big.NewInt(rewards)
 	currentRewards, _ := new(big.Int).SetString(account.Rewards, 10)
 	if currentRewards == nil {
 		currentRewards = big.NewInt(0)
 	}
 
-	account.Rewards = new(big.Int).Add(currentRewards, rewardsBig).String()
+	account.Rewards = new(big.Int).Add(currentRewards, rewards).String()
 	return am.UpdateAccount(account)
 }
 

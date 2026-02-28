@@ -33,6 +33,7 @@ const (
 	DefaultMinStakeRetention    = 0.5 // 50%
 	DefaultAutoRemoveDoubleSign = true
 	defaultUnbondingBlockTime   = 3 * time.Second
+	commissionUpdateInterval    = 24 * time.Hour
 )
 
 // Manager handles validator operations
@@ -48,6 +49,8 @@ type Manager struct {
 	slashingEvents map[string][]*SlashingEvent
 
 	unbondingQueue map[string][]*UnbondingEntry // key: delegatorAddr
+
+	commissionUpdateTimes map[string]int64
 
 	// Performance tracking
 	performanceWindow int64 // Number of blocks to track for performance
@@ -105,7 +108,8 @@ func NewManager(config *config.Config, worldState *state.WorldState) *Manager {
 		validatorMetrics: make(map[string]*ValidatorMetrics),
 		slashingEvents:   make(map[string][]*SlashingEvent),
 
-		unbondingQueue: make(map[string][]*UnbondingEntry),
+		unbondingQueue:        make(map[string][]*UnbondingEntry),
+		commissionUpdateTimes: make(map[string]int64),
 
 		performanceWindow: config.Staking.SignedBlocksWindow,
 	}
@@ -288,11 +292,27 @@ func (vm *Manager) RegisterValidator(
 	// 1. Validate Stake Amount (String Comparison)
 	stakeBig := math.ParseBigInt(stake)
 	minStakeBig := math.ParseBigInt(vm.config.Staking.MinValidatorStake)
+	maxStakeBig := math.ParseBigInt(vm.config.Staking.MaxValidatorStake)
 
 	// Compare: if stake < minStake
 	if stakeBig.Cmp(minStakeBig) < 0 {
 		return fmt.Errorf("stake %s below minimum %s",
 			stake, vm.config.Staking.MinValidatorStake)
+	}
+
+	if maxStakeBig.Sign() > 0 && stakeBig.Cmp(maxStakeBig) > 0 {
+		return fmt.Errorf("stake %s exceeds maximum %s", stake, vm.config.Staking.MaxValidatorStake)
+	}
+
+	totalNetworkStake := vm.worldState.GetTotalStaked()
+	if totalNetworkStake != nil && totalNetworkStake.Sign() > 0 && vm.config.Staking.MaxStakePercentage > 0 {
+		postRegistrationStake := math.Add(totalNetworkStake, stakeBig)
+		stakeFraction := new(big.Float).Quo(new(big.Float).SetInt(stakeBig), new(big.Float).SetInt(postRegistrationStake))
+		stakePercentage, _ := stakeFraction.Float64()
+		if stakePercentage > vm.config.Staking.MaxStakePercentage {
+			return fmt.Errorf("validator stake would exceed concentration limit: %.2f%% > %.2f%%",
+				stakePercentage*100, vm.config.Staking.MaxStakePercentage*100)
+		}
 	}
 
 	if commission < 0 || commission > vm.config.Staking.MaxCommission {
@@ -487,6 +507,10 @@ func (vm *Manager) SlashValidator(
 		slashAmountBig = big.NewInt(1)
 	}
 
+	if err := vm.applySlashToDelegatedStake(validator, slashAmountBig); err != nil {
+		return fmt.Errorf("failed to apportion slash across bonded stake: %v", err)
+	}
+
 	// 3. Apply Slashing: Stake - SlashAmount
 	stakeBig.Sub(stakeBig, slashAmountBig)
 
@@ -658,11 +682,179 @@ func (vm *Manager) UpdateValidatorCommission(address string, newCommission float
 			commissionChange, vm.config.Staking.CommissionChangeMax)
 	}
 
+	if lastUpdate, exists := vm.commissionUpdateTimes[address]; exists {
+		if time.Now().Unix()-lastUpdate < int64(commissionUpdateInterval.Seconds()) {
+			return fmt.Errorf("commission can only be updated once every %s", commissionUpdateInterval)
+		}
+	} else if validator.CreatedAt > 0 && time.Now().Unix()-validator.CreatedAt < int64(commissionUpdateInterval.Seconds()) {
+		return fmt.Errorf("commission can only be updated once every %s", commissionUpdateInterval)
+	}
+
 	// Update commission
 	validator.Commission = newCommission
 	validator.UpdatedAt = time.Now().Unix()
+	vm.commissionUpdateTimes[address] = validator.UpdatedAt
 
 	return vm.worldState.UpdateValidator(validator)
+}
+
+func (vm *Manager) applySlashToDelegatedStake(validator *core.Validator, slashAmount *big.Int) error {
+	if slashAmount == nil || slashAmount.Sign() <= 0 {
+		return nil
+	}
+
+	totalStake := math.ParseBigInt(validator.Stake)
+	if totalStake.Sign() <= 0 {
+		return nil
+	}
+
+	selfStake := math.ParseBigInt(validator.SelfStake)
+	if selfStake.Sign() < 0 {
+		selfStake = big.NewInt(0)
+	}
+
+	delegatedStake := math.ParseBigInt(validator.DelegatedStake)
+	if delegatedStake.Sign() < 0 {
+		delegatedStake = big.NewInt(0)
+	}
+
+	delegatedSlash := big.NewInt(0)
+	if delegatedStake.Sign() > 0 {
+		delegatedSlash.Mul(slashAmount, delegatedStake)
+		delegatedSlash.Div(delegatedSlash, totalStake)
+		if delegatedSlash.Cmp(delegatedStake) > 0 {
+			delegatedSlash.Set(delegatedStake)
+		}
+	}
+
+	selfSlash := new(big.Int).Sub(slashAmount, delegatedSlash)
+	if selfSlash.Cmp(selfStake) > 0 {
+		selfSlash.Set(selfStake)
+	}
+
+	selfStake.Sub(selfStake, selfSlash)
+	delegatedStake.Sub(delegatedStake, delegatedSlash)
+
+	validator.SelfStake = selfStake.String()
+	validator.DelegatedStake = delegatedStake.String()
+
+	if delegatedSlash.Sign() == 0 || len(validator.Delegators) == 0 {
+		return nil
+	}
+
+	type delegatorShare struct {
+		address string
+		amount  *big.Int
+	}
+
+	addresses := make([]string, 0, len(validator.Delegators))
+	for addr := range validator.Delegators {
+		addresses = append(addresses, addr)
+	}
+	sort.Strings(addresses)
+
+	originalDelegatedStake := math.ParseBigInt(validator.DelegatedStake)
+	originalDelegatedStake.Add(originalDelegatedStake, delegatedSlash)
+	remainingSlash := new(big.Int).Set(delegatedSlash)
+	remainingStake := new(big.Int).Set(originalDelegatedStake)
+
+	for idx, addr := range addresses {
+		amount := math.ParseBigInt(validator.Delegators[addr])
+		if amount.Sign() <= 0 {
+			delete(validator.Delegators, addr)
+			continue
+		}
+
+		shareSlash := big.NewInt(0)
+		if remainingSlash.Sign() > 0 {
+			if idx == len(addresses)-1 || remainingStake.Cmp(amount) == 0 {
+				shareSlash.Set(remainingSlash)
+			} else {
+				shareSlash.Mul(remainingSlash, amount)
+				shareSlash.Div(shareSlash, remainingStake)
+			}
+			if shareSlash.Cmp(amount) > 0 {
+				shareSlash.Set(amount)
+			}
+		}
+
+		newAmount := new(big.Int).Sub(amount, shareSlash)
+		if newAmount.Sign() <= 0 {
+			delete(validator.Delegators, addr)
+			newAmount = big.NewInt(0)
+		} else {
+			validator.Delegators[addr] = newAmount.String()
+		}
+
+		vm.applySlashToPendingUnbondings(addr, validator.Address, amount, shareSlash)
+
+		remainingSlash.Sub(remainingSlash, shareSlash)
+		remainingStake.Sub(remainingStake, amount)
+	}
+
+	return nil
+}
+
+func (vm *Manager) applySlashToPendingUnbondings(delegatorAddr, validatorAddr string, totalDelegation, delegatorSlash *big.Int) {
+	if delegatorSlash == nil || delegatorSlash.Sign() <= 0 {
+		return
+	}
+	if totalDelegation == nil || totalDelegation.Sign() <= 0 {
+		return
+	}
+
+	entries := vm.unbondingQueue[delegatorAddr]
+	if len(entries) == 0 {
+		return
+	}
+
+	pendingIndexes := make([]int, 0, len(entries))
+	pendingTotal := big.NewInt(0)
+	for idx, entry := range entries {
+		if entry.ValidatorAddress != validatorAddr {
+			continue
+		}
+		entryAmount := math.ParseBigInt(entry.Amount)
+		if entryAmount.Sign() <= 0 {
+			continue
+		}
+		pendingIndexes = append(pendingIndexes, idx)
+		pendingTotal.Add(pendingTotal, entryAmount)
+	}
+
+	if len(pendingIndexes) == 0 || pendingTotal.Sign() == 0 {
+		return
+	}
+
+	remainingSlash := new(big.Int).Set(delegatorSlash)
+	remainingBase := new(big.Int).Set(totalDelegation)
+
+	for pos, idx := range pendingIndexes {
+		originalEntryAmount := math.ParseBigInt(entries[idx].Amount)
+		if originalEntryAmount.Sign() <= 0 {
+			continue
+		}
+
+		entrySlash := big.NewInt(0)
+		if remainingSlash.Sign() > 0 && remainingBase.Sign() > 0 {
+			if pos == len(pendingIndexes)-1 || remainingBase.Cmp(originalEntryAmount) == 0 {
+				entrySlash.Mul(remainingSlash, originalEntryAmount)
+				entrySlash.Div(entrySlash, remainingBase)
+			} else {
+				entrySlash.Mul(remainingSlash, originalEntryAmount)
+				entrySlash.Div(entrySlash, remainingBase)
+			}
+			if entrySlash.Cmp(originalEntryAmount) > 0 {
+				entrySlash.Set(originalEntryAmount)
+			}
+		}
+
+		entryAmount := new(big.Int).Sub(originalEntryAmount, entrySlash)
+		entries[idx].Amount = entryAmount.String()
+
+		remainingSlash.Sub(remainingSlash, entrySlash)
+		remainingBase.Sub(remainingBase, originalEntryAmount)
+	}
 }
 
 // RecordBlockProposal records that a validator proposed a block

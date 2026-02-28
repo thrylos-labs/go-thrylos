@@ -14,6 +14,14 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
+const (
+	defaultDistributorTargetInflation = 0.04
+	defaultDistributorTargetStaking   = 0.67
+	defaultDistributorMinInflation    = 0.01
+	defaultDistributorMaxInflation    = 0.08
+	defaultValidatorRewardShare       = 0.20
+)
+
 // Distributor manages dynamic reward distribution with inflation control
 type Distributor struct {
 	config     *config.Config
@@ -204,14 +212,31 @@ type InflationProjection struct {
 // NewDistributor creates a new dynamic reward distributor
 func NewDistributor(config *config.Config, worldState *state.WorldState) *Distributor {
 	totalProposerRate := config.Economics.BaseProposerReward + config.Economics.BonusProposerReward
+	targetInflation := config.Economics.InflationRate
+	if targetInflation <= 0 {
+		targetInflation = defaultDistributorTargetInflation
+	}
+	targetStaking := config.Economics.GoalBonded
+	if targetStaking <= 0 || targetStaking >= 1 {
+		targetStaking = defaultDistributorTargetStaking
+	}
+	minInflation := config.Economics.InflationMin
+	if minInflation <= 0 {
+		minInflation = defaultDistributorMinInflation
+	}
+	maxInflation := config.Economics.InflationMax
+	if maxInflation <= minInflation {
+		maxInflation = defaultDistributorMaxInflation
+	}
+	targetInflation = clampDistributorFloat(targetInflation, minInflation, maxInflation)
 
 	distributor := &Distributor{
 		config:                  config,
 		worldState:              worldState,
 		validatorRewardPool:     config.Economics.ValidatorRewardPool,
-		currentInflationRate:    0.04,
+		currentInflationRate:    targetInflation,
 		baseBlockReward:         config.Economics.BlockReward,
-		inflationRate:           config.Economics.InflationRate,
+		inflationRate:           targetInflation,
 		communityTaxRate:        config.Economics.CommunityTax,
 		proposerBonusRate:       totalProposerRate,
 		performanceMultiplier:   1.0,
@@ -228,10 +253,10 @@ func NewDistributor(config *config.Config, worldState *state.WorldState) *Distri
 	}
 
 	distributor.inflationController = &DynamicInflationController{
-		targetInflationRate:     0.04,
-		targetStakingRatio:      0.67,
-		minInflationRate:        0.01,
-		maxInflationRate:        0.08,
+		targetInflationRate:     targetInflation,
+		targetStakingRatio:      targetStaking,
+		minInflationRate:        minInflation,
+		maxInflationRate:        maxInflation,
 		inflationAdjustmentRate: 0.1,
 		epochsPerYear:           365,
 	}
@@ -418,8 +443,7 @@ func (rd *Distributor) distributeRewardShares(epochRewardPool string) (string, s
 	// Staking Rewards = Pool - Tax
 	stakingRewardsBig := coremath.Sub(poolBig, communityShareBig)
 
-	// Validator (20%)
-	validatorShareBig := mulBigIntFloat(stakingRewardsBig, 0.20)
+	validatorShareBig := mulBigIntFloat(stakingRewardsBig, rd.validatorRewardShare())
 
 	// Delegator = Staking - Validator
 	delegatorShareBig := coremath.Sub(stakingRewardsBig, validatorShareBig)
@@ -507,7 +531,7 @@ func (rd *Distributor) distributeValidatorRewards(validator *core.Validator, tot
 	delegatorRewardBig := coremath.SubBig(totalValidatorRewardBig, commissionBig)
 
 	// Add validator commission rewards
-	if err := rd.worldState.GetAccountManager().AddRewards(validator.Address, commissionBig.Int64()); err != nil {
+	if err := rd.worldState.GetAccountManager().AddRewardsBig(validator.Address, commissionBig); err != nil {
 		return nil, fmt.Errorf("failed to add validator commission: %v", err)
 	}
 
@@ -573,7 +597,7 @@ func (rd *Distributor) distributeDelegatorRewardsDetailed(validator *core.Valida
 		delegatorRewardBig, _ := delegatorRewardF.Int(nil)
 
 		if delegatorRewardBig.Sign() > 0 {
-			if err := rd.worldState.GetAccountManager().AddRewards(delegatorAddr, delegatorRewardBig.Int64()); err != nil {
+			if err := rd.worldState.GetAccountManager().AddRewardsBig(delegatorAddr, delegatorRewardBig); err != nil {
 				return nil, fmt.Errorf("failed to reward delegator %s: %v", delegatorAddr, err)
 			}
 			distribution[delegatorAddr] = delegatorRewardBig.String()
@@ -810,9 +834,10 @@ func (rd *Distributor) calculateValidatorAPY_Global() float64 {
 		return 0
 	}
 	baseAPY := rd.currentInflationRate / rd.currentStakingRatio
-	validatorShare := 0.20
-	avgCommission := 0.05
-	return (baseAPY*validatorShare + baseAPY*0.80*avgCommission) * 100
+	validatorShare := rd.validatorRewardShare()
+	delegatorShare := 1.0 - validatorShare
+	avgCommission := rd.averageCommissionRate()
+	return (baseAPY*validatorShare + baseAPY*delegatorShare*avgCommission) * 100
 }
 
 func (rd *Distributor) calculateDelegatorAPY() float64 {
@@ -820,7 +845,7 @@ func (rd *Distributor) calculateDelegatorAPY() float64 {
 		return 0
 	}
 	baseAPY := rd.currentInflationRate / rd.currentStakingRatio
-	return (baseAPY * 0.80 * (1.0 - 0.05)) * 100
+	return (baseAPY * (1.0 - rd.validatorRewardShare()) * (1.0 - rd.averageCommissionRate())) * 100
 }
 
 func (rd *Distributor) assessEconomicHealth() (string, string) {
@@ -988,13 +1013,51 @@ func (rd *Distributor) WithdrawFromCommunityPool(amount string, recipient string
 	}
 
 	// Assuming account manager accepts int64. Update if necessary.
-	if err := rd.worldState.GetAccountManager().AddRewards(recipient, amountBig.Int64()); err != nil {
+	if err := rd.worldState.GetAccountManager().AddRewardsBig(recipient, amountBig); err != nil {
 		return fmt.Errorf("failed to transfer community funds: %v", err)
 	}
 
 	poolBig = coremath.Sub(poolBig, amountBig)
 	rd.communityPool = poolBig.String()
 	return nil
+}
+
+func (rd *Distributor) validatorRewardShare() float64 {
+	validatorRate := rd.config.Economics.ValidatorRewardRate
+	delegatorRate := rd.config.Economics.DelegatorRewardRate
+	totalRate := validatorRate + delegatorRate
+	if totalRate <= 0 {
+		return defaultValidatorRewardShare
+	}
+	return clampDistributorFloat(validatorRate/totalRate, 0, 1)
+}
+
+func (rd *Distributor) averageCommissionRate() float64 {
+	if rd.worldState == nil {
+		return 0
+	}
+
+	validators := rd.worldState.GetActiveValidators()
+	if len(validators) == 0 {
+		return 0
+	}
+
+	total := 0.0
+	for _, validator := range validators {
+		total += clampDistributorFloat(validator.Commission, 0, 1)
+	}
+
+	return total / float64(len(validators))
+}
+
+func clampDistributorFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func (rd *Distributor) CleanupOldRewardData(maxEpochsToKeep int) {

@@ -130,3 +130,154 @@ func TestProcessUnbondings_ReturnsPrincipalToBalance(t *testing.T) {
 	require.Empty(t, validator.Delegators)
 	require.NotContains(t, vm.unbondingQueue, delegatorAddr)
 }
+
+func TestSlashValidator_ApportionsLossAcrossDelegationAndPendingUnbonding(t *testing.T) {
+	const (
+		validatorAddr = "0x6666666666666666666666666666666666666666"
+		delegatorAddr = "0x5555555555555555555555555555555555555555"
+	)
+
+	cfg := &config.Config{
+		Staking: config.StakingConfig{
+			MinValidatorStake:       "1",
+			SlashFractionDowntime:   0.50,
+			MaxSlashingEvents:       10,
+			MinStakeRetention:       0.0,
+			AutoRemoveOnDoubleSign:  true,
+			CommissionChangeMax:     0.01,
+			MaxCommission:           0.20,
+			SlashFractionDoubleSign: 0.05,
+		},
+	}
+
+	vm, ws := newTestValidatorManager(t, cfg)
+
+	err := ws.SetValidator(validatorAddr, &core.Validator{
+		Address:        validatorAddr,
+		Active:         true,
+		Stake:          "1000",
+		SelfStake:      "400",
+		DelegatedStake: "600",
+		Delegators: map[string]string{
+			delegatorAddr: "600",
+		},
+		CreatedAt: time.Now().Add(-48 * time.Hour).Unix(),
+		UpdatedAt: time.Now().Add(-48 * time.Hour).Unix(),
+	})
+	require.NoError(t, err)
+
+	err = ws.GetAccountManager().UpdateAccount(&core.Account{
+		Address: delegatorAddr,
+		Balance: "0",
+		Rewards: "0",
+	})
+	require.NoError(t, err)
+
+	vm.unbondingQueue[delegatorAddr] = []*UnbondingEntry{
+		{
+			ValidatorAddress: validatorAddr,
+			DelegatorAddress: delegatorAddr,
+			Amount:           "200",
+			CompletionBlock:  0,
+			CreatedAt:        time.Now().Unix(),
+		},
+	}
+
+	err = vm.SlashValidator(validatorAddr, SlashingDowntime, nil)
+	require.NoError(t, err)
+
+	validator, err := ws.GetValidator(validatorAddr)
+	require.NoError(t, err)
+	require.Equal(t, "500", validator.Stake)
+	require.Equal(t, "200", validator.SelfStake)
+	require.Equal(t, "300", validator.DelegatedStake)
+	require.Equal(t, "300", validator.Delegators[delegatorAddr])
+	require.Equal(t, "100", vm.unbondingQueue[delegatorAddr][0].Amount)
+
+	err = vm.ProcessUnbondings()
+	require.NoError(t, err)
+
+	delegator, err := ws.GetAccount(delegatorAddr)
+	require.NoError(t, err)
+	require.Equal(t, "100", delegator.Balance)
+
+	validator, err = ws.GetValidator(validatorAddr)
+	require.NoError(t, err)
+	require.Equal(t, "200", validator.Delegators[delegatorAddr])
+	require.Equal(t, "200", validator.DelegatedStake)
+}
+
+func TestUpdateValidatorCommission_EnforcesDailyCooldown(t *testing.T) {
+	const validatorAddr = "0x7777777777777777777777777777777777777777"
+
+	cfg := &config.Config{
+		Staking: config.StakingConfig{
+			MaxCommission:       0.20,
+			CommissionChangeMax: 0.01,
+		},
+	}
+
+	vm, ws := newTestValidatorManager(t, cfg)
+	err := ws.SetValidator(validatorAddr, &core.Validator{
+		Address:    validatorAddr,
+		Commission: 0.10,
+		CreatedAt:  time.Now().Add(-48 * time.Hour).Unix(),
+		UpdatedAt:  time.Now().Add(-48 * time.Hour).Unix(),
+	})
+	require.NoError(t, err)
+
+	err = vm.UpdateValidatorCommission(validatorAddr, 0.11)
+	require.NoError(t, err)
+
+	err = vm.UpdateValidatorCommission(validatorAddr, 0.12)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "once every")
+
+	vm.commissionUpdateTimes[validatorAddr] = time.Now().Add(-25 * time.Hour).Unix()
+	err = vm.UpdateValidatorCommission(validatorAddr, 0.12)
+	require.NoError(t, err)
+
+	validator, err := ws.GetValidator(validatorAddr)
+	require.NoError(t, err)
+	require.Equal(t, 0.12, validator.Commission)
+}
+
+func TestRegisterValidator_EnforcesRegistrationStakeLimits(t *testing.T) {
+	cfg := &config.Config{
+		Staking: config.StakingConfig{
+			MinValidatorStake:   "100",
+			MaxValidatorStake:   "1000",
+			MaxStakePercentage:  0.50,
+			MaxCommission:       0.20,
+			CommissionChangeMax: 0.01,
+		},
+	}
+
+	vm, ws := newTestValidatorManager(t, cfg)
+
+	err := vm.RegisterValidator(
+		"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		[]byte{1, 2, 3},
+		"1001",
+		0.10,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds maximum")
+
+	err = ws.SetValidator("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &core.Validator{
+		Address: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Active:  true,
+		Stake:   "900",
+	})
+	require.NoError(t, err)
+	ws.UpdateTotalStaked()
+
+	err = vm.RegisterValidator(
+		"0xcccccccccccccccccccccccccccccccccccccccc",
+		[]byte{4, 5, 6},
+		"1000",
+		0.10,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "concentration limit")
+}
