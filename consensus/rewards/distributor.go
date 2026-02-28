@@ -554,7 +554,7 @@ func (rd *Distributor) distributeValidatorRewards(validator *core.Validator, tot
 		PerformanceBonus:     performanceBonusBig.String(),
 		ConcentrationPenalty: concentrationPenaltyBig.String(),
 		PerformanceScore:     performanceScore,
-		TotalStake:           validator.Stake,
+		TotalStake:           coremath.BigIntToString(coremath.ParseBigInt(validator.Stake)),
 		Timestamp:            time.Now().Unix(),
 	})
 

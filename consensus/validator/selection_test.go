@@ -7,9 +7,14 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
+
+func u(v string) []byte {
+	return coremath.ParseBigInt(v).Bytes()
+}
 
 type mockProposerHistory struct {
 	blocks  map[int64]*core.Block
@@ -150,7 +155,7 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			set.AddValidator(&core.Validator{
 				Address: string(rune('A' + i)),
-				Stake:   "1000000000000000000", // 1 token each
+				Stake:   u("1000000000000000000"), // 1 token each
 				Active:  true,
 			})
 		}
@@ -191,12 +196,12 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 		set := NewSet(10)
 		assert.NoError(t, set.AddValidator(&core.Validator{
 			Address: "A",
-			Stake:   "800",
+			Stake:   u("800"),
 			Active:  true,
 		}))
 		assert.NoError(t, set.AddValidator(&core.Validator{
 			Address: "B",
-			Stake:   "200",
+			Stake:   u("200"),
 			Active:  true,
 		}))
 
@@ -221,8 +226,8 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 	t.Run("EpochSchedule_AllocatesStakeProportionalQuotas", func(t *testing.T) {
 		set := NewSet(10)
 		candidates := []*core.Validator{
-			{Address: "A", Stake: "600", Active: true},
-			{Address: "B", Stake: "400", Active: true},
+			{Address: "A", Stake: u("600"), Active: true},
+			{Address: "B", Stake: u("400"), Active: true},
 		}
 		for _, candidate := range candidates {
 			assert.NoError(t, set.AddValidator(candidate))
@@ -243,8 +248,8 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 	t.Run("EpochSchedule_RespectsCooldownWhenFeasible", func(t *testing.T) {
 		set := NewSet(10)
 		candidates := []*core.Validator{
-			{Address: "A", Stake: "500", Active: true},
-			{Address: "B", Stake: "500", Active: true},
+			{Address: "A", Stake: u("500"), Active: true},
+			{Address: "B", Stake: u("500"), Active: true},
 		}
 		for _, candidate := range candidates {
 			assert.NoError(t, set.AddValidator(candidate))
@@ -271,9 +276,9 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 		})
 
 		candidates := []*core.Validator{
-			{Address: "A1", Stake: "400", Active: true},
-			{Address: "A2", Stake: "100", Active: true},
-			{Address: "B", Stake: "500", Active: true},
+			{Address: "A1", Stake: u("400"), Active: true},
+			{Address: "A2", Stake: u("100"), Active: true},
+			{Address: "B", Stake: u("500"), Active: true},
 		}
 		for _, candidate := range candidates {
 			assert.NoError(t, set.AddValidator(candidate))

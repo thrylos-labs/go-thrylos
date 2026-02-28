@@ -24,20 +24,20 @@ func TestCreateTransactionPopulatesByteAmountFields(t *testing.T) {
 		t.Fatalf("failed to create transaction: %v", err)
 	}
 
-	if len(tx.AmountBytes) == 0 {
+	if len(tx.Amount) == 0 {
 		t.Fatal("expected amount bytes to be populated")
 	}
-	if len(tx.GasPriceBytes) == 0 {
+	if len(tx.GasPrice) == 0 {
 		t.Fatal("expected gas price bytes to be populated")
 	}
 	if tx.EncodingVersion != 2 {
 		t.Fatalf("expected new transaction encoding version 2, got %d", tx.EncodingVersion)
 	}
-	if tx.Amount != "1" {
-		t.Fatalf("expected canonical amount string, got %q", tx.Amount)
+	if len(tx.Amount) != 1 || tx.Amount[0] != 0x01 {
+		t.Fatalf("expected canonical amount bytes, got %v", tx.Amount)
 	}
-	if tx.GasPrice != "5" {
-		t.Fatalf("expected canonical gas price string, got %q", tx.GasPrice)
+	if len(tx.GasPrice) != 1 || tx.GasPrice[0] != 0x05 {
+		t.Fatalf("expected canonical gas price bytes, got %v", tx.GasPrice)
 	}
 }
 
@@ -49,9 +49,9 @@ func TestTransactionHashDiffersAcrossEncodingVersions(t *testing.T) {
 		Id:        "tx-1",
 		From:      "from",
 		To:        "to",
-		Amount:    "001",
+		Amount:    []byte("001"),
 		Gas:       21000,
-		GasPrice:  "05",
+		GasPrice:  []byte("05"),
 		Nonce:     7,
 		Type:      core.TransactionType_TRANSFER,
 		Timestamp: 1234567890,
@@ -61,11 +61,9 @@ func TestTransactionHashDiffersAcrossEncodingVersions(t *testing.T) {
 		Id:              legacyTx.Id,
 		From:            legacyTx.From,
 		To:              legacyTx.To,
-		Amount:          "1",
-		AmountBytes:     []byte{0x01},
+		Amount:          []byte{0x01},
 		Gas:             legacyTx.Gas,
-		GasPrice:        "5",
-		GasPriceBytes:   []byte{0x05},
+		GasPrice:        []byte{0x05},
 		Nonce:           legacyTx.Nonce,
 		Type:            legacyTx.Type,
 		Timestamp:       legacyTx.Timestamp,

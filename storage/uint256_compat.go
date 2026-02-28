@@ -5,54 +5,56 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
+func canonicalizeUint256(raw []byte) ([]byte, error) {
+	value, err := coremath.ParseUint256Bytes(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	return coremath.BigIntToUint256Bytes(value)
+}
+
+func canonicalizeUint256Map(raw map[string][]byte) (map[string][]byte, error) {
+	if raw == nil {
+		return make(map[string][]byte), nil
+	}
+
+	out := make(map[string][]byte, len(raw))
+	for key, value := range raw {
+		canonical, err := canonicalizeUint256(value)
+		if err != nil {
+			return nil, err
+		}
+		out[key] = canonical
+	}
+
+	return out, nil
+}
+
 func normalizeAccountCompat(account *core.Account) error {
 	if account == nil {
 		return nil
 	}
 
-	if err := coremath.NormalizeUint256Compat(&account.BalanceBytes, &account.Balance); err != nil {
-		return err
-	}
-	if err := coremath.NormalizeUint256Compat(&account.StakedAmountBytes, &account.StakedAmount); err != nil {
-		return err
-	}
-	if err := coremath.NormalizeUint256Compat(&account.RewardsBytes, &account.Rewards); err != nil {
-		return err
-	}
-
-	delegatedToBytes, delegatedTo, err := coremath.NormalizeUint256MapCompat(account.DelegatedToBytes, account.DelegatedTo)
+	var err error
+	account.Balance, err = canonicalizeUint256(account.Balance)
 	if err != nil {
 		return err
 	}
-	account.DelegatedToBytes = delegatedToBytes
-	account.DelegatedTo = delegatedTo
-
-	return nil
+	account.StakedAmount, err = canonicalizeUint256(account.StakedAmount)
+	if err != nil {
+		return err
+	}
+	account.Rewards, err = canonicalizeUint256(account.Rewards)
+	if err != nil {
+		return err
+	}
+	account.DelegatedTo, err = canonicalizeUint256Map(account.DelegatedTo)
+	return err
 }
 
 func syncAccountCompatForWrite(account *core.Account) error {
-	if account == nil {
-		return nil
-	}
-
-	if err := coremath.SyncUint256ForWrite(&account.BalanceBytes, &account.Balance); err != nil {
-		return err
-	}
-	if err := coremath.SyncUint256ForWrite(&account.StakedAmountBytes, &account.StakedAmount); err != nil {
-		return err
-	}
-	if err := coremath.SyncUint256ForWrite(&account.RewardsBytes, &account.Rewards); err != nil {
-		return err
-	}
-
-	delegatedToBytes, delegatedTo, err := coremath.SyncUint256MapForWrite(account.DelegatedToBytes, account.DelegatedTo)
-	if err != nil {
-		return err
-	}
-	account.DelegatedToBytes = delegatedToBytes
-	account.DelegatedTo = delegatedTo
-
-	return nil
+	return normalizeAccountCompat(account)
 }
 
 func normalizeTransactionCompat(tx *core.Transaction) error {
@@ -60,29 +62,17 @@ func normalizeTransactionCompat(tx *core.Transaction) error {
 		return nil
 	}
 
-	if err := coremath.NormalizeUint256Compat(&tx.AmountBytes, &tx.Amount); err != nil {
+	var err error
+	tx.Amount, err = canonicalizeUint256(tx.Amount)
+	if err != nil {
 		return err
 	}
-	if err := coremath.NormalizeUint256Compat(&tx.GasPriceBytes, &tx.GasPrice); err != nil {
-		return err
-	}
-
-	return nil
+	tx.GasPrice, err = canonicalizeUint256(tx.GasPrice)
+	return err
 }
 
 func syncTransactionCompatForWrite(tx *core.Transaction) error {
-	if tx == nil {
-		return nil
-	}
-
-	if err := coremath.SyncUint256ForWrite(&tx.AmountBytes, &tx.Amount); err != nil {
-		return err
-	}
-	if err := coremath.SyncUint256ForWrite(&tx.GasPriceBytes, &tx.GasPrice); err != nil {
-		return err
-	}
-
-	return nil
+	return normalizeTransactionCompat(tx)
 }
 
 func normalizeValidatorCompat(validator *core.Validator) error {
@@ -90,49 +80,25 @@ func normalizeValidatorCompat(validator *core.Validator) error {
 		return nil
 	}
 
-	if err := coremath.NormalizeUint256Compat(&validator.StakeBytes, &validator.Stake); err != nil {
-		return err
-	}
-	if err := coremath.NormalizeUint256Compat(&validator.SelfStakeBytes, &validator.SelfStake); err != nil {
-		return err
-	}
-	if err := coremath.NormalizeUint256Compat(&validator.DelegatedStakeBytes, &validator.DelegatedStake); err != nil {
-		return err
-	}
-
-	delegatorsBytes, delegators, err := coremath.NormalizeUint256MapCompat(validator.DelegatorsBytes, validator.Delegators)
+	var err error
+	validator.Stake, err = canonicalizeUint256(validator.Stake)
 	if err != nil {
 		return err
 	}
-	validator.DelegatorsBytes = delegatorsBytes
-	validator.Delegators = delegators
-
-	return nil
+	validator.SelfStake, err = canonicalizeUint256(validator.SelfStake)
+	if err != nil {
+		return err
+	}
+	validator.DelegatedStake, err = canonicalizeUint256(validator.DelegatedStake)
+	if err != nil {
+		return err
+	}
+	validator.Delegators, err = canonicalizeUint256Map(validator.Delegators)
+	return err
 }
 
 func syncValidatorCompatForWrite(validator *core.Validator) error {
-	if validator == nil {
-		return nil
-	}
-
-	if err := coremath.SyncUint256ForWrite(&validator.StakeBytes, &validator.Stake); err != nil {
-		return err
-	}
-	if err := coremath.SyncUint256ForWrite(&validator.SelfStakeBytes, &validator.SelfStake); err != nil {
-		return err
-	}
-	if err := coremath.SyncUint256ForWrite(&validator.DelegatedStakeBytes, &validator.DelegatedStake); err != nil {
-		return err
-	}
-
-	delegatorsBytes, delegators, err := coremath.SyncUint256MapForWrite(validator.DelegatorsBytes, validator.Delegators)
-	if err != nil {
-		return err
-	}
-	validator.DelegatorsBytes = delegatorsBytes
-	validator.Delegators = delegators
-
-	return nil
+	return normalizeValidatorCompat(validator)
 }
 
 func normalizeBlockCompat(block *core.Block) error {
@@ -141,7 +107,9 @@ func normalizeBlockCompat(block *core.Block) error {
 	}
 
 	if block.Header != nil {
-		if err := coremath.NormalizeUint256Compat(&block.Header.TotalFeesBytes, &block.Header.TotalFees); err != nil {
+		var err error
+		block.Header.TotalFees, err = canonicalizeUint256(block.Header.TotalFees)
+		if err != nil {
 			return err
 		}
 	}
@@ -156,21 +124,5 @@ func normalizeBlockCompat(block *core.Block) error {
 }
 
 func syncBlockCompatForWrite(block *core.Block) error {
-	if block == nil {
-		return nil
-	}
-
-	if block.Header != nil {
-		if err := coremath.SyncUint256ForWrite(&block.Header.TotalFeesBytes, &block.Header.TotalFees); err != nil {
-			return err
-		}
-	}
-
-	for _, tx := range block.Transactions {
-		if err := syncTransactionCompatForWrite(tx); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return normalizeBlockCompat(block)
 }

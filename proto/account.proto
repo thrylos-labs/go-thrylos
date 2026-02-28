@@ -8,26 +8,22 @@ option go_package = "github.com/thrylos-labs/thrylos-v2/proto/core";
 
 message Account {
   string address = 1;
-  string balance = 2;            
+  bytes balance = 2;            
   uint64 nonce = 3;
-  string staked_amount = 4;       // ⚠️ CHANGED: int64 -> string (Must match balance precision)
-  map<string, string> delegated_to = 5; // ⚠️ CHANGED: map<string, int64> -> map<string, string>
-  string rewards = 6;             // ⚠️ CHANGED: int64 -> string
+  bytes staked_amount = 4;
+  map<string, bytes> delegated_to = 5;
+  bytes rewards = 6;
   bytes code_hash = 7; 
   bytes storage_root = 8; 
-  bytes balance_bytes = 9;
-  bytes staked_amount_bytes = 10;
-  map<string, bytes> delegated_to_bytes = 11;
-  bytes rewards_bytes = 12;
 }
 
 message Transaction {
   string id           = 1;
   string from         = 2;
   string to           = 3;
-  string amount       = 4;     
+  bytes amount        = 4;     
   int64  gas          = 5;       
-  string gas_price    = 6;      
+  bytes gas_price     = 6;      
   uint64 nonce        = 7;
   bytes  data         = 8;
   TransactionType type = 9;
@@ -36,9 +32,7 @@ message Transaction {
   int64  timestamp    = 12;
   bytes  from_pubkey  = 13;
   string chain_id     = 14;
-  bytes  amount_bytes = 15;
-  bytes  gas_price_bytes = 16;
-  uint32 encoding_version = 17;
+  uint32 encoding_version = 15;
 }
 
 enum TransactionType {
@@ -74,12 +68,11 @@ message BlockHeader {
   int64 gas_limit = 8;
   uint64 slot = 9;
   uint64 epoch = 10;
-  string total_fees = 11;
+  bytes total_fees = 11;
   string merkle_root = 12;
   bytes vrf_output = 13;  // VRF randomness output
   bytes vrf_proof = 14;   // VRF proof for verification
-  bytes total_fees_bytes = 15;
-  uint32 state_encoding_version = 16;
+  uint32 state_encoding_version = 15;
 }
 
 message Validator {
@@ -88,10 +81,10 @@ message Validator {
   string name = 3; // Add validator name
   string description = 4; // Add validator description
   string website = 5; // Add validator website
-  string stake = 6; // Updated field numbers
-  string self_stake = 7;
-  string delegated_stake = 8;
-  map<string, string> delegators = 9; // delegator address -> amount
+  bytes stake = 6;
+  bytes self_stake = 7;
+  bytes delegated_stake = 8;
+  map<string, bytes> delegators = 9;
   double commission = 10; // commission rate (0.0 to 1.0)
   bool active = 11;
   int64 blocks_proposed = 12;
@@ -99,10 +92,6 @@ message Validator {
   int64 jail_until = 14; // Unix timestamp, 0 means not jailed
   int64 created_at = 15; // When validator was created
   int64 updated_at = 16; // Last update timestamp
-  bytes stake_bytes = 17;
-  bytes self_stake_bytes = 18;
-  bytes delegated_stake_bytes = 19;
-  map<string, bytes> delegators_bytes = 20;
 }
 
 // You might also want to add validator-related transaction types

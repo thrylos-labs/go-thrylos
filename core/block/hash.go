@@ -68,7 +68,7 @@ func CanonicalBlockHash(b *core.Block) (string, error) {
 	buf.Write(epochBytes)
 
 	if h.StateEncodingVersion >= 2 {
-		totalFees, err := coremath.ParseUint256Compat(h.TotalFeesBytes, h.TotalFees)
+		totalFees, err := coremath.ParseUint256Bytes(h.TotalFees)
 		if err != nil {
 			return "", fmt.Errorf("failed to parse total fees: %w", err)
 		}
@@ -81,8 +81,7 @@ func CanonicalBlockHash(b *core.Block) (string, error) {
 		buf.Write(totalFeeLen)
 		buf.Write(totalFeesBytes)
 	} else {
-		// TotalFees
-		buf.WriteString(h.TotalFees)
+		buf.Write(h.TotalFees)
 	}
 
 	// MerkleRoot

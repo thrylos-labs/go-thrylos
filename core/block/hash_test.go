@@ -44,7 +44,7 @@ func TestCanonicalBlockHash_StateEncodingVersionAffectsHash(t *testing.T) {
 			StateRoot: "stateroot",
 			GasUsed:   21000,
 			GasLimit:  30000000,
-			TotalFees: "001",
+			TotalFees: []byte("001"),
 		},
 	}
 
@@ -58,8 +58,7 @@ func TestCanonicalBlockHash_StateEncodingVersionAffectsHash(t *testing.T) {
 			StateRoot:            legacy.Header.StateRoot,
 			GasUsed:              legacy.Header.GasUsed,
 			GasLimit:             legacy.Header.GasLimit,
-			TotalFees:            "1",
-			TotalFeesBytes:       []byte{0x01},
+			TotalFees:            []byte{0x01},
 			StateEncodingVersion: 2,
 		},
 	}

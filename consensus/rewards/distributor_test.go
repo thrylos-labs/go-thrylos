@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
 	accountpkg "github.com/thrylos-labs/go-thrylos/core/account"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
@@ -31,6 +32,10 @@ func newTestDistributor(t *testing.T, cfg *config.Config) (*Distributor, *state.
 	require.NoError(t, err)
 
 	return NewDistributor(cfg, ws), ws
+}
+
+func u(v string) []byte {
+	return coremath.ParseBigInt(v).Bytes()
 }
 
 func TestNewDistributor_UsesConfiguredEconomics(t *testing.T) {
@@ -70,7 +75,7 @@ func TestDistributor_UsesConfiguredRewardShareAndCommission(t *testing.T) {
 		Address:    "0x8888888888888888888888888888888888888888",
 		Active:     true,
 		Commission: 0.10,
-		Stake:      "1000",
+		Stake:      u("1000"),
 	})
 	require.NoError(t, err)
 
@@ -91,8 +96,8 @@ func TestWithdrawFromCommunityPool_UsesBigIntRewards(t *testing.T) {
 
 	err := ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: recipient,
-		Balance: "0",
-		Rewards: "0",
+		Balance: nil,
+		Rewards: nil,
 	})
 	require.NoError(t, err)
 
@@ -103,7 +108,7 @@ func TestWithdrawFromCommunityPool_UsesBigIntRewards(t *testing.T) {
 
 	account, err := ws.GetAccount(recipient)
 	require.NoError(t, err)
-	require.Equal(t, "10000000000000000000", account.Rewards)
+	require.Equal(t, "10000000000000000000", coremath.BigIntToString(coremath.ParseBigInt(account.Rewards)))
 	require.Equal(t, "90000000000000000000", rd.communityPool)
 }
 

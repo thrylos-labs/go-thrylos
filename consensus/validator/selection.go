@@ -615,11 +615,7 @@ func (vs *Set) calculateAdjustedStakes() map[string]int64 {
 	}
 
 	for _, validator := range vs.activeList {
-		// ✅ Fix: Parse string stake to BigFloat for multiplication
-		baseStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
-		if baseStakeBig == nil {
-			baseStakeBig = big.NewInt(0)
-		}
+		baseStakeBig := math.ParseBigInt(validator.Stake)
 
 		// Convert to Float for multiplier math
 		adjustedStakeFloat := new(big.Float).SetInt(baseStakeBig)
@@ -855,8 +851,7 @@ func (vs *Set) updateActiveListUnsafe() {
 		if validator.Active && !vs.isJailed(validator) {
 			vs.activeList = append(vs.activeList, validator)
 
-			// Parse and Add
-			s, _ := new(big.Int).SetString(validator.Stake, 10)
+			s := math.ParseBigInt(validator.Stake)
 			if s != nil {
 				totalStakeBig.Add(totalStakeBig, s)
 			}
@@ -867,8 +862,8 @@ func (vs *Set) updateActiveListUnsafe() {
 	// Sort by stake (descending) for consistent ordering
 	// ✅ Fix: Compare BigInts
 	sort.Slice(vs.activeList, func(i, j int) bool {
-		s1, _ := new(big.Int).SetString(vs.activeList[i].Stake, 10)
-		s2, _ := new(big.Int).SetString(vs.activeList[j].Stake, 10)
+		s1 := math.ParseBigInt(vs.activeList[i].Stake)
+		s2 := math.ParseBigInt(vs.activeList[j].Stake)
 		if s1 == nil {
 			s1 = big.NewInt(0)
 		}
@@ -886,7 +881,7 @@ func (vs *Set) updateActiveListUnsafe() {
 		// Recalculate total stake for the limited list
 		totalStakeBig = big.NewInt(0)
 		for _, validator := range vs.activeList {
-			s, _ := new(big.Int).SetString(validator.Stake, 10)
+			s := math.ParseBigInt(validator.Stake)
 			if s != nil {
 				totalStakeBig.Add(totalStakeBig, s)
 			}
@@ -931,10 +926,7 @@ func (vs *Set) RotateValidatorSet(config *config.Config) ([]*core.Validator, []*
 		}
 
 		// Remove if stake has fallen below minimum
-		valStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
-		if valStakeBig == nil {
-			valStakeBig = big.NewInt(0)
-		}
+		valStakeBig := math.ParseBigInt(validator.Stake)
 
 		// ✅ Now both are BigInts, so Cmp works correctly
 		if valStakeBig.Cmp(minValStakeBig) < 0 {
@@ -951,10 +943,7 @@ func (vs *Set) RotateValidatorSet(config *config.Config) ([]*core.Validator, []*
 	// Find validators to add from inactive set
 	for _, validator := range vs.validators {
 		if !validator.Active && !vs.isJailed(validator) {
-			valStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
-			if valStakeBig == nil {
-				valStakeBig = big.NewInt(0)
-			}
+			valStakeBig := math.ParseBigInt(validator.Stake)
 
 			// Check if meets requirements
 			if valStakeBig.Cmp(minValStakeBig) >= 0 {
@@ -968,14 +957,8 @@ func (vs *Set) RotateValidatorSet(config *config.Config) ([]*core.Validator, []*
 
 	// Sort candidates to add by stake (descending)
 	sort.Slice(toAdd, func(i, j int) bool {
-		s1, _ := new(big.Int).SetString(toAdd[i].Stake, 10)
-		s2, _ := new(big.Int).SetString(toAdd[j].Stake, 10)
-		if s1 == nil {
-			s1 = big.NewInt(0)
-		}
-		if s2 == nil {
-			s2 = big.NewInt(0)
-		}
+		s1 := math.ParseBigInt(toAdd[i].Stake)
+		s2 := math.ParseBigInt(toAdd[j].Stake)
 		return s1.Cmp(s2) > 0
 	})
 
@@ -1054,7 +1037,7 @@ func (vs *Set) ValidateSelectionFairness() map[string]interface{} {
 			actualRate := float64(stats.TimesSelected) / float64(totalSelections)
 
 			// ✅ Fix: Convert Stake to float for metric calculation
-			valStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
+			valStakeBig := math.ParseBigInt(validator.Stake)
 			valStakeFloat, _ := new(big.Float).SetInt(valStakeBig).Float64()
 
 			expectedRate := 0.0
@@ -1204,7 +1187,7 @@ func (vs *Set) GetSetStatistics() map[string]interface{} {
 		stats["avg_stake"] = avgStakeBig.String()
 
 		// Stake concentration (float for display)
-		maxStakeBig, _ := new(big.Int).SetString(maxStake, 10)
+		maxStakeBig := math.ParseBigInt(maxStake)
 		maxF, _ := new(big.Float).SetInt(maxStakeBig).Float64()
 		totalF, _ := new(big.Float).SetInt(totalStakeBig).Float64()
 
@@ -1261,8 +1244,7 @@ func (vs *Set) CleanupInactiveValidators(maxInactiveTime time.Duration) []string
 
 	for addr, validator := range vs.validators {
 		// Remove if inactive for too long and has no stake
-		// ✅ Fix: Compare string stake to "0"
-		if !validator.Active && validator.Stake == "0" && validator.UpdatedAt < cutoff {
+		if !validator.Active && math.ParseBigInt(validator.Stake).Sign() == 0 && validator.UpdatedAt < cutoff {
 			delete(vs.validators, addr)
 			delete(vs.selectionHistory, addr)
 			delete(vs.performanceMultipliers, addr)

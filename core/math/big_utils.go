@@ -4,16 +4,34 @@ import (
 	"math/big"
 )
 
-// ParseBigInt parses a string to *big.Int. Returns 0 if empty/invalid.
-func ParseBigInt(s string) *big.Int {
-	if s == "" {
+type BigIntInput interface {
+	~string | ~[]byte
+}
+
+// ParseBigInt parses either a decimal string or canonical uint256 bytes.
+// Returns 0 if empty/invalid.
+func ParseBigInt[T BigIntInput](v T) *big.Int {
+	switch value := any(v).(type) {
+	case string:
+		if value == "" {
+			return big.NewInt(0)
+		}
+		val, ok := new(big.Int).SetString(value, 10)
+		if !ok {
+			return big.NewInt(0)
+		}
+		return val
+	case []byte:
+		if len(value) == 0 {
+			return big.NewInt(0)
+		}
+		if err := ValidateCanonicalUint256Bytes(value); err != nil {
+			return big.NewInt(0)
+		}
+		return new(big.Int).SetBytes(value)
+	default:
 		return big.NewInt(0)
 	}
-	val, ok := new(big.Int).SetString(s, 10)
-	if !ok {
-		return big.NewInt(0)
-	}
-	return val
 }
 
 // BigIntToString converts *big.Int to string. Handles nil safely.

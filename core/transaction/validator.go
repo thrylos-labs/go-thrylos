@@ -105,16 +105,16 @@ func (v *Validator) CreateTransaction(from, to string, amount string, gas int64,
 		Id:              uuid.New().String(),
 		From:            from,
 		To:              to,
-		Amount:          amount,
+		Amount:          math.ParseBigInt(amount).Bytes(),
 		Gas:             gas,
-		GasPrice:        gasPrice,
+		GasPrice:        math.ParseBigInt(gasPrice).Bytes(),
 		Nonce:           nonce,
 		Type:            txType,
 		Data:            data,
 		Timestamp:       time.Now().Unix(),
 		EncodingVersion: 2,
 	}
-	if err := syncTransactionAmountsForWrite(tx); err != nil {
+	if err := normalizeTransactionAmounts(tx); err != nil {
 		return nil, fmt.Errorf("failed to normalize transaction amounts: %v", err)
 	}
 
@@ -137,56 +137,20 @@ func (v *Validator) CreateTransaction(from, to string, amount string, gas int64,
 }
 
 func syncTransactionAmountsForWrite(tx *core.Transaction) error {
-	if tx == nil {
-		return fmt.Errorf("transaction cannot be nil")
-	}
-	if err := math.SyncUint256ForWrite(&tx.AmountBytes, &tx.Amount); err != nil {
-		return err
-	}
-	if err := math.SyncUint256ForWrite(&tx.GasPriceBytes, &tx.GasPrice); err != nil {
-		return err
-	}
-
-	return nil
+	return normalizeTransactionAmounts(tx)
 }
 
 func normalizeTransactionAmounts(tx *core.Transaction) error {
 	if tx == nil {
 		return fmt.Errorf("transaction cannot be nil")
 	}
-
-	if transactionEncodingVersion(tx) >= 2 {
-		amount, err := math.ValidateUint256Compat(tx.AmountBytes, tx.Amount)
-		if err != nil {
-			return err
-		}
-		tx.AmountBytes, err = math.BigIntToUint256Bytes(amount)
-		if err != nil {
-			return err
-		}
-		tx.Amount = amount.String()
-
-		gasPrice, err := math.ValidateUint256Compat(tx.GasPriceBytes, tx.GasPrice)
-		if err != nil {
-			return err
-		}
-		tx.GasPriceBytes, err = math.BigIntToUint256Bytes(gasPrice)
-		if err != nil {
-			return err
-		}
-		tx.GasPrice = gasPrice.String()
-
-		return nil
-	}
-
-	if err := math.SyncUint256ForWrite(&tx.AmountBytes, &tx.Amount); err != nil {
+	var err error
+	tx.Amount, err = math.CanonicalizeUint256Bytes(tx.Amount)
+	if err != nil {
 		return err
 	}
-	if err := math.SyncUint256ForWrite(&tx.GasPriceBytes, &tx.GasPrice); err != nil {
-		return err
-	}
-
-	return nil
+	tx.GasPrice, err = math.CanonicalizeUint256Bytes(tx.GasPrice)
+	return err
 }
 
 func transactionEncodingVersion(tx *core.Transaction) uint32 {
@@ -296,13 +260,13 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, erro
 		buf.WriteString(tx.From)
 		buf.WriteString(tx.To)
 
-		appendLengthPrefixedBytes(&buf, tx.AmountBytes)
+		appendLengthPrefixedBytes(&buf, tx.Amount)
 
 		gasBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
 		buf.Write(gasBytes)
 
-		appendLengthPrefixedBytes(&buf, tx.GasPriceBytes)
+		appendLengthPrefixedBytes(&buf, tx.GasPrice)
 
 		nonceBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(nonceBytes, tx.Nonce)
@@ -332,7 +296,7 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, erro
 	buf.WriteString(tx.To)
 
 	// ✅ FIX: Write Amount string directly (do not convert to uint64)
-	buf.WriteString(tx.Amount)
+	buf.Write(tx.Amount)
 
 	// Write gas as bytes (Gas is still int64, so this is fine)
 	gasBytes := make([]byte, 8)
@@ -340,7 +304,7 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, erro
 	buf.Write(gasBytes)
 
 	// ✅ FIX: Write GasPrice string directly
-	buf.WriteString(tx.GasPrice)
+	buf.Write(tx.GasPrice)
 
 	// Write nonce as bytes
 	nonceBytes := make([]byte, 8)
@@ -687,13 +651,13 @@ func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) 
 		buf.WriteString(tx.From)
 		buf.WriteString(tx.To)
 
-		appendLengthPrefixedBytes(&buf, tx.AmountBytes)
+		appendLengthPrefixedBytes(&buf, tx.Amount)
 
 		gasBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
 		buf.Write(gasBytes)
 
-		appendLengthPrefixedBytes(&buf, tx.GasPriceBytes)
+		appendLengthPrefixedBytes(&buf, tx.GasPrice)
 
 		nonceBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(nonceBytes, tx.Nonce)
@@ -721,7 +685,7 @@ func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) 
 	buf.WriteString(tx.To)
 
 	// ✅ FIX: Write Amount string directly (do not convert to uint64)
-	buf.WriteString(tx.Amount)
+	buf.Write(tx.Amount)
 
 	// Write gas as bytes (Gas is still int64, so binary packing is fine)
 	gasBytes := make([]byte, 8)
@@ -729,7 +693,7 @@ func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) 
 	buf.Write(gasBytes)
 
 	// ✅ FIX: Write GasPrice string directly
-	buf.WriteString(tx.GasPrice)
+	buf.Write(tx.GasPrice)
 
 	// Write nonce as bytes - CRITICAL for replay protection
 	nonceBytes := make([]byte, 8)
@@ -784,13 +748,13 @@ func (v *Validator) calculateSignableHashWithReplayProtection(tx *core.Transacti
 		buf.WriteString(tx.Id)
 		buf.WriteString(tx.From)
 		buf.WriteString(tx.To)
-		appendLengthPrefixedBytes(&buf, tx.AmountBytes)
+		appendLengthPrefixedBytes(&buf, tx.Amount)
 
 		gasBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
 		buf.Write(gasBytes)
 
-		appendLengthPrefixedBytes(&buf, tx.GasPriceBytes)
+		appendLengthPrefixedBytes(&buf, tx.GasPrice)
 
 		nonceBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(nonceBytes, tx.Nonce)
@@ -825,7 +789,7 @@ func (v *Validator) calculateSignableHashWithReplayProtection(tx *core.Transacti
 	buf.WriteString(tx.To)
 
 	// ✅ FIX: Write Amount string directly (do not convert to uint64)
-	buf.WriteString(tx.Amount)
+	buf.Write(tx.Amount)
 
 	// Write gas as bytes (Gas is still int64, so this is fine)
 	gasBytes := make([]byte, 8)
@@ -833,7 +797,7 @@ func (v *Validator) calculateSignableHashWithReplayProtection(tx *core.Transacti
 	buf.Write(gasBytes)
 
 	// ✅ FIX: Write GasPrice string directly
-	buf.WriteString(tx.GasPrice)
+	buf.Write(tx.GasPrice)
 
 	// Write nonce as bytes
 	nonceBytes := make([]byte, 8)
@@ -1681,8 +1645,7 @@ func (v *Validator) ValidateBatch(transactions []*core.Transaction, stateReader 
 				Nonce:        currentAccount.Nonce,
 				StakedAmount: currentAccount.StakedAmount,
 
-				// ✅ FIX: Initialize as map[string]string
-				DelegatedTo: make(map[string]string),
+				DelegatedTo: make(map[string][]byte),
 
 				Rewards:     currentAccount.Rewards,
 				CodeHash:    currentAccount.CodeHash,
@@ -1690,7 +1653,6 @@ func (v *Validator) ValidateBatch(transactions []*core.Transaction, stateReader 
 			}
 
 			// Copy existing delegations
-			// Since currentAccount.DelegatedTo is already map[string]string, this works directly
 			for k, val := range currentAccount.DelegatedTo {
 				sender.DelegatedTo[k] = val
 			}
@@ -1738,7 +1700,7 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 
 		// Update Balance
 		balanceBig.Sub(balanceBig, totalCostBig)
-		account.Balance = balanceBig.String()
+		account.Balance = mustUint256Bytes(balanceBig)
 
 	case core.TransactionType_STAKE:
 		// Total Cost = Amount + GasCost
@@ -1752,11 +1714,11 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 
 		// Update Balance
 		balanceBig.Sub(balanceBig, totalCostBig)
-		account.Balance = balanceBig.String()
+		account.Balance = mustUint256Bytes(balanceBig)
 
 		// Update Staked Amount: Staked + Amount
 		stakedBig.Add(stakedBig, amountBig)
-		account.StakedAmount = stakedBig.String()
+		account.StakedAmount = mustUint256Bytes(stakedBig)
 
 	case core.TransactionType_UNSTAKE:
 		// Check Balance for Gas
@@ -1776,11 +1738,11 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 
 		// Add Unstaked Amount back to Balance
 		balanceBig.Add(balanceBig, amountBig)
-		account.Balance = balanceBig.String()
+		account.Balance = mustUint256Bytes(balanceBig)
 
 		// Deduct from Staked Amount
 		stakedBig.Sub(stakedBig, amountBig)
-		account.StakedAmount = stakedBig.String()
+		account.StakedAmount = mustUint256Bytes(stakedBig)
 
 	case core.TransactionType_DELEGATE:
 		// Total Cost = Amount + GasCost
@@ -1794,27 +1756,27 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 
 		// Update Balance
 		balanceBig.Sub(balanceBig, totalCostBig)
-		account.Balance = balanceBig.String()
+		account.Balance = mustUint256Bytes(balanceBig)
 
 		// Update Total Staked Amount (Delegation counts as stake on account level too?)
 		// Assuming your model tracks total staked including delegations:
 		stakedBig.Add(stakedBig, amountBig)
-		account.StakedAmount = stakedBig.String()
+		account.StakedAmount = mustUint256Bytes(stakedBig)
 
 		// Initialize map if nil
 		if account.DelegatedTo == nil {
-			account.DelegatedTo = make(map[string]string)
+			account.DelegatedTo = make(map[string][]byte)
 		}
 
 		// Update Specific Delegation
-		currentDelegationStr := "0"
+		var currentDelegationRaw []byte
 		if val, exists := account.DelegatedTo[tx.To]; exists {
-			currentDelegationStr = val
+			currentDelegationRaw = val
 		}
-		currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+		currentDelegationBig := math.ParseBigInt(currentDelegationRaw)
 
 		currentDelegationBig.Add(currentDelegationBig, amountBig)
-		account.DelegatedTo[tx.To] = currentDelegationBig.String()
+		account.DelegatedTo[tx.To] = mustUint256Bytes(currentDelegationBig)
 
 	case core.TransactionType_UNDELEGATE:
 		// Check Balance for Gas
@@ -1830,15 +1792,15 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 		}
 
 		// Check Specific Delegation
-		currentDelegationStr := "0"
+		var currentDelegationRaw []byte
 		if val, exists := account.DelegatedTo[tx.To]; exists {
-			currentDelegationStr = val
+			currentDelegationRaw = val
 		}
-		currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+		currentDelegationBig := math.ParseBigInt(currentDelegationRaw)
 
 		if currentDelegationBig.Cmp(amountBig) < 0 {
 			return fmt.Errorf("delegation underflow: delegated %s < undelegate amount %s",
-				currentDelegationStr, tx.Amount)
+				currentDelegationRaw, tx.Amount)
 		}
 
 		// Deduct Gas
@@ -1846,11 +1808,11 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 
 		// Add Undelegated Amount back to Balance
 		balanceBig.Add(balanceBig, amountBig)
-		account.Balance = balanceBig.String()
+		account.Balance = mustUint256Bytes(balanceBig)
 
 		// Deduct from Total Staked
 		stakedBig.Sub(stakedBig, amountBig)
-		account.StakedAmount = stakedBig.String()
+		account.StakedAmount = mustUint256Bytes(stakedBig)
 
 		// Deduct from Specific Delegation
 		currentDelegationBig.Sub(currentDelegationBig, amountBig)
@@ -1858,7 +1820,7 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 		if currentDelegationBig.Sign() == 0 {
 			delete(account.DelegatedTo, tx.To)
 		} else {
-			account.DelegatedTo[tx.To] = currentDelegationBig.String()
+			account.DelegatedTo[tx.To] = mustUint256Bytes(currentDelegationBig)
 		}
 
 	case core.TransactionType_CLAIM_REWARDS:
@@ -1873,17 +1835,17 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 
 		// Add Rewards to Balance
 		balanceBig.Add(balanceBig, rewardsBig)
-		account.Balance = balanceBig.String()
+		account.Balance = mustUint256Bytes(balanceBig)
 
 		// Reset Rewards
-		account.Rewards = "0"
+		account.Rewards = nil
 	case core.TransactionType_GOVERNANCE_PROPOSE, core.TransactionType_GOVERNANCE_VOTE, core.TransactionType_GOVERNANCE_FINALIZE:
 		if balanceBig.Cmp(gasCostBig) < 0 {
 			return fmt.Errorf("balance underflow: balance %s < gas cost %s",
 				account.Balance, gasCostBig.String())
 		}
 		balanceBig.Sub(balanceBig, gasCostBig)
-		account.Balance = balanceBig.String()
+		account.Balance = mustUint256Bytes(balanceBig)
 	}
 
 	return nil

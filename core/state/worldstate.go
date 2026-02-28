@@ -99,6 +99,11 @@ type WorldState struct {
 	genesisCommitted bool
 }
 
+func mustStateUint256Bytes(v *big.Int) []byte {
+	encoded, _ := math.BigIntToUint256Bytes(v)
+	return encoded
+}
+
 func (ws *WorldState) calculateBlockHash(b *core.Block) string {
 	hash, err := block.CanonicalBlockHash(b)
 	if err != nil {
@@ -154,17 +159,11 @@ func (ws *WorldState) initializeFromConfig(verbose bool) error {
 
 		account := &core.Account{
 			Address: genesisAccount.Address,
-			Balance: genesisAccount.Balance, // ✅ FIX: Assign string directly
+			Balance: balanceBig.Bytes(),
 			Nonce:   0,
-
-			// ✅ FIX: Initialize as string "0"
-			StakedAmount: "0",
-
-			// ✅ FIX: Initialize as map[string]string
-			DelegatedTo: make(map[string]string),
-
-			// ✅ FIX: Initialize as string "0"
-			Rewards: "0",
+			StakedAmount: nil,
+			DelegatedTo:  make(map[string][]byte),
+			Rewards:      nil,
 		}
 
 		// Create account using account manager
@@ -698,12 +697,10 @@ func (ws *WorldState) ImportWorldState(
 	totalStaked := new(big.Int)
 	ws.validatorMu.RLock()
 	for _, v := range ws.validators {
-		if v.Stake == "" {
+		if len(v.Stake) == 0 {
 			continue
 		}
-		if stake, ok := new(big.Int).SetString(v.Stake, 10); ok {
-			totalStaked.Add(totalStaked, stake)
-		}
+		totalStaked.Add(totalStaked, math.ParseBigInt(v.Stake))
 	}
 	ws.validatorMu.RUnlock()
 
@@ -741,11 +738,7 @@ func (ws *WorldState) GetBalance(address string) (*big.Int, error) {
 	if err != nil {
 		return big.NewInt(0), err
 	}
-	balance, err := math.ParseUint256Compat(acc.BalanceBytes, acc.Balance)
-	if err != nil {
-		return big.NewInt(0), fmt.Errorf("invalid balance for %s: %w", address, err)
-	}
-	return balance, nil
+	return math.ParseUint256Bytes(acc.Balance)
 }
 
 // UpdateBalance updates the balance for a given address (needed for slashing)
@@ -772,7 +765,7 @@ func (ws *WorldState) UpdateBalance(address string, newBalance *big.Int) error {
 	}
 
 	// ✅ FIX: Convert BigInt to string before assigning
-	account.Balance = newBalance.String()
+	account.Balance = mustStateUint256Bytes(newBalance)
 
 	// Save back using UpdateAccount
 	err = ws.accountManager.UpdateAccount(account)
@@ -1181,7 +1174,7 @@ func (ws *WorldState) addValidator(validator *core.Validator) error {
 
 	// Initialize validator fields if needed
 	if validator.Delegators == nil {
-		validator.Delegators = make(map[string]string)
+		validator.Delegators = make(map[string][]byte)
 	}
 
 	// Set creation time if not set
@@ -1219,15 +1212,15 @@ func (ws *WorldState) updateStateRoot() error {
 		// Serialize account data
 		stateData = append(stateData, []byte(account.Address)...)
 
-		appendStateUint256(&stateData, stateEncodingVersion, account.BalanceBytes, account.Balance)
+		appendStateUint256(&stateData, stateEncodingVersion, account.Balance, nil)
 
 		// Nonce is still uint64, so this remains correct
 		nonceBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(nonceBytes, account.Nonce)
 		stateData = append(stateData, nonceBytes...)
 
-		appendStateUint256(&stateData, stateEncodingVersion, account.StakedAmountBytes, account.StakedAmount)
-		appendStateUint256(&stateData, stateEncodingVersion, account.RewardsBytes, account.Rewards)
+		appendStateUint256(&stateData, stateEncodingVersion, account.StakedAmount, nil)
+		appendStateUint256(&stateData, stateEncodingVersion, account.Rewards, nil)
 
 		// Sort delegation keys for deterministic state
 		if len(account.DelegatedTo) > 0 {
@@ -1241,7 +1234,7 @@ func (ws *WorldState) updateStateRoot() error {
 				amountStr := account.DelegatedTo[valAddr]
 
 				stateData = append(stateData, []byte(valAddr)...)
-				appendStateUint256(&stateData, stateEncodingVersion, account.DelegatedToBytes[valAddr], amountStr)
+				appendStateUint256(&stateData, stateEncodingVersion, amountStr, nil)
 			}
 		}
 	}
@@ -1260,7 +1253,7 @@ func (ws *WorldState) updateStateRoot() error {
 		stateData = append(stateData, []byte(validator.Address)...)
 		stateData = append(stateData, validator.Pubkey...)
 
-		appendStateUint256(&stateData, stateEncodingVersion, validator.StakeBytes, validator.Stake)
+		appendStateUint256(&stateData, stateEncodingVersion, validator.Stake, nil)
 
 		// Add active status
 		if validator.Active {
@@ -1277,9 +1270,9 @@ func (ws *WorldState) updateStateRoot() error {
 	return nil
 }
 
-func appendStateUint256(dst *[]byte, version uint32, raw []byte, decimal string) {
+func appendStateUint256(dst *[]byte, version uint32, raw []byte, _ []byte) {
 	if version >= stateRootEncodingVersionCanonical {
-		value, err := math.ParseUint256Compat(raw, decimal)
+		value, err := math.ParseUint256Bytes(raw)
 		if err == nil {
 			canonical, err := math.BigIntToUint256Bytes(value)
 			if err == nil {
@@ -1292,7 +1285,7 @@ func appendStateUint256(dst *[]byte, version uint32, raw []byte, decimal string)
 		}
 	}
 
-	*dst = append(*dst, []byte(decimal)...)
+	*dst = append(*dst, raw...)
 }
 
 // ValidateStateConsistency validates the consistency of the world state
@@ -1475,7 +1468,7 @@ func (csm *CrossShardManager) InitiateTransfer(from, to string, amount string, n
 
 		// Debit sender (atomic)
 		newBalanceBig := new(big.Int).Sub(balanceBig, amountBig)
-		senderAccount.Balance = newBalanceBig.String()
+		senderAccount.Balance = mustStateUint256Bytes(newBalanceBig)
 
 		if err := csm.worldState.accountManager.UpdateAccount(senderAccount); err != nil {
 			return fmt.Errorf("failed to update sender account: %v", err)
@@ -1562,19 +1555,15 @@ func (csm *CrossShardManager) CompleteTransfer(transferHash string) error {
 	if err != nil {
 		recipientAccount = &core.Account{
 			Address:      transfer.To,
-			Balance:      "0", // Fix: Initialize as string "0"
+			Balance:      nil,
 			Nonce:        0,
-			StakedAmount: "0",                     // Fix: String
-			DelegatedTo:  make(map[string]string), // Note: Check if this map should also be map[string]string?
-			Rewards:      "0",                     // Fix: String
+			StakedAmount: nil,
+			DelegatedTo:  make(map[string][]byte),
+			Rewards:      nil,
 		}
 	}
 
-	// Fix: Use BigInt arithmetic instead of math.SafeAdd (which expects int64)
-	currentBal, _ := new(big.Int).SetString(recipientAccount.Balance, 10)
-	if currentBal == nil {
-		currentBal = big.NewInt(0)
-	}
+	currentBal := math.ParseBigInt(recipientAccount.Balance)
 
 	amountBig, _ := new(big.Int).SetString(transfer.Amount, 10)
 	if amountBig == nil {
@@ -1583,7 +1572,7 @@ func (csm *CrossShardManager) CompleteTransfer(transferHash string) error {
 
 	// Balance += Amount
 	newBalance := new(big.Int).Add(currentBal, amountBig)
-	recipientAccount.Balance = newBalance.String()
+	recipientAccount.Balance = mustStateUint256Bytes(newBalance)
 
 	if err := csm.worldState.accountManager.UpdateAccount(recipientAccount); err != nil {
 		return fmt.Errorf("failed to update recipient account: %v", err)
@@ -1654,12 +1643,10 @@ func (ws *WorldState) CreateSnapshot() *StateSnapshot {
 	accounts := make(map[string]*core.Account)
 	for addr, account := range ws.accountManager.GetAllAccounts() {
 		// Deep copy account
-		// ✅ CHANGED: Map type is now map[string]string
-		delegatedTo := make(map[string]string)
+		delegatedTo := make(map[string][]byte)
 		if account.DelegatedTo != nil {
 			for k, v := range account.DelegatedTo {
-				// ✅ No conversion needed: string assigned to string
-				delegatedTo[k] = v
+				delegatedTo[k] = append([]byte(nil), v...)
 			}
 		}
 
@@ -1679,12 +1666,10 @@ func (ws *WorldState) CreateSnapshot() *StateSnapshot {
 	validators := make(map[string]*core.Validator)
 	for addr, validator := range ws.validators {
 		// Deep copy validator
-		// ✅ CHANGED: Map type is now map[string]string
-		delegators := make(map[string]string)
+		delegators := make(map[string][]byte)
 		if validator.Delegators != nil {
 			for k, v := range validator.Delegators {
-				// ✅ No conversion needed
-				delegators[k] = v
+				delegators[k] = append([]byte(nil), v...)
 			}
 		}
 
@@ -1830,10 +1815,7 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount *
 	}
 
 	// ✅ Check balance
-	delBalance, _ := new(big.Int).SetString(delegator.Balance, 10)
-	if delBalance == nil {
-		delBalance = big.NewInt(0)
-	}
+	delBalance := math.ParseBigInt(delegator.Balance)
 
 	if delBalance.Cmp(amount) < 0 {
 		return fmt.Errorf("insufficient balance: have %s, need %s",
@@ -1847,10 +1829,7 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount *
 	}
 
 	// ✅ NEW CHECK 2: Maximum stake per validator (absolute limit)
-	currentStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
-	if currentStakeBig == nil {
-		currentStakeBig = big.NewInt(0)
-	}
+	currentStakeBig := math.ParseBigInt(validator.Stake)
 	newStakeBig := new(big.Int).Add(currentStakeBig, amount)
 
 	maxStakeBig, _ := new(big.Int).SetString(ws.config.Staking.MaxValidatorStake, 10)
@@ -1891,41 +1870,29 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount *
 
 	// Calculate new delegator balances
 	newBalance := new(big.Int).Sub(delBalance, amount)
-	currentStaked, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
-	if currentStaked == nil {
-		currentStaked = big.NewInt(0)
-	}
+	currentStaked := math.ParseBigInt(delegator.StakedAmount)
 	newStakedAmount := new(big.Int).Add(currentStaked, amount)
 
 	// Update delegator delegation map
 	if delegator.DelegatedTo == nil {
-		delegator.DelegatedTo = make(map[string]string)
+		delegator.DelegatedTo = make(map[string][]byte)
 	}
 
 	currentDelegationStr := delegator.DelegatedTo[validatorAddr]
-	currentDelegationBig, _ := new(big.Int).SetString(currentDelegationStr, 10)
-	if currentDelegationBig == nil {
-		currentDelegationBig = big.NewInt(0)
-	}
+	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
 	newDelegationBig := new(big.Int).Add(currentDelegationBig, amount)
 
 	// Calculate new validator stakes
-	valDelegated, _ := new(big.Int).SetString(validator.DelegatedStake, 10)
-	if valDelegated == nil {
-		valDelegated = big.NewInt(0)
-	}
+	valDelegated := math.ParseBigInt(validator.DelegatedStake)
 	newValDelegated := new(big.Int).Add(valDelegated, amount)
 
 	// Calculate new validator delegator amount
 	if validator.Delegators == nil {
-		validator.Delegators = make(map[string]string)
+		validator.Delegators = make(map[string][]byte)
 	}
 
 	currentValDelStr := validator.Delegators[delegatorAddr]
-	currentValDelBig, _ := new(big.Int).SetString(currentValDelStr, 10)
-	if currentValDelBig == nil {
-		currentValDelBig = big.NewInt(0)
-	}
+	currentValDelBig := math.ParseBigInt(currentValDelStr)
 	newValDelBig := new(big.Int).Add(currentValDelBig, amount)
 
 	// Calculate new total staked
@@ -1938,9 +1905,9 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount *
 	// --- UPDATE PHASE ---
 
 	// Update delegator
-	delegator.Balance = newBalance.String()
-	delegator.StakedAmount = newStakedAmount.String()
-	delegator.DelegatedTo[validatorAddr] = newDelegationBig.String()
+	delegator.Balance = mustStateUint256Bytes(newBalance)
+	delegator.StakedAmount = mustStateUint256Bytes(newStakedAmount)
+	delegator.DelegatedTo[validatorAddr] = mustStateUint256Bytes(newDelegationBig)
 
 	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
 		return fmt.Errorf("failed to update delegator account: %v", err)
@@ -1951,9 +1918,9 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount *
 	}
 
 	// Update validator
-	validator.Delegators[delegatorAddr] = newValDelBig.String()
-	validator.DelegatedStake = newValDelegated.String()
-	validator.Stake = newStakeBig.String() // Use the validated newStakeBig
+	validator.Delegators[delegatorAddr] = mustStateUint256Bytes(newValDelBig)
+	validator.DelegatedStake = mustStateUint256Bytes(newValDelegated)
+	validator.Stake = mustStateUint256Bytes(newStakeBig) // Use the validated newStakeBig
 	validator.UpdatedAt = time.Now().Unix()
 
 	// Update global state
@@ -1996,10 +1963,7 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 		return fmt.Errorf("delegation not found for validator %s", validatorAddr)
 	}
 
-	delegatedAmountBig, success := new(big.Int).SetString(delegatedAmountStr, 10)
-	if !success {
-		return fmt.Errorf("invalid delegation data format")
-	}
+	delegatedAmountBig := math.ParseBigInt(delegatedAmountStr)
 
 	if delegatedAmountBig.Cmp(amount) < 0 {
 		return fmt.Errorf("insufficient delegation: have %s, want %s",
@@ -2014,29 +1978,17 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 	// --- 2. Math Operations ---
 	newDelegatedToValBig := new(big.Int).Sub(delegatedAmountBig, amount)
 
-	stakedAmountBig, _ := new(big.Int).SetString(delegator.StakedAmount, 10)
-	if stakedAmountBig == nil {
-		stakedAmountBig = big.NewInt(0)
-	}
+	stakedAmountBig := math.ParseBigInt(delegator.StakedAmount)
 	newStakedAmount := new(big.Int).Sub(stakedAmountBig, amount)
 
-	valDelegatedStakeBig, _ := new(big.Int).SetString(validator.DelegatedStake, 10)
-	if valDelegatedStakeBig == nil {
-		valDelegatedStakeBig = big.NewInt(0)
-	}
+	valDelegatedStakeBig := math.ParseBigInt(validator.DelegatedStake)
 	newValDelegatedStake := new(big.Int).Sub(valDelegatedStakeBig, amount)
 
-	valStakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
-	if valStakeBig == nil {
-		valStakeBig = big.NewInt(0)
-	}
+	valStakeBig := math.ParseBigInt(validator.Stake)
 	newValStake := new(big.Int).Sub(valStakeBig, amount)
 
 	currentValDelegationStr := validator.Delegators[delegatorAddr]
-	currentValDelegationBig, _ := new(big.Int).SetString(currentValDelegationStr, 10)
-	if currentValDelegationBig == nil {
-		currentValDelegationBig = big.NewInt(0)
-	}
+	currentValDelegationBig := math.ParseBigInt(currentValDelegationStr)
 	newValDelegationBig := new(big.Int).Sub(currentValDelegationBig, amount)
 
 	totalStakedBig, _ := new(big.Int).SetString(ws.totalStaked, 10)
@@ -2049,22 +2001,22 @@ func (sm *StakingManager) Undelegate(delegatorAddr, validatorAddr string, amount
 	// Funds will be added after unbonding period completes
 
 	// --- 3. Update State (No balance change yet) ---
-	delegator.StakedAmount = newStakedAmount.String()
+	delegator.StakedAmount = mustStateUint256Bytes(newStakedAmount)
 	// ✅ Balance stays the same (funds in unbonding)
 
 	if newDelegatedToValBig.Sign() == 0 {
 		delete(delegator.DelegatedTo, validatorAddr)
 	} else {
-		delegator.DelegatedTo[validatorAddr] = newDelegatedToValBig.String()
+		delegator.DelegatedTo[validatorAddr] = mustStateUint256Bytes(newDelegatedToValBig)
 	}
 
-	validator.DelegatedStake = newValDelegatedStake.String()
-	validator.Stake = newValStake.String()
+	validator.DelegatedStake = mustStateUint256Bytes(newValDelegatedStake)
+	validator.Stake = mustStateUint256Bytes(newValStake)
 
 	if newValDelegationBig.Sign() == 0 {
 		delete(validator.Delegators, delegatorAddr)
 	} else {
-		validator.Delegators[delegatorAddr] = newValDelegationBig.String()
+		validator.Delegators[delegatorAddr] = mustStateUint256Bytes(newValDelegationBig)
 	}
 	validator.UpdatedAt = time.Now().Unix()
 
@@ -2156,12 +2108,9 @@ func (ws *WorldState) completeUnbonding(entry types.UnbondingEntry) error {
 	}
 
 	// Add to balance
-	balanceBig, _ := new(big.Int).SetString(delegator.Balance, 10)
-	if balanceBig == nil {
-		balanceBig = big.NewInt(0)
-	}
+	balanceBig := math.ParseBigInt(delegator.Balance)
 	newBalance := new(big.Int).Add(balanceBig, amountBig)
-	delegator.Balance = newBalance.String()
+	delegator.Balance = mustStateUint256Bytes(newBalance)
 
 	// Update account
 	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
@@ -2227,7 +2176,7 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 	// Calculate Total Voting Power
 	totalVotingPower := big.NewInt(0)
 	for _, v := range activeValidators {
-		vStake, _ := new(big.Int).SetString(v.Stake, 10)
+		vStake := math.ParseBigInt(v.Stake)
 		if vStake != nil {
 			totalVotingPower.Add(totalVotingPower, vStake)
 		}
@@ -2244,7 +2193,7 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 
 	// Distribute rewards to each validator
 	for _, validator := range activeValidators {
-		valStake, _ := new(big.Int).SetString(validator.Stake, 10)
+		valStake := math.ParseBigInt(validator.Stake)
 
 		// ✅ ISSUE #8 FIX 1: Skip validators with zero or invalid stake
 		if valStake == nil || valStake.Sign() == 0 {
@@ -2285,19 +2234,13 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 		}
 
 		// Update validator account with commission
-		currRew, _ := new(big.Int).SetString(valAcc.Rewards, 10)
-		if currRew == nil {
-			currRew = big.NewInt(0)
-		}
-		valAcc.Rewards = new(big.Int).Add(currRew, commAmt).String()
+		currRew := math.ParseBigInt(valAcc.Rewards)
+		valAcc.Rewards = mustStateUint256Bytes(new(big.Int).Add(currRew, commAmt))
 
 		// If no delegators, validator gets everything
 		if len(validator.Delegators) == 0 {
-			currentRewards, _ := new(big.Int).SetString(valAcc.Rewards, 10)
-			if currentRewards == nil {
-				currentRewards = big.NewInt(0)
-			}
-			valAcc.Rewards = new(big.Int).Add(currentRewards, delegatorReward).String()
+			currentRewards := math.ParseBigInt(valAcc.Rewards)
+			valAcc.Rewards = mustStateUint256Bytes(new(big.Int).Add(currentRewards, delegatorReward))
 		}
 
 		// Handle update errors
@@ -2314,11 +2257,11 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 
 		// Distribute to Delegators
 		if len(validator.Delegators) > 0 {
-			valDelegatedStake, _ := new(big.Int).SetString(validator.DelegatedStake, 10)
+			valDelegatedStake := math.ParseBigInt(validator.DelegatedStake)
 			if valDelegatedStake != nil && valDelegatedStake.Sign() > 0 {
 
 				for delAddr, delAmountStr := range validator.Delegators {
-					delAmount, _ := new(big.Int).SetString(delAmountStr, 10)
+					delAmount := math.ParseBigInt(delAmountStr)
 					if delAmount == nil {
 						log.Printf("⚠️ Warning: Delegator %s has invalid stake amount", delAddr)
 						continue
@@ -2347,11 +2290,8 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 					}
 
 					// Update delegator rewards
-					r, _ := new(big.Int).SetString(delAcc.Rewards, 10)
-					if r == nil {
-						r = big.NewInt(0)
-					}
-					delAcc.Rewards = new(big.Int).Add(r, share).String()
+					r := math.ParseBigInt(delAcc.Rewards)
+					delAcc.Rewards = mustStateUint256Bytes(new(big.Int).Add(r, share))
 
 					// Handle delegator update errors
 					if err := ws.accountManager.UpdateAccount(delAcc); err != nil {
@@ -2424,7 +2364,7 @@ func (sm *StakingManager) GetDelegations(delegatorAddr string) (map[string]strin
 	// ✅ CHANGED: Map type matches account.DelegatedTo
 	delegations := make(map[string]string)
 	for validator, amount := range account.DelegatedTo {
-		delegations[validator] = amount // direct assignment string -> string
+		delegations[validator] = math.BigIntToString(math.ParseBigInt(amount))
 	}
 
 	return delegations, nil
@@ -2454,8 +2394,7 @@ func (ws *WorldState) UpdateTotalStaked() {
 
 	total := big.NewInt(0)
 	for _, validator := range ws.validators {
-		// Parse string stake to BigInt
-		s, _ := new(big.Int).SetString(validator.Stake, 10)
+		s := math.ParseBigInt(validator.Stake)
 		if s != nil {
 			total.Add(total, s)
 		}
@@ -2523,11 +2462,10 @@ func (ws *WorldState) ExportValidators() map[string]*core.Validator {
 	for addr, validator := range ws.validators {
 		// Deep copy
 		// ✅ CHANGED: Map type is now map[string]string
-		delegators := make(map[string]string)
+		delegators := make(map[string][]byte)
 		if validator.Delegators != nil {
 			for k, v := range validator.Delegators {
-				// ✅ No conversion needed: string assigned to string
-				delegators[k] = v
+				delegators[k] = append([]byte(nil), v...)
 			}
 		}
 
@@ -2600,7 +2538,7 @@ func (ws *WorldState) ExportStakes() ([]*StakeExport, error) {
 			exportData = append(exportData, &StakeExport{
 				DelegatorAddr: delegatorAddr,
 				ValidatorAddr: valAddr,
-				Amount:        amount,
+				Amount:        math.BigIntToString(math.ParseBigInt(amount)),
 			})
 		}
 	}
@@ -2692,20 +2630,17 @@ func (ws *WorldState) SetStake(delegatorAddr, validatorAddr string, amount strin
 		// Create new account if it doesn't exist
 		delegator = &core.Account{
 			Address:      delegatorAddr,
-			Balance:      "0", // ✅ Fix: Initialize as string "0"
+			Balance:      nil,
 			Nonce:        0,   // Nonce remains integer (uint64)
-			StakedAmount: "0", // ✅ Fix: Initialize as string "0"
-
-			// ✅ Fix: Initialize as map[string]string
-			DelegatedTo: make(map[string]string),
-			Rewards:     "0", // ✅ Fix: Initialize as string "0"
+			StakedAmount: nil,
+			DelegatedTo:  make(map[string][]byte),
+			Rewards:      nil,
 		}
 	}
 
 	// Initialize DelegatedTo map if nil
 	if delegator.DelegatedTo == nil {
-		// ✅ Fix: correct map type
-		delegator.DelegatedTo = make(map[string]string)
+		delegator.DelegatedTo = make(map[string][]byte)
 	}
 
 	// Parse amount to BigInt for checking
@@ -2713,15 +2648,13 @@ func (ws *WorldState) SetStake(delegatorAddr, validatorAddr string, amount strin
 
 	// Check if amount > 0
 	if amountBig.Sign() > 0 {
-		// Set delegation (Store string)
-		delegator.DelegatedTo[validatorAddr] = amount
+		delegator.DelegatedTo[validatorAddr] = append([]byte(nil), amount...)
 
 		// Update Total Staked Amount: StakedAmount + amount
 		currentStakedBig := math.ParseBigInt(delegator.StakedAmount)
 		currentStakedBig.Add(currentStakedBig, amountBig)
 
-		// Store result back as string
-		delegator.StakedAmount = currentStakedBig.String()
+		delegator.StakedAmount = mustStateUint256Bytes(currentStakedBig)
 	} else {
 		// Remove delegation if amount is 0
 		delete(delegator.DelegatedTo, validatorAddr)
@@ -3037,9 +2970,8 @@ func (sm *StakingManager) ClaimRewards(delegatorAddr string) error {
 	// 3. Add: Balance + Rewards
 	balanceBig.Add(balanceBig, rewardsBig)
 
-	// 4. Update State (BigInt -> String)
-	delegator.Balance = balanceBig.String()
-	delegator.Rewards = "0" // Set to string "0"
+	delegator.Balance = mustStateUint256Bytes(balanceBig)
+	delegator.Rewards = nil
 
 	if err := ws.accountManager.UpdateAccount(delegator); err != nil {
 		return fmt.Errorf("failed to update delegator account: %v", err)
@@ -3261,14 +3193,14 @@ func (ws *WorldState) calculateStateRootFromOverlay(store *simulationStore) (str
 	for _, addr := range addresses {
 		acc := merged[addr]
 		stateData = append(stateData, []byte(acc.Address)...)
-		appendStateUint256(&stateData, stateEncodingVersion, acc.BalanceBytes, acc.Balance)
+		appendStateUint256(&stateData, stateEncodingVersion, acc.Balance, nil)
 
 		nonceBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(nonceBytes, acc.Nonce)
 		stateData = append(stateData, nonceBytes...)
 
-		appendStateUint256(&stateData, stateEncodingVersion, acc.StakedAmountBytes, acc.StakedAmount)
-		appendStateUint256(&stateData, stateEncodingVersion, acc.RewardsBytes, acc.Rewards)
+		appendStateUint256(&stateData, stateEncodingVersion, acc.StakedAmount, nil)
+		appendStateUint256(&stateData, stateEncodingVersion, acc.Rewards, nil)
 
 		if len(acc.DelegatedTo) > 0 {
 			valAddrs := make([]string, 0, len(acc.DelegatedTo))
@@ -3278,7 +3210,7 @@ func (ws *WorldState) calculateStateRootFromOverlay(store *simulationStore) (str
 			sort.Strings(valAddrs)
 			for _, valAddr := range valAddrs {
 				stateData = append(stateData, []byte(valAddr)...)
-				appendStateUint256(&stateData, stateEncodingVersion, acc.DelegatedToBytes[valAddr], acc.DelegatedTo[valAddr])
+				appendStateUint256(&stateData, stateEncodingVersion, acc.DelegatedTo[valAddr], nil)
 			}
 		}
 	}
@@ -3296,7 +3228,7 @@ func (ws *WorldState) calculateStateRootFromOverlay(store *simulationStore) (str
 		v := ws.validators[addr]
 		stateData = append(stateData, []byte(v.Address)...)
 		stateData = append(stateData, v.Pubkey...)
-		appendStateUint256(&stateData, stateEncodingVersion, v.StakeBytes, v.Stake)
+		appendStateUint256(&stateData, stateEncodingVersion, v.Stake, nil)
 		if v.Active {
 			stateData = append(stateData, 1)
 		} else {

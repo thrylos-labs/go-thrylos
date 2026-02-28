@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/thrylos-labs/go-thrylos/config"
+	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
@@ -196,10 +197,7 @@ func (lm *LifecycleManager) RegisterValidator(
 		return fmt.Errorf("account not found: %v", err)
 	}
 
-	accountBalance, _ := new(big.Int).SetString(account.Balance, 10)
-	if accountBalance == nil {
-		accountBalance = big.NewInt(0)
-	}
+	accountBalance := math.ParseBigInt(account.Balance)
 
 	requiredStake, _ := new(big.Int).SetString(stake, 10)
 	if requiredStake == nil {
@@ -540,12 +538,8 @@ func (lm *LifecycleManager) startUnbonding(address string, amount string) error 
 	lm.unbondingValidators[key] = unbonding
 
 	// Immediately reduce voting power
-	stakeBig, _ := new(big.Int).SetString(validator.Stake, 10)
+	stakeBig := math.ParseBigInt(validator.Stake)
 	decreaseBig, _ := new(big.Int).SetString(amount, 10)
-
-	if stakeBig == nil {
-		stakeBig = big.NewInt(0)
-	}
 	if decreaseBig == nil {
 		return fmt.Errorf("invalid decrease amount")
 	}
@@ -555,7 +549,7 @@ func (lm *LifecycleManager) startUnbonding(address string, amount string) error 
 		return fmt.Errorf("cannot decrease stake below zero")
 	}
 
-	validator.Stake = newStake.String()
+	validator.Stake = newStake.Bytes()
 
 	if err := lm.worldState.UpdateValidator(validator); err != nil {
 		return fmt.Errorf("failed to update validator stake: %v", err)
@@ -578,18 +572,15 @@ func (lm *LifecycleManager) processCompletedUnbonding() {
 				continue
 			}
 
-			balanceBig, _ := new(big.Int).SetString(account.Balance, 10)
+			balanceBig := math.ParseBigInt(account.Balance)
 			unbondingBig, _ := new(big.Int).SetString(unbonding.Amount, 10)
 
-			if balanceBig == nil {
-				balanceBig = big.NewInt(0)
-			}
 			if unbondingBig == nil {
 				continue
 			}
 
 			newBalance := new(big.Int).Add(balanceBig, unbondingBig)
-			account.Balance = newBalance.String()
+			account.Balance = newBalance.Bytes()
 
 			lm.worldState.UpdateAccountWithStorage(account)
 
@@ -723,7 +714,7 @@ func (lm *LifecycleManager) getValidatorState(validator *core.Validator) Validat
 		return StateActive
 	}
 
-	if validator.Stake < lm.config.Staking.MinValidatorStake {
+	if math.ParseBigInt(validator.Stake).Cmp(math.ParseBigInt(lm.config.Staking.MinValidatorStake)) < 0 {
 		return StateInactive
 	}
 
@@ -768,11 +759,11 @@ func (lm *LifecycleManager) validateRegistrationRequirements(address string, sta
 
 // validateActivationRequirements validates requirements for validator activation
 func (lm *LifecycleManager) validateActivationRequirements(validator *core.Validator) error {
-	if validator.Stake < lm.config.Staking.MinValidatorStake {
+	if math.ParseBigInt(validator.Stake).Cmp(math.ParseBigInt(lm.config.Staking.MinValidatorStake)) < 0 {
 		return fmt.Errorf("stake below minimum")
 	}
 
-	if validator.SelfStake < lm.config.Staking.MinSelfStake {
+	if math.ParseBigInt(validator.SelfStake).Cmp(math.ParseBigInt(lm.config.Staking.MinSelfStake)) < 0 {
 		return fmt.Errorf("self-stake below minimum")
 	}
 

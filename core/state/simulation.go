@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
@@ -40,17 +41,17 @@ func (s *simulationStore) setAccount(acc *core.Account) {
 }
 
 func (s *simulationStore) deepCopyAccount(acc *core.Account) *core.Account {
-	delegatedTo := make(map[string]string, len(acc.DelegatedTo))
+	delegatedTo := make(map[string][]byte, len(acc.DelegatedTo))
 	for k, v := range acc.DelegatedTo {
-		delegatedTo[k] = v
+		delegatedTo[k] = append([]byte(nil), v...)
 	}
 	return &core.Account{
 		Address:      acc.Address,
-		Balance:      acc.Balance,
+		Balance:      append([]byte(nil), acc.Balance...),
 		Nonce:        acc.Nonce,
-		StakedAmount: acc.StakedAmount,
+		StakedAmount: append([]byte(nil), acc.StakedAmount...),
 		DelegatedTo:  delegatedTo,
-		Rewards:      acc.Rewards,
+		Rewards:      append([]byte(nil), acc.Rewards...),
 		CodeHash:     append([]byte(nil), acc.CodeHash...),
 		StorageRoot:  append([]byte(nil), acc.StorageRoot...),
 	}
@@ -60,6 +61,11 @@ func (s *simulationStore) deepCopyAccount(acc *core.Account) *core.Account {
 // Mirrors the logic in Executor.execute* methods but never touches DB or real state.
 type simulationExecutor struct {
 	store *simulationStore
+}
+
+func mustSimUint256Bytes(v *big.Int) []byte {
+	encoded, _ := coremath.BigIntToUint256Bytes(v)
+	return encoded
 }
 
 func (se *simulationExecutor) applyTransaction(tx *core.Transaction) error {
@@ -107,9 +113,9 @@ func (se *simulationExecutor) applyTransfer(tx *core.Transaction) error {
 	senderBal.Sub(senderBal, totalCost)
 	receiverBal.Add(receiverBal, amountBig)
 
-	sender.Balance = senderBal.String()
+	sender.Balance = mustSimUint256Bytes(senderBal)
 	sender.Nonce++
-	receiver.Balance = receiverBal.String()
+	receiver.Balance = mustSimUint256Bytes(receiverBal)
 
 	se.store.setAccount(sender)
 	se.store.setAccount(receiver)
@@ -135,8 +141,8 @@ func (se *simulationExecutor) applyStake(tx *core.Transaction) error {
 	bal.Sub(bal, totalCost)
 	staked.Add(staked, amountBig)
 
-	acc.Balance = bal.String()
-	acc.StakedAmount = staked.String()
+	acc.Balance = mustSimUint256Bytes(bal)
+	acc.StakedAmount = mustSimUint256Bytes(staked)
 	acc.Nonce++
 
 	se.store.setAccount(acc)
@@ -166,8 +172,8 @@ func (se *simulationExecutor) applyUnstake(tx *core.Transaction) error {
 	bal.Add(bal, amountBig)
 	staked.Sub(staked, amountBig)
 
-	acc.Balance = bal.String()
-	acc.StakedAmount = staked.String()
+	acc.Balance = mustSimUint256Bytes(bal)
+	acc.StakedAmount = mustSimUint256Bytes(staked)
 	acc.Nonce++
 
 	se.store.setAccount(acc)
@@ -190,15 +196,15 @@ func (se *simulationExecutor) applyDelegate(tx *core.Transaction) error {
 	}
 
 	bal.Sub(bal, totalCost)
-	acc.Balance = bal.String()
+	acc.Balance = mustSimUint256Bytes(bal)
 	acc.Nonce++
 
 	if acc.DelegatedTo == nil {
-		acc.DelegatedTo = make(map[string]string)
+		acc.DelegatedTo = make(map[string][]byte)
 	}
 	existing := parseBigIntSim(acc.DelegatedTo[tx.To])
 	existing.Add(existing, amountBig)
-	acc.DelegatedTo[tx.To] = existing.String()
+	acc.DelegatedTo[tx.To] = mustSimUint256Bytes(existing)
 
 	se.store.setAccount(acc)
 	return nil
@@ -227,16 +233,16 @@ func (se *simulationExecutor) applyUndelegate(tx *core.Transaction) error {
 	bal.Add(bal, amountBig)
 	delegated.Sub(delegated, amountBig)
 
-	acc.Balance = bal.String()
+	acc.Balance = mustSimUint256Bytes(bal)
 	acc.Nonce++
 
 	if acc.DelegatedTo == nil {
-		acc.DelegatedTo = make(map[string]string)
+		acc.DelegatedTo = make(map[string][]byte)
 	}
 	if delegated.Sign() == 0 {
 		delete(acc.DelegatedTo, tx.To)
 	} else {
-		acc.DelegatedTo[tx.To] = delegated.String()
+		acc.DelegatedTo[tx.To] = mustSimUint256Bytes(delegated)
 	}
 
 	se.store.setAccount(acc)
@@ -260,8 +266,8 @@ func (se *simulationExecutor) applyClaimRewards(tx *core.Transaction) error {
 	bal.Sub(bal, gasCost)
 	bal.Add(bal, rewards)
 
-	acc.Balance = bal.String()
-	acc.Rewards = "0"
+	acc.Balance = mustSimUint256Bytes(bal)
+	acc.Rewards = nil
 	acc.Nonce++
 
 	se.store.setAccount(acc)
@@ -282,22 +288,15 @@ func (se *simulationExecutor) applyEVMGasCost(tx *core.Transaction) error {
 	}
 
 	bal.Sub(bal, gasCost)
-	acc.Balance = bal.String()
+	acc.Balance = mustSimUint256Bytes(bal)
 	acc.Nonce++
 
 	se.store.setAccount(acc)
 	return nil
 }
 
-// parseBigIntSim safely parses a decimal string into a big.Int.
+// parseBigIntSim safely parses a canonical uint256 byte slice into a big.Int.
 // Returns zero on empty or invalid input rather than panicking.
-func parseBigIntSim(s string) *big.Int {
-	if s == "" {
-		return new(big.Int)
-	}
-	n, ok := new(big.Int).SetString(s, 10)
-	if !ok {
-		return new(big.Int)
-	}
-	return n
+func parseBigIntSim(raw []byte) *big.Int {
+	return coremath.ParseBigInt(raw)
 }

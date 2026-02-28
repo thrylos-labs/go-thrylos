@@ -21,10 +21,9 @@ func createDummyTx(id string, payloadSize int) *core.Transaction {
 		From: "sender_wallet_address",
 		To:   "recipient_wallet_address",
 
-		// FIX: Wrap these in quotes because they are now strings
-		Amount:   "100",
+		Amount:   []byte{100},
 		Gas:      21000, // Gas limit is still int64, so this is fine
-		GasPrice: "10",  // FIX: Wrap in quotes
+		GasPrice: []byte{10},
 
 		Timestamp: time.Now().Unix(),
 		Data:      []byte(payload),

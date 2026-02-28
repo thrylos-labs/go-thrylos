@@ -74,6 +74,32 @@ func BigIntToUint256Bytes(value *big.Int) ([]byte, error) {
 	return raw, nil
 }
 
+func CanonicalizeUint256Bytes(raw []byte) ([]byte, error) {
+	value, err := ParseUint256Bytes(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	return BigIntToUint256Bytes(value)
+}
+
+func CanonicalizeUint256ByteMap(raw map[string][]byte) (map[string][]byte, error) {
+	if raw == nil {
+		return make(map[string][]byte), nil
+	}
+
+	out := make(map[string][]byte, len(raw))
+	for key, value := range raw {
+		canonical, err := CanonicalizeUint256Bytes(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid uint256 value for key %q: %w", key, err)
+		}
+		out[key] = canonical
+	}
+
+	return out, nil
+}
+
 // NormalizeUint256Compat is the read path: prefer bytes, heal decimal fallback.
 func NormalizeUint256Compat(raw *[]byte, decimal *string) error {
 	if raw == nil || decimal == nil {

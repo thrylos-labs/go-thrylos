@@ -44,6 +44,11 @@ type Executor struct {
 	evmExecutor  EVMExecutorInterface
 }
 
+func mustUint256Bytes(v *big.Int) []byte {
+	encoded, _ := math.BigIntToUint256Bytes(v)
+	return encoded
+}
+
 // NewExecutor creates a new transaction executor
 func NewExecutor(
 	shardID account.ShardID,
@@ -222,7 +227,7 @@ func (e *Executor) applyGovernanceGasAndNonce(tx *core.Transaction, accountManag
 	}
 
 	balance.Sub(balance, gasCost)
-	account.Balance = balance.String()
+	account.Balance = mustUint256Bytes(balance)
 	account.Nonce++
 
 	return accountManager.UpdateAccount(account)
@@ -251,12 +256,12 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 	contract := common.HexToAddress(tx.To)
 
 	// 3. 🛡️ INPUT VALIDATION (Medium): Strict Amount Parsing
-	value, err := math.ParseUint256Decimal(tx.Amount)
+	value, err := math.ParseUint256Bytes(tx.Amount)
 	if err != nil {
 		return nil, fmt.Errorf("invalid transaction amount: %w", err)
 	}
 
-	gasPrice, err := math.ParseUint256Decimal(tx.GasPrice)
+	gasPrice, err := math.ParseUint256Bytes(tx.GasPrice)
 	if err != nil {
 		return nil, fmt.Errorf("invalid gas price: %w", err)
 	}
@@ -358,12 +363,12 @@ func (e *Executor) executeEVMDeploy(tx *core.Transaction) error {
 	}
 
 	deployer := common.HexToAddress(tx.From)
-	value, err := math.ParseUint256Decimal(tx.Amount)
+	value, err := math.ParseUint256Bytes(tx.Amount)
 	if err != nil {
 		return fmt.Errorf("invalid transaction amount: %w", err)
 	}
 
-	gasPrice, err := math.ParseUint256Decimal(tx.GasPrice)
+	gasPrice, err := math.ParseUint256Bytes(tx.GasPrice)
 	if err != nil {
 		return fmt.Errorf("invalid gas price: %w", err)
 	}
@@ -512,8 +517,8 @@ func (e *Executor) executeTransfer(tx *core.Transaction, accountManager *account
 			senderBalanceBig.Sub(senderBalanceBig, totalCostBig)
 			receiverBalanceBig.Add(receiverBalanceBig, amountBig)
 
-			sender.Balance = senderBalanceBig.String()
-			receiver.Balance = receiverBalanceBig.String()
+			sender.Balance = mustUint256Bytes(senderBalanceBig)
+			receiver.Balance = mustUint256Bytes(receiverBalanceBig)
 			sender.Nonce++ // Increment nonce
 
 			// No need to call UpdateAccount here - AtomicTransfer handles it
@@ -561,8 +566,8 @@ func (e *Executor) executeTransfer(tx *core.Transaction, accountManager *account
 	senderBalanceBig.Sub(senderBalanceBig, totalCostBig)
 	receiverBalanceBig.Add(receiverBalanceBig, amountBig)
 
-	sender.Balance = senderBalanceBig.String()
-	receiver.Balance = receiverBalanceBig.String()
+	sender.Balance = mustUint256Bytes(senderBalanceBig)
+	receiver.Balance = mustUint256Bytes(receiverBalanceBig)
 	sender.Nonce++ // Add nonce increment here too
 
 	// Save accounts
@@ -636,8 +641,8 @@ func (e *Executor) executeStake(tx *core.Transaction, accountManager *account.Ac
 			stakedAmountBig := math.ParseBigInt(account.StakedAmount)
 			stakedAmountBig.Add(stakedAmountBig, amountBig)
 
-			account.Balance = senderBalanceBig.String()
-			account.StakedAmount = stakedAmountBig.String()
+			account.Balance = mustUint256Bytes(senderBalanceBig)
+			account.StakedAmount = mustUint256Bytes(stakedAmountBig)
 			account.Nonce++ // Increment nonce
 
 			return accountManager.UpdateAccount(account)
@@ -680,8 +685,8 @@ func (e *Executor) executeStake(tx *core.Transaction, accountManager *account.Ac
 	stakedAmountBig := math.ParseBigInt(account.StakedAmount)
 	stakedAmountBig.Add(stakedAmountBig, amountBig)
 
-	account.Balance = senderBalanceBig.String()
-	account.StakedAmount = stakedAmountBig.String()
+	account.Balance = mustUint256Bytes(senderBalanceBig)
+	account.StakedAmount = mustUint256Bytes(stakedAmountBig)
 	account.Nonce++ // Add nonce increment here too
 
 	return accountManager.UpdateAccount(account)
@@ -746,8 +751,8 @@ func (e *Executor) executeUnstake(tx *core.Transaction, accountManager *account.
 			senderBalanceBig.Add(senderBalanceBig, amountBig)
 			stakedAmountBig.Sub(stakedAmountBig, amountBig)
 
-			account.Balance = senderBalanceBig.String()
-			account.StakedAmount = stakedAmountBig.String()
+			account.Balance = mustUint256Bytes(senderBalanceBig)
+			account.StakedAmount = mustUint256Bytes(stakedAmountBig)
 			account.Nonce++
 
 			return accountManager.UpdateAccount(account)
@@ -789,8 +794,8 @@ func (e *Executor) executeUnstake(tx *core.Transaction, accountManager *account.
 	senderBalanceBig.Add(senderBalanceBig, amountBig)
 	stakedAmountBig.Sub(stakedAmountBig, amountBig)
 
-	account.Balance = senderBalanceBig.String()
-	account.StakedAmount = stakedAmountBig.String()
+	account.Balance = mustUint256Bytes(senderBalanceBig)
+	account.StakedAmount = mustUint256Bytes(stakedAmountBig)
 	account.Nonce++
 
 	return accountManager.UpdateAccount(account)
@@ -856,22 +861,22 @@ func (e *Executor) executeDelegate(tx *core.Transaction, accountManager *account
 			stakedAmountBig := math.ParseBigInt(delegator.StakedAmount)
 			stakedAmountBig.Add(stakedAmountBig, amountBig)
 
-			delegator.Balance = delegatorBalanceBig.String()
-			delegator.StakedAmount = stakedAmountBig.String()
+			delegator.Balance = mustUint256Bytes(delegatorBalanceBig)
+			delegator.StakedAmount = mustUint256Bytes(stakedAmountBig)
 
 			// Update Delegation Map
 			if delegator.DelegatedTo == nil {
-				delegator.DelegatedTo = make(map[string]string)
+				delegator.DelegatedTo = make(map[string][]byte)
 			}
 
-			currentDelegationStr := "0"
+			var currentDelegationRaw []byte
 			if val, exists := delegator.DelegatedTo[validatorAddr]; exists {
-				currentDelegationStr = val
+				currentDelegationRaw = val
 			}
-			currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+			currentDelegationBig := math.ParseBigInt(currentDelegationRaw)
 			currentDelegationBig.Add(currentDelegationBig, amountBig)
 
-			delegator.DelegatedTo[validatorAddr] = currentDelegationBig.String()
+			delegator.DelegatedTo[validatorAddr] = mustUint256Bytes(currentDelegationBig)
 			delegator.Nonce++
 
 			return accountManager.UpdateAccount(delegator)
@@ -914,21 +919,21 @@ func (e *Executor) executeDelegate(tx *core.Transaction, accountManager *account
 	stakedAmountBig := math.ParseBigInt(delegator.StakedAmount)
 	stakedAmountBig.Add(stakedAmountBig, amountBig)
 
-	delegator.Balance = delegatorBalanceBig.String()
-	delegator.StakedAmount = stakedAmountBig.String()
+	delegator.Balance = mustUint256Bytes(delegatorBalanceBig)
+	delegator.StakedAmount = mustUint256Bytes(stakedAmountBig)
 
 	if delegator.DelegatedTo == nil {
-		delegator.DelegatedTo = make(map[string]string)
+		delegator.DelegatedTo = make(map[string][]byte)
 	}
 
-	currentDelegationStr := "0"
+	var currentDelegationRaw []byte
 	if val, exists := delegator.DelegatedTo[validatorAddr]; exists {
-		currentDelegationStr = val
+		currentDelegationRaw = val
 	}
-	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+	currentDelegationBig := math.ParseBigInt(currentDelegationRaw)
 	currentDelegationBig.Add(currentDelegationBig, amountBig)
 
-	delegator.DelegatedTo[validatorAddr] = currentDelegationBig.String()
+	delegator.DelegatedTo[validatorAddr] = mustUint256Bytes(currentDelegationBig)
 	delegator.Nonce++
 
 	return accountManager.UpdateAccount(delegator)
@@ -990,19 +995,19 @@ func (e *Executor) executeUndelegate(tx *core.Transaction, accountManager *accou
 
 			// Check Map Existence
 			if delegator.DelegatedTo == nil {
-				delegator.DelegatedTo = make(map[string]string)
+				delegator.DelegatedTo = make(map[string][]byte)
 			}
 
-			currentDelegationStr := "0"
+			var currentDelegationRaw []byte
 			if val, exists := delegator.DelegatedTo[validatorAddr]; exists {
-				currentDelegationStr = val
+				currentDelegationRaw = val
 			}
-			currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+			currentDelegationBig := math.ParseBigInt(currentDelegationRaw)
 
 			// Check if sufficient delegation
 			if currentDelegationBig.Cmp(amountBig) < 0 {
 				return fmt.Errorf("insufficient delegation to validator %s: have %s, need %s",
-					validatorAddr, currentDelegationStr, tx.Amount)
+					validatorAddr, currentDelegationRaw, tx.Amount)
 			}
 
 			if stakedAmountBig.Cmp(amountBig) < 0 {
@@ -1016,13 +1021,13 @@ func (e *Executor) executeUndelegate(tx *core.Transaction, accountManager *accou
 			stakedAmountBig.Sub(stakedAmountBig, amountBig)
 			currentDelegationBig.Sub(currentDelegationBig, amountBig)
 
-			delegator.Balance = delegatorBalanceBig.String()
-			delegator.StakedAmount = stakedAmountBig.String()
+			delegator.Balance = mustUint256Bytes(delegatorBalanceBig)
+			delegator.StakedAmount = mustUint256Bytes(stakedAmountBig)
 
 			if currentDelegationBig.Sign() == 0 {
 				delete(delegator.DelegatedTo, validatorAddr)
 			} else {
-				delegator.DelegatedTo[validatorAddr] = currentDelegationBig.String()
+				delegator.DelegatedTo[validatorAddr] = mustUint256Bytes(currentDelegationBig)
 			}
 
 			delegator.Nonce++
@@ -1063,18 +1068,18 @@ func (e *Executor) executeUndelegate(tx *core.Transaction, accountManager *accou
 	}
 
 	if delegator.DelegatedTo == nil {
-		delegator.DelegatedTo = make(map[string]string)
+		delegator.DelegatedTo = make(map[string][]byte)
 	}
 
-	currentDelegationStr := "0"
+	var currentDelegationRaw []byte
 	if val, exists := delegator.DelegatedTo[validatorAddr]; exists {
-		currentDelegationStr = val
+		currentDelegationRaw = val
 	}
-	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
+	currentDelegationBig := math.ParseBigInt(currentDelegationRaw)
 
 	if currentDelegationBig.Cmp(amountBig) < 0 {
 		return fmt.Errorf("insufficient delegation to validator %s: have %s, need %s",
-			validatorAddr, currentDelegationStr, tx.Amount)
+			validatorAddr, currentDelegationRaw, tx.Amount)
 	}
 
 	if stakedAmountBig.Cmp(amountBig) < 0 {
@@ -1087,13 +1092,13 @@ func (e *Executor) executeUndelegate(tx *core.Transaction, accountManager *accou
 	stakedAmountBig.Sub(stakedAmountBig, amountBig)
 	currentDelegationBig.Sub(currentDelegationBig, amountBig)
 
-	delegator.Balance = delegatorBalanceBig.String()
-	delegator.StakedAmount = stakedAmountBig.String()
+	delegator.Balance = mustUint256Bytes(delegatorBalanceBig)
+	delegator.StakedAmount = mustUint256Bytes(stakedAmountBig)
 
 	if currentDelegationBig.Sign() == 0 {
 		delete(delegator.DelegatedTo, validatorAddr)
 	} else {
-		delegator.DelegatedTo[validatorAddr] = currentDelegationBig.String()
+		delegator.DelegatedTo[validatorAddr] = mustUint256Bytes(currentDelegationBig)
 	}
 
 	delegator.Nonce++
@@ -1157,8 +1162,8 @@ func (e *Executor) executeClaimRewards(tx *core.Transaction, accountManager *acc
 			senderBalanceBig.Sub(senderBalanceBig, gasCostBig)
 			senderBalanceBig.Add(senderBalanceBig, rewardsBig)
 
-			account.Balance = senderBalanceBig.String()
-			account.Rewards = "0"
+			account.Balance = mustUint256Bytes(senderBalanceBig)
+			account.Rewards = nil
 			account.Nonce++
 
 			return accountManager.UpdateAccount(account)
@@ -1197,8 +1202,8 @@ func (e *Executor) executeClaimRewards(tx *core.Transaction, accountManager *acc
 	senderBalanceBig.Sub(senderBalanceBig, gasCostBig)
 	senderBalanceBig.Add(senderBalanceBig, rewardsBig)
 
-	account.Balance = senderBalanceBig.String()
-	account.Rewards = "0"
+	account.Balance = mustUint256Bytes(senderBalanceBig)
+	account.Rewards = nil
 	account.Nonce++
 
 	return accountManager.UpdateAccount(account)

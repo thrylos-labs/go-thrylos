@@ -9,6 +9,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/consensus/governance"
 	accountpkg "github.com/thrylos-labs/go-thrylos/core/account"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
@@ -35,6 +36,10 @@ func newTestGovernanceManager(t *testing.T, cfg *config.Config) (*governance.Man
 	return governance.NewManager(cfg, ws), ws
 }
 
+func u(v string) []byte {
+	return coremath.ParseBigInt(v).Bytes()
+}
+
 func TestGovernanceProposal_UsesOneVotePerOwnershipDomain(t *testing.T) {
 	const (
 		validatorOne   = "0x1111111111111111111111111111111111111111"
@@ -55,10 +60,10 @@ func TestGovernanceProposal_UsesOneVotePerOwnershipDomain(t *testing.T) {
 		err := ws.SetValidator(address, &core.Validator{
 			Address:        address,
 			Pubkey:         []byte{pubkey},
-			Stake:          stake,
-			SelfStake:      stake,
-			DelegatedStake: "0",
-			Delegators:     map[string]string{},
+			Stake:          u(stake),
+			SelfStake:      u(stake),
+			DelegatedStake: nil,
+			Delegators:     map[string][]byte{},
 			Active:         true,
 			CreatedAt:      time.Now().Unix(),
 			UpdatedAt:      time.Now().Unix(),

@@ -10,9 +10,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 )
+
+func u(v string) []byte {
+	return coremath.ParseBigInt(v).Bytes()
+}
 
 // Test Issue #8 Fix 1: Skip validators with zero stake
 func TestDistributeRewards_SkipsZeroStakeValidator(t *testing.T) {
@@ -43,19 +48,19 @@ func TestDistributeRewards_SkipsZeroStakeValidator(t *testing.T) {
 	validatorWithStake := &core.Validator{
 		Address:        "validator_with_stake",
 		Active:         true,
-		Stake:          "10000000000000000000000", // 10,000 THRYLOS
-		DelegatedStake: "0",
+		Stake:          u("10000000000000000000000"), // 10,000 THRYLOS
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	validatorZeroStake := &core.Validator{
 		Address:        "validator_zero_stake",
 		Active:         true,
-		Stake:          "0", // ❌ Zero stake
-		DelegatedStake: "0",
+		Stake:          nil, // ❌ Zero stake
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	ws.SetValidator(validatorWithStake.Address, validatorWithStake)
@@ -64,13 +69,13 @@ func TestDistributeRewards_SkipsZeroStakeValidator(t *testing.T) {
 	// Create accounts for validators
 	ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: validatorWithStake.Address,
-		Balance: "0",
-		Rewards: "0",
+		Balance: nil,
+		Rewards: nil,
 	})
 	ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: validatorZeroStake.Address,
-		Balance: "0",
-		Rewards: "0",
+		Balance: nil,
+		Rewards: nil,
 	})
 
 	// Capture logs
@@ -93,11 +98,11 @@ func TestDistributeRewards_SkipsZeroStakeValidator(t *testing.T) {
 
 	// Verify validator with stake got rewards
 	validatorWithStakeAcc, _ := ws.GetAccount(validatorWithStake.Address)
-	assert.NotEqual(t, "0", validatorWithStakeAcc.Rewards, "Validator with stake should have rewards")
+	assert.NotZero(t, coremath.ParseBigInt(validatorWithStakeAcc.Rewards).Sign(), "Validator with stake should have rewards")
 
 	// Verify zero-stake validator got nothing
 	validatorZeroStakeAcc, _ := ws.GetAccount(validatorZeroStake.Address)
-	assert.Equal(t, "0", validatorZeroStakeAcc.Rewards, "Zero-stake validator should have no rewards")
+	assert.Zero(t, coremath.ParseBigInt(validatorZeroStakeAcc.Rewards).Sign(), "Zero-stake validator should have no rewards")
 }
 
 // Test Issue #8 Fix 2: Skip validators with zero reward (after rounding)
@@ -123,19 +128,19 @@ func TestDistributeRewards_SkipsZeroRewardValidator(t *testing.T) {
 	largeStakeValidator := &core.Validator{
 		Address:        "large_validator",
 		Active:         true,
-		Stake:          "99999999999999999999999999", // Massive stake
-		DelegatedStake: "0",
+		Stake:          u("99999999999999999999999999"), // Massive stake
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	tinyStakeValidator := &core.Validator{
 		Address:        "tiny_validator",
 		Active:         true,
-		Stake:          "1", // 1 wei - will round to zero reward
-		DelegatedStake: "0",
+		Stake:          u("1"), // 1 wei - will round to zero reward
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	ws.SetValidator(largeStakeValidator.Address, largeStakeValidator)
@@ -144,13 +149,13 @@ func TestDistributeRewards_SkipsZeroRewardValidator(t *testing.T) {
 	// Create accounts
 	ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: largeStakeValidator.Address,
-		Balance: "0",
-		Rewards: "0",
+		Balance: nil,
+		Rewards: nil,
 	})
 	ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: tinyStakeValidator.Address,
-		Balance: "0",
-		Rewards: "0",
+		Balance: nil,
+		Rewards: nil,
 	})
 
 	// Capture logs
@@ -194,28 +199,28 @@ func TestDistributeRewards_TracksAndLogsDust(t *testing.T) {
 	val1 := &core.Validator{
 		Address:        "validator1",
 		Active:         true,
-		Stake:          "3333333333333333333333333", // Doesn't divide evenly
-		DelegatedStake: "0",
+		Stake:          u("3333333333333333333333333"), // Doesn't divide evenly
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	val2 := &core.Validator{
 		Address:        "validator2",
 		Active:         true,
-		Stake:          "3333333333333333333333333",
-		DelegatedStake: "0",
+		Stake:          u("3333333333333333333333333"),
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	val3 := &core.Validator{
 		Address:        "validator3",
 		Active:         true,
-		Stake:          "3333333333333333333333334",
-		DelegatedStake: "0",
+		Stake:          u("3333333333333333333333334"),
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	ws.SetValidator(val1.Address, val1)
@@ -226,8 +231,8 @@ func TestDistributeRewards_TracksAndLogsDust(t *testing.T) {
 	for _, val := range []*core.Validator{val1, val2, val3} {
 		ws.GetAccountManager().UpdateAccount(&core.Account{
 			Address: val.Address,
-			Balance: "0",
-			Rewards: "0",
+			Balance: nil,
+			Rewards: nil,
 		})
 	}
 
@@ -273,19 +278,19 @@ func TestDistributeRewards_LogsSummary(t *testing.T) {
 	val1 := &core.Validator{
 		Address:        "validator1",
 		Active:         true,
-		Stake:          "5000000000000000000000",
-		DelegatedStake: "0",
+		Stake:          u("5000000000000000000000"),
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	val2 := &core.Validator{
 		Address:        "validator2",
 		Active:         true,
-		Stake:          "5000000000000000000000",
-		DelegatedStake: "0",
+		Stake:          u("5000000000000000000000"),
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	ws.SetValidator(val1.Address, val1)
@@ -294,13 +299,13 @@ func TestDistributeRewards_LogsSummary(t *testing.T) {
 	// Create accounts
 	ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: val1.Address,
-		Balance: "0",
-		Rewards: "0",
+		Balance: nil,
+		Rewards: nil,
 	})
 	ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: val2.Address,
-		Balance: "0",
-		Rewards: "0",
+		Balance: nil,
+		Rewards: nil,
 	})
 
 	// Capture logs
@@ -347,19 +352,19 @@ func TestDistributeRewards_HandlesInvalidStake(t *testing.T) {
 	validatorInvalid := &core.Validator{
 		Address:        "validator_invalid",
 		Active:         true,
-		Stake:          "not-a-number", // Invalid stake
-		DelegatedStake: "0",
+		Stake:          []byte{0x00, 0x01}, // Invalid canonical encoding
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	validatorValid := &core.Validator{
 		Address:        "validator_valid",
 		Active:         true,
-		Stake:          "10000000000000000000000",
-		DelegatedStake: "0",
+		Stake:          u("10000000000000000000000"),
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	ws.SetValidator(validatorInvalid.Address, validatorInvalid)
@@ -368,8 +373,8 @@ func TestDistributeRewards_HandlesInvalidStake(t *testing.T) {
 	// Create accounts
 	ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: validatorValid.Address,
-		Balance: "0",
-		Rewards: "0",
+		Balance: nil,
+		Rewards: nil,
 	})
 
 	// Capture logs
@@ -392,7 +397,7 @@ func TestDistributeRewards_HandlesInvalidStake(t *testing.T) {
 
 	// Valid validator should still get rewards
 	validAcc, _ := ws.GetAccount(validatorValid.Address)
-	assert.NotEqual(t, "0", validAcc.Rewards, "Valid validator should have rewards")
+	assert.NotZero(t, coremath.ParseBigInt(validAcc.Rewards).Sign(), "Valid validator should have rewards")
 }
 
 func TestDistributeRewards_DoesNotCreditBalanceUntilClaim(t *testing.T) {
@@ -416,10 +421,10 @@ func TestDistributeRewards_DoesNotCreditBalanceUntilClaim(t *testing.T) {
 	validator := &core.Validator{
 		Address:        "validator_claim_flow",
 		Active:         true,
-		Stake:          "10000000000000000000000",
-		DelegatedStake: "0",
+		Stake:          u("10000000000000000000000"),
+		DelegatedStake: nil,
 		Commission:     0.10,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 	}
 
 	err = ws.SetValidator(validator.Address, validator)
@@ -427,8 +432,8 @@ func TestDistributeRewards_DoesNotCreditBalanceUntilClaim(t *testing.T) {
 
 	err = ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: validator.Address,
-		Balance: "500",
-		Rewards: "0",
+		Balance: u("500"),
+		Rewards: nil,
 	})
 	require.NoError(t, err)
 
@@ -437,8 +442,8 @@ func TestDistributeRewards_DoesNotCreditBalanceUntilClaim(t *testing.T) {
 
 	acc, err := ws.GetAccount(validator.Address)
 	require.NoError(t, err)
-	assert.Equal(t, "500", acc.Balance, "Rewards should not become spendable before claim")
-	assert.Equal(t, "1000", acc.Rewards, "Rewards should accrue in the rewards bucket")
+	assert.Equal(t, "500", coremath.BigIntToString(coremath.ParseBigInt(acc.Balance)), "Rewards should not become spendable before claim")
+	assert.Equal(t, "1000", coremath.BigIntToString(coremath.ParseBigInt(acc.Rewards)), "Rewards should accrue in the rewards bucket")
 
 	claimed, err := ws.GetAccountManager().ClaimRewards(validator.Address)
 	require.NoError(t, err)
@@ -446,8 +451,8 @@ func TestDistributeRewards_DoesNotCreditBalanceUntilClaim(t *testing.T) {
 
 	acc, err = ws.GetAccount(validator.Address)
 	require.NoError(t, err)
-	assert.Equal(t, "1500", acc.Balance, "Claiming should move rewards into spendable balance exactly once")
-	assert.Equal(t, "0", acc.Rewards, "Rewards bucket should be cleared after claim")
+	assert.Equal(t, "1500", coremath.BigIntToString(coremath.ParseBigInt(acc.Balance)), "Claiming should move rewards into spendable balance exactly once")
+	assert.Equal(t, "0", coremath.BigIntToString(coremath.ParseBigInt(acc.Rewards)), "Rewards bucket should be cleared after claim")
 }
 
 // Benchmark test to ensure edge case handling doesn't slow things down
@@ -476,18 +481,18 @@ func BenchmarkDistributeRewards_WithEdgeCases(b *testing.B) {
 		validator := &core.Validator{
 			Address:        "validator" + string(rune(i)),
 			Active:         true,
-			Stake:          stake,
-			DelegatedStake: "0",
+			Stake:          u(stake),
+			DelegatedStake: nil,
 			Commission:     0.10,
-			Delegators:     make(map[string]string),
+			Delegators:     make(map[string][]byte),
 		}
 		ws.SetValidator(validator.Address, validator)
 
 		if stake != "0" {
 			ws.GetAccountManager().UpdateAccount(&core.Account{
 				Address: validator.Address,
-				Balance: "0",
-				Rewards: "0",
+				Balance: nil,
+				Rewards: nil,
 			})
 		}
 	}

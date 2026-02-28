@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
 	accountpkg "github.com/thrylos-labs/go-thrylos/core/account"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/core/transaction"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -38,6 +39,10 @@ func newTestGovernanceExecutor(t *testing.T, cfg *config.Config) (*transaction.E
 	return executor, ws
 }
 
+func u(v string) []byte {
+	return coremath.ParseBigInt(v).Bytes()
+}
+
 func TestExecuteTransaction_GovernanceLifecycle(t *testing.T) {
 	const (
 		validatorOne   = "0x1111111111111111111111111111111111111111"
@@ -58,10 +63,10 @@ func TestExecuteTransaction_GovernanceLifecycle(t *testing.T) {
 		err := ws.SetValidator(address, &core.Validator{
 			Address:        address,
 			Pubkey:         []byte{pubkey},
-			Stake:          stake,
-			SelfStake:      stake,
-			DelegatedStake: "0",
-			Delegators:     map[string]string{},
+			Stake:          u(stake),
+			SelfStake:      u(stake),
+			DelegatedStake: nil,
+			Delegators:     map[string][]byte{},
 			Active:         true,
 			CreatedAt:      time.Now().Unix(),
 			UpdatedAt:      time.Now().Unix(),
@@ -70,11 +75,11 @@ func TestExecuteTransaction_GovernanceLifecycle(t *testing.T) {
 
 		err = accountManager.UpdateAccount(&core.Account{
 			Address:      address,
-			Balance:      "1000000",
+			Balance:      u("1000000"),
 			Nonce:        0,
-			StakedAmount: "0",
-			DelegatedTo:  map[string]string{},
-			Rewards:      "0",
+			StakedAmount: nil,
+			DelegatedTo:  map[string][]byte{},
+			Rewards:      nil,
 		})
 		require.NoError(t, err)
 	}
@@ -95,9 +100,9 @@ func TestExecuteTransaction_GovernanceLifecycle(t *testing.T) {
 	_, err = executor.ExecuteTransaction(&core.Transaction{
 		Id:        "gov-propose",
 		From:      validatorOne,
-		Amount:    "0",
+		Amount:    nil,
 		Gas:       21000,
-		GasPrice:  "1",
+		GasPrice:  u("1"),
 		Nonce:     0,
 		Data:      proposalPayload,
 		Type:      core.TransactionType_GOVERNANCE_PROPOSE,
@@ -116,9 +121,9 @@ func TestExecuteTransaction_GovernanceLifecycle(t *testing.T) {
 	_, err = executor.ExecuteTransaction(&core.Transaction{
 		Id:        "gov-vote-1",
 		From:      validatorOne,
-		Amount:    "0",
+		Amount:    nil,
 		Gas:       21000,
-		GasPrice:  "1",
+		GasPrice:  u("1"),
 		Nonce:     1,
 		Data:      votePayload,
 		Type:      core.TransactionType_GOVERNANCE_VOTE,
@@ -131,9 +136,9 @@ func TestExecuteTransaction_GovernanceLifecycle(t *testing.T) {
 	_, err = executor.ExecuteTransaction(&core.Transaction{
 		Id:        "gov-vote-2",
 		From:      validatorThree,
-		Amount:    "0",
+		Amount:    nil,
 		Gas:       21000,
-		GasPrice:  "1",
+		GasPrice:  u("1"),
 		Nonce:     0,
 		Data:      votePayload,
 		Type:      core.TransactionType_GOVERNANCE_VOTE,
@@ -153,9 +158,9 @@ func TestExecuteTransaction_GovernanceLifecycle(t *testing.T) {
 	_, err = executor.ExecuteTransaction(&core.Transaction{
 		Id:        "gov-finalize",
 		From:      validatorThree,
-		Amount:    "0",
+		Amount:    nil,
 		Gas:       21000,
-		GasPrice:  "1",
+		GasPrice:  u("1"),
 		Nonce:     1,
 		Data:      finalizePayload,
 		Type:      core.TransactionType_GOVERNANCE_FINALIZE,
@@ -172,11 +177,11 @@ func TestExecuteTransaction_GovernanceLifecycle(t *testing.T) {
 
 	accountOne, err := accountManager.GetAccount(validatorOne)
 	require.NoError(t, err)
-	require.Equal(t, "958000", accountOne.Balance)
+	require.Equal(t, "958000", coremath.BigIntToString(coremath.ParseBigInt(accountOne.Balance)))
 	require.Equal(t, uint64(2), accountOne.Nonce)
 
 	accountThree, err := accountManager.GetAccount(validatorThree)
 	require.NoError(t, err)
-	require.Equal(t, "958000", accountThree.Balance)
+	require.Equal(t, "958000", coremath.BigIntToString(coremath.ParseBigInt(accountThree.Balance)))
 	require.Equal(t, uint64(2), accountThree.Nonce)
 }

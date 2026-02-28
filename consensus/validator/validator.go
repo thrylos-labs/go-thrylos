@@ -150,7 +150,7 @@ func (vm *Manager) BeginUnbonding(validatorAddr, delegatorAddr string, amount st
 
 	// Check delegation exists
 	amountBig := math.ParseBigInt(amount)
-	currentDelegationStr := "0"
+	var currentDelegationStr []byte
 	if val, exists := validator.Delegators[delegatorAddr]; exists {
 		currentDelegationStr = val
 	}
@@ -218,17 +218,17 @@ func (vm *Manager) ProcessUnbondings() error {
 				if currentBig.Sign() == 0 {
 					delete(validator.Delegators, delegatorAddr)
 				} else {
-					validator.Delegators[delegatorAddr] = currentBig.String()
+					validator.Delegators[delegatorAddr] = currentBig.Bytes()
 				}
 
 				// Update totals
 				delegatedBig := math.ParseBigInt(validator.DelegatedStake)
 				delegatedBig = math.Sub(delegatedBig, amountBig)
-				validator.DelegatedStake = delegatedBig.String()
+				validator.DelegatedStake = delegatedBig.Bytes()
 
 				stakeBig := math.ParseBigInt(validator.Stake)
 				stakeBig = math.Sub(stakeBig, amountBig)
-				validator.Stake = stakeBig.String()
+				validator.Stake = stakeBig.Bytes()
 
 				validator.UpdatedAt = time.Now().Unix()
 
@@ -248,7 +248,7 @@ func (vm *Manager) ProcessUnbondings() error {
 
 				balanceBig := math.ParseBigInt(delegator.Balance)
 				balanceBig = math.Add(balanceBig, amountBig)
-				delegator.Balance = balanceBig.String()
+				delegator.Balance = balanceBig.Bytes()
 
 				if err := vm.worldState.GetAccountManager().UpdateAccount(delegator); err != nil {
 					continue
@@ -368,14 +368,14 @@ func (vm *Manager) RegisterValidatorWithDomain(
 		Pubkey:  pubkey,
 
 		// ✅ Fix: Assign string directly
-		Stake:     stake,
-		SelfStake: stake, // Initially all stake is self-stake
+		Stake:     math.ParseBigInt(stake).Bytes(),
+		SelfStake: math.ParseBigInt(stake).Bytes(), // Initially all stake is self-stake
 
 		// ✅ Fix: Use "0" string instead of int 0
-		DelegatedStake: "0",
+		DelegatedStake: nil,
 
 		// ✅ Fix: Initialize map as map[string]string
-		Delegators: make(map[string]string),
+		Delegators: make(map[string][]byte),
 
 		Commission:     commission,
 		Active:         false, // Not active until meeting requirements
@@ -569,7 +569,7 @@ func (vm *Manager) SlashValidator(
 	}
 
 	// 4. Update Validator State
-	validator.Stake = stakeBig.String()
+	validator.Stake = stakeBig.Bytes()
 	validator.JailUntil = time.Now().Add(jailDuration).Unix()
 	validator.Active = false
 	validator.UpdatedAt = time.Now().Unix()
@@ -784,8 +784,8 @@ func (vm *Manager) applySlashToDelegatedStake(validator *core.Validator, slashAm
 	selfStake.Sub(selfStake, selfSlash)
 	delegatedStake.Sub(delegatedStake, delegatedSlash)
 
-	validator.SelfStake = selfStake.String()
-	validator.DelegatedStake = delegatedStake.String()
+	validator.SelfStake = selfStake.Bytes()
+	validator.DelegatedStake = delegatedStake.Bytes()
 
 	if delegatedSlash.Sign() == 0 || len(validator.Delegators) == 0 {
 		return nil
@@ -832,7 +832,7 @@ func (vm *Manager) applySlashToDelegatedStake(validator *core.Validator, slashAm
 			delete(validator.Delegators, addr)
 			newAmount = big.NewInt(0)
 		} else {
-			validator.Delegators[addr] = newAmount.String()
+			validator.Delegators[addr] = newAmount.Bytes()
 		}
 
 		vm.applySlashToPendingUnbondings(addr, validator.Address, amount, shareSlash)
@@ -1087,25 +1087,25 @@ func (vm *Manager) AddDelegation(validatorAddr, delegatorAddr string, amount str
 
 	// YOUR EXISTING CODE (unchanged):
 	if validator.Delegators == nil {
-		validator.Delegators = make(map[string]string)
+		validator.Delegators = make(map[string][]byte)
 	}
 
-	currentDelegationStr := "0"
+	var currentDelegationStr []byte
 	if val, exists := validator.Delegators[delegatorAddr]; exists {
 		currentDelegationStr = val
 	}
 
 	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
 	currentDelegationBig = math.Add(currentDelegationBig, amountBig)
-	validator.Delegators[delegatorAddr] = currentDelegationBig.String()
+	validator.Delegators[delegatorAddr] = currentDelegationBig.Bytes()
 
 	totalDelegatedBig := math.ParseBigInt(validator.DelegatedStake)
 	totalDelegatedBig = math.Add(totalDelegatedBig, amountBig)
-	validator.DelegatedStake = totalDelegatedBig.String()
+	validator.DelegatedStake = totalDelegatedBig.Bytes()
 
 	totalStakeBig := math.ParseBigInt(validator.Stake)
 	totalStakeBig = math.Add(totalStakeBig, amountBig)
-	validator.Stake = totalStakeBig.String()
+	validator.Stake = totalStakeBig.Bytes()
 
 	validator.UpdatedAt = time.Now().Unix()
 
@@ -1127,7 +1127,7 @@ func (vm *Manager) RemoveDelegation(validatorAddr, delegatorAddr string, amount 
 	amountBig := math.ParseBigInt(amount)
 
 	// 2. Get Current Delegation
-	currentDelegationStr := "0"
+	var currentDelegationStr []byte
 	if val, exists := validator.Delegators[delegatorAddr]; exists {
 		currentDelegationStr = val
 	}
@@ -1146,18 +1146,18 @@ func (vm *Manager) RemoveDelegation(validatorAddr, delegatorAddr string, amount 
 	if currentDelegationBig.Sign() == 0 {
 		delete(validator.Delegators, delegatorAddr)
 	} else {
-		validator.Delegators[delegatorAddr] = currentDelegationBig.String()
+		validator.Delegators[delegatorAddr] = currentDelegationBig.Bytes()
 	}
 
 	// 5. Update Total Delegated Stake
 	delegatedStakeBig := math.ParseBigInt(validator.DelegatedStake)
 	delegatedStakeBig.Sub(delegatedStakeBig, amountBig)
-	validator.DelegatedStake = delegatedStakeBig.String()
+	validator.DelegatedStake = delegatedStakeBig.Bytes()
 
 	// 6. Update Total Stake (Self + Delegated)
 	totalStakeBig := math.ParseBigInt(validator.Stake)
 	totalStakeBig.Sub(totalStakeBig, amountBig)
-	validator.Stake = totalStakeBig.String()
+	validator.Stake = totalStakeBig.Bytes()
 
 	validator.UpdatedAt = time.Now().Unix()
 

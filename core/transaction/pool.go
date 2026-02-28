@@ -678,7 +678,7 @@ func (p *Pool) validateTransactionForPool(tx *core.Transaction) error {
 
 // evictLowestGasPrice removes the transaction with the lowest gas price
 // Returns true if eviction happened, false if new tx is too cheap to evict anyone
-func (p *Pool) evictLowestGasPrice(newGasPrice string) bool {
+func (p *Pool) evictLowestGasPrice(newGasPrice []byte) bool {
 	newPriceBig := math.ParseBigInt(newGasPrice)
 	var evictTx *core.Transaction
 	var lowestPriceBig *big.Int
