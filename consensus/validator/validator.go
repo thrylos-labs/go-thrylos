@@ -32,6 +32,7 @@ const (
 	DefaultMaxSlashingEvents    = 3
 	DefaultMinStakeRetention    = 0.5 // 50%
 	DefaultAutoRemoveDoubleSign = true
+	defaultUnbondingBlockTime   = 3 * time.Second
 )
 
 // Manager handles validator operations
@@ -158,7 +159,14 @@ func (vm *Manager) BeginUnbonding(validatorAddr, delegatorAddr string, amount st
 
 	// Calculate completion block (current block + unbonding period in blocks)
 	currentBlock := vm.worldState.GetHeight()
-	unbondingBlocks := int64(vm.config.Staking.UnbondingPeriod.Seconds() / 12) // Assuming 12s blocks
+	blockTime := vm.config.Consensus.BlockTime
+	if blockTime <= 0 {
+		blockTime = defaultUnbondingBlockTime
+	}
+	unbondingBlocks := int64(vm.config.Staking.UnbondingPeriod / blockTime)
+	if unbondingBlocks < 1 {
+		unbondingBlocks = 1
+	}
 	completionBlock := currentBlock + unbondingBlocks
 
 	// Create unbonding entry
@@ -228,8 +236,19 @@ func (vm *Manager) ProcessUnbondings() error {
 
 				vm.worldState.UpdateValidator(validator)
 
-				// Return funds
-				vm.worldState.GetAccountManager().AddRewards(delegatorAddr, amountBig.Int64())
+				// Return principal directly to spendable balance.
+				delegator, err := vm.worldState.GetAccount(delegatorAddr)
+				if err != nil {
+					continue
+				}
+
+				balanceBig := math.ParseBigInt(delegator.Balance)
+				balanceBig = math.Add(balanceBig, amountBig)
+				delegator.Balance = balanceBig.String()
+
+				if err := vm.worldState.GetAccountManager().UpdateAccount(delegator); err != nil {
+					continue
+				}
 
 				// Remove from queue
 				entries = append(entries[:i], entries[i+1:]...)

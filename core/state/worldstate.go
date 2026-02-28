@@ -2195,12 +2195,6 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 		}
 		valAcc.Rewards = new(big.Int).Add(currRew, commAmt).String()
 
-		currBal, _ := new(big.Int).SetString(valAcc.Balance, 10)
-		if currBal == nil {
-			currBal = big.NewInt(0)
-		}
-		valAcc.Balance = new(big.Int).Add(currBal, commAmt).String()
-
 		// If no delegators, validator gets everything
 		if len(validator.Delegators) == 0 {
 			currentRewards, _ := new(big.Int).SetString(valAcc.Rewards, 10)
@@ -2208,12 +2202,6 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 				currentRewards = big.NewInt(0)
 			}
 			valAcc.Rewards = new(big.Int).Add(currentRewards, delegatorReward).String()
-
-			currentBalance, _ := new(big.Int).SetString(valAcc.Balance, 10)
-			if currentBalance == nil {
-				currentBalance = big.NewInt(0)
-			}
-			valAcc.Balance = new(big.Int).Add(currentBalance, delegatorReward).String()
 		}
 
 		// Handle update errors
@@ -2268,12 +2256,6 @@ func (sm *StakingManager) DistributeRewards(totalRewardsStr string) error {
 						r = big.NewInt(0)
 					}
 					delAcc.Rewards = new(big.Int).Add(r, share).String()
-
-					b, _ := new(big.Int).SetString(delAcc.Balance, 10)
-					if b == nil {
-						b = big.NewInt(0)
-					}
-					delAcc.Balance = new(big.Int).Add(b, share).String()
 
 					// Handle delegator update errors
 					if err := ws.accountManager.UpdateAccount(delAcc); err != nil {

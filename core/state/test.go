@@ -395,6 +395,61 @@ func TestDistributeRewards_HandlesInvalidStake(t *testing.T) {
 	assert.NotEqual(t, "0", validAcc.Rewards, "Valid validator should have rewards")
 }
 
+func TestDistributeRewards_DoesNotCreditBalanceUntilClaim(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "thrylos-test-claim-flow-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	badgerStore, err := storage.NewBadgerStorage(tmpDir)
+	require.NoError(t, err)
+	defer badgerStore.Close()
+
+	cfg := &config.Config{
+		Staking: config.StakingConfig{
+			MinValidatorStake: "1000000000000000000000",
+		},
+	}
+
+	ws, err := NewWorldState(tmpDir, 0, 1, cfg, badgerStore)
+	require.NoError(t, err)
+
+	validator := &core.Validator{
+		Address:        "validator_claim_flow",
+		Active:         true,
+		Stake:          "10000000000000000000000",
+		DelegatedStake: "0",
+		Commission:     0.10,
+		Delegators:     make(map[string]string),
+	}
+
+	err = ws.SetValidator(validator.Address, validator)
+	require.NoError(t, err)
+
+	err = ws.GetAccountManager().UpdateAccount(&core.Account{
+		Address: validator.Address,
+		Balance: "500",
+		Rewards: "0",
+	})
+	require.NoError(t, err)
+
+	err = ws.GetStakingManager().DistributeRewards("1000")
+	require.NoError(t, err)
+
+	acc, err := ws.GetAccount(validator.Address)
+	require.NoError(t, err)
+	assert.Equal(t, "500", acc.Balance, "Rewards should not become spendable before claim")
+	assert.Equal(t, "1000", acc.Rewards, "Rewards should accrue in the rewards bucket")
+
+	claimed, err := ws.GetAccountManager().ClaimRewards(validator.Address)
+	require.NoError(t, err)
+	assert.Equal(t, "1000", claimed)
+
+	acc, err = ws.GetAccount(validator.Address)
+	require.NoError(t, err)
+	assert.Equal(t, "1500", acc.Balance, "Claiming should move rewards into spendable balance exactly once")
+	assert.Equal(t, "0", acc.Rewards, "Rewards bucket should be cleared after claim")
+}
+
 // Benchmark test to ensure edge case handling doesn't slow things down
 func BenchmarkDistributeRewards_WithEdgeCases(b *testing.B) {
 	tmpDir, _ := os.MkdirTemp("", "thrylos-bench-*")

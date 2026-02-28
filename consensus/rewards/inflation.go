@@ -44,6 +44,13 @@ type InflationManager struct {
 	epochsPerYear int64 // Number of epochs in a year
 }
 
+const (
+	defaultTargetInflationRate = 0.04
+	defaultTargetStakingRatio  = 0.67
+	defaultMinInflationRate    = 0.01
+	defaultMaxInflationRate    = 0.08
+)
+
 // InflationMetrics represents inflation and staking metrics
 type InflationMetrics struct {
 	// Current state
@@ -106,14 +113,34 @@ type InflationScenario struct {
 
 // NewInflationManager creates a new inflation manager
 func NewInflationManager(config *config.Config, worldState *state.WorldState) *InflationManager {
+	minInflation := config.Economics.InflationMin
+	maxInflation := config.Economics.InflationMax
+	if minInflation <= 0 {
+		minInflation = defaultMinInflationRate
+	}
+	if maxInflation <= minInflation {
+		maxInflation = defaultMaxInflationRate
+	}
+
+	targetInflation := config.Economics.InflationRate
+	if targetInflation <= 0 {
+		targetInflation = defaultTargetInflationRate
+	}
+	targetInflation = clampFloat(targetInflation, minInflation, maxInflation)
+
+	targetStakingRatio := config.Economics.GoalBonded
+	if targetStakingRatio <= 0 || targetStakingRatio >= 1 {
+		targetStakingRatio = defaultTargetStakingRatio
+	}
+
 	return &InflationManager{
 		config:                  config,
 		worldState:              worldState,
-		targetInflationRate:     0.04,
-		targetStakingRatio:      0.67,
-		currentInflationRate:    0.04,
-		minInflationRate:        0.01,
-		maxInflationRate:        0.08,
+		targetInflationRate:     targetInflation,
+		targetStakingRatio:      targetStakingRatio,
+		currentInflationRate:    targetInflation,
+		minInflationRate:        minInflation,
+		maxInflationRate:        maxInflation,
 		inflationAdjustmentRate: 0.1,
 		stakingRewardMultiplier: 1.0,
 		epochsPerYear:           365,
@@ -224,14 +251,12 @@ func (im *InflationManager) calculateStakingMultiplier() float64 {
 
 // distributeRewards distributes epoch rewards among validators, delegators, and community
 func (im *InflationManager) distributeRewards(epochRewardPool *big.Int) (string, string, string) {
-	// Community tax (2%)
-	communityShareBig := mulBigIntFloat(epochRewardPool, 0.02)
+	communityShareBig := mulBigIntFloat(epochRewardPool, im.communityTaxRate())
 
 	// Remaining for stakers
 	stakingRewardsBig := coremath.Sub(epochRewardPool, communityShareBig)
 
-	// Validator vs Delegator split (20% validators, 80% delegators)
-	validatorShareBig := mulBigIntFloat(stakingRewardsBig, 0.20)
+	validatorShareBig := mulBigIntFloat(stakingRewardsBig, im.validatorRewardShare())
 	delegatorShareBig := coremath.Sub(stakingRewardsBig, validatorShareBig)
 
 	return validatorShareBig.String(), delegatorShareBig.String(), communityShareBig.String()
@@ -327,9 +352,7 @@ func (im *InflationManager) calculateValidatorAPY() float64 {
 		return 0
 	}
 	baseAPY := im.currentInflationRate / im.currentStakingRatio
-	validatorAPY := baseAPY * 0.20
-	commissionAPY := baseAPY * 0.80 * 0.05
-	return (validatorAPY + commissionAPY) * 100
+	return baseAPY * im.validatorRewardShare() * 100
 }
 
 // calculateDelegatorAPY calculates expected APY for delegators
@@ -338,8 +361,7 @@ func (im *InflationManager) calculateDelegatorAPY() float64 {
 		return 0
 	}
 	baseAPY := im.currentInflationRate / im.currentStakingRatio
-	delegatorAPY := baseAPY * 0.80 * 0.95
-	return delegatorAPY * 100
+	return baseAPY * (1 - im.validatorRewardShare()) * 100
 }
 
 // predictNextEpochInflation predicts inflation for next epoch
@@ -518,6 +540,39 @@ func (im *InflationManager) SetInflationAdjustmentRate(rate float64) error {
 	}
 	im.inflationAdjustmentRate = rate
 	return nil
+}
+
+func (im *InflationManager) communityTaxRate() float64 {
+	rate := im.config.Economics.CommunityTax
+	if rate < 0 {
+		return 0
+	}
+	if rate > 1 {
+		return 1
+	}
+	return rate
+}
+
+func (im *InflationManager) validatorRewardShare() float64 {
+	validatorRate := im.config.Economics.ValidatorRewardRate
+	delegatorRate := im.config.Economics.DelegatorRewardRate
+	totalRate := validatorRate + delegatorRate
+	if totalRate <= 0 {
+		return 0.20
+	}
+
+	share := validatorRate / totalRate
+	return clampFloat(share, 0, 1)
+}
+
+func clampFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 // GetInflationStats returns comprehensive inflation statistics
