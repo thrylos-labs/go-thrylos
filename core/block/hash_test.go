@@ -32,3 +32,48 @@ func TestCanonicalBlockHash_GenesisLikeBlock(t *testing.T) {
 		t.Fatalf("CanonicalBlockHash mismatch.\n got = %s\nwant = %s", got, want)
 	}
 }
+
+func TestCanonicalBlockHash_StateEncodingVersionAffectsHash(t *testing.T) {
+	legacy := &core.Block{
+		Header: &core.BlockHeader{
+			Index:     1,
+			PrevHash:  "prev",
+			Timestamp: 1700000001,
+			Validator: "validator",
+			TxRoot:    "txroot",
+			StateRoot: "stateroot",
+			GasUsed:   21000,
+			GasLimit:  30000000,
+			TotalFees: "001",
+		},
+	}
+
+	canonical := &core.Block{
+		Header: &core.BlockHeader{
+			Index:                legacy.Header.Index,
+			PrevHash:             legacy.Header.PrevHash,
+			Timestamp:            legacy.Header.Timestamp,
+			Validator:            legacy.Header.Validator,
+			TxRoot:               legacy.Header.TxRoot,
+			StateRoot:            legacy.Header.StateRoot,
+			GasUsed:              legacy.Header.GasUsed,
+			GasLimit:             legacy.Header.GasLimit,
+			TotalFees:            "1",
+			TotalFeesBytes:       []byte{0x01},
+			StateEncodingVersion: 2,
+		},
+	}
+
+	legacyHash, err := CanonicalBlockHash(legacy)
+	if err != nil {
+		t.Fatalf("failed to hash legacy block: %v", err)
+	}
+	canonicalHash, err := CanonicalBlockHash(canonical)
+	if err != nil {
+		t.Fatalf("failed to hash canonical block: %v", err)
+	}
+
+	if legacyHash == canonicalHash {
+		t.Fatal("expected state encoding version to affect the block hash")
+	}
+}

@@ -159,21 +159,22 @@ type NetworkConfig struct {
 }
 
 type ConsensusConfig struct {
-	BlockTime           time.Duration `json:"block_time"`
-	MaxTxPerBlock       int           `json:"max_tx_per_block"`
-	MaxBlockSize        int64         `json:"max_block_size"`
-	MinGasPrice         string        `json:"min_gas_price"`
-	MaxValidators       int           `json:"max_validators"`
-	MinActiveValidators int           `json:"min_active_validators"`
-	ValidatorRotation   time.Duration `json:"validator_rotation"`
-	SlashingEnabled     bool          `json:"slashing_enabled"`
-	MaxFutureBlockTime  time.Duration `json:"max_future_block_time"`
-	MaxPastBlockTime    time.Duration `json:"max_past_block_time"`
-	MaxBlockTimeDrift   time.Duration `json:"max_block_time_drift"`
-	MaxTimestampSkew    time.Duration `json:"max_timestamp_skew"`
-	MaxTimestampAge     time.Duration `json:"max_timestamp_age"`
-	MaxTxDataSize       int           `json:"max_tx_data_size"`
-	StakeCacheTTL       time.Duration `json:"stake_cache_ttl"`
+	BlockTime                  time.Duration `json:"block_time"`
+	MaxTxPerBlock              int           `json:"max_tx_per_block"`
+	MaxBlockSize               int64         `json:"max_block_size"`
+	MinGasPrice                string        `json:"min_gas_price"`
+	MaxValidators              int           `json:"max_validators"`
+	MinActiveValidators        int           `json:"min_active_validators"`
+	ValidatorRotation          time.Duration `json:"validator_rotation"`
+	SlashingEnabled            bool          `json:"slashing_enabled"`
+	MaxFutureBlockTime         time.Duration `json:"max_future_block_time"`
+	MaxPastBlockTime           time.Duration `json:"max_past_block_time"`
+	MaxBlockTimeDrift          time.Duration `json:"max_block_time_drift"`
+	MaxTimestampSkew           time.Duration `json:"max_timestamp_skew"`
+	MaxTimestampAge            time.Duration `json:"max_timestamp_age"`
+	MaxTxDataSize              int           `json:"max_tx_data_size"`
+	StakeCacheTTL              time.Duration `json:"stake_cache_ttl"`
+	StateEncodingUpgradeHeight int64         `json:"state_encoding_upgrade_height"`
 
 	SlashingDoubleVote      int     `json:"slashing_double_vote"`
 	SlashingSurroundVote    int     `json:"slashing_surround_vote"`
@@ -317,21 +318,22 @@ func DefaultConfig() *Config {
 		},
 
 		Consensus: ConsensusConfig{
-			BlockTime:           3 * time.Second,
-			MaxTxPerBlock:       1000,
-			MaxBlockSize:        2 * 1024 * 1024,
-			MinGasPrice:         math.BigIntToString(BaseGasPrice), // FIX
-			MaxValidators:       100,
-			MinActiveValidators: 1,
-			ValidatorRotation:   24 * time.Hour,
-			MaxFutureBlockTime:  5 * time.Second,
-			MaxPastBlockTime:    2 * time.Hour,
-			MaxBlockTimeDrift:   10 * time.Minute,
-			MaxTimestampSkew:    5 * time.Minute,
-			MaxTimestampAge:     1 * time.Hour,
-			MaxTxDataSize:       1024 * 1024,
-			StakeCacheTTL:       30 * time.Second,
-			SlashingEnabled:     true,
+			BlockTime:                  3 * time.Second,
+			MaxTxPerBlock:              1000,
+			MaxBlockSize:               2 * 1024 * 1024,
+			MinGasPrice:                math.BigIntToString(BaseGasPrice), // FIX
+			MaxValidators:              100,
+			MinActiveValidators:        1,
+			ValidatorRotation:          24 * time.Hour,
+			MaxFutureBlockTime:         5 * time.Second,
+			MaxPastBlockTime:           2 * time.Hour,
+			MaxBlockTimeDrift:          10 * time.Minute,
+			MaxTimestampSkew:           5 * time.Minute,
+			MaxTimestampAge:            1 * time.Hour,
+			MaxTxDataSize:              1024 * 1024,
+			StakeCacheTTL:              30 * time.Second,
+			StateEncodingUpgradeHeight: 0,
+			SlashingEnabled:            true,
 
 			SlashingDoubleVote:      50,
 			SlashingSurroundVote:    30,
@@ -787,6 +789,9 @@ func (c *Config) ValidateConfig() error {
 	if c.Consensus.MinActiveValidators > c.Consensus.MaxValidators {
 		return fmt.Errorf("min active validators (%d) cannot exceed max validators (%d)",
 			c.Consensus.MinActiveValidators, c.Consensus.MaxValidators)
+	}
+	if c.Consensus.StateEncodingUpgradeHeight < 0 {
+		return fmt.Errorf("state encoding upgrade height cannot be negative")
 	}
 
 	if c.Sharding.TotalShards <= 0 {

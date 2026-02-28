@@ -191,7 +191,7 @@ func (bc *Blockchain) CreateBlockWithBatching(validator string, privateKey crypt
 
 	// Set state root from WorldState
 	stateRoot := bc.worldState.GetStateRoot()
-	bc.blockCreator.SetStateRoot(block, stateRoot)
+	bc.blockCreator.SetStateRootWithVersion(block, stateRoot, bc.worldState.GetStateRootEncodingVersionForHeight(block.Header.Index))
 
 	// Sign block
 	if err := bc.blockCreator.SignBlock(block, privateKey); err != nil {
@@ -600,7 +600,7 @@ func (bc *Blockchain) CreateBlock(validator string, privateKey crypto.PrivateKey
 
 	// Set state root from WorldState
 	stateRoot := bc.worldState.GetStateRoot()
-	bc.blockCreator.SetStateRoot(block, stateRoot)
+	bc.blockCreator.SetStateRootWithVersion(block, stateRoot, bc.worldState.GetStateRootEncodingVersionForHeight(block.Header.Index))
 
 	// Sign block
 	if err := bc.blockCreator.SignBlock(block, privateKey); err != nil {

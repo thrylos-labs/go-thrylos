@@ -4,7 +4,7 @@
 // versions:
 // 	protoc-gen-go v1.36.6
 // 	protoc        v5.29.3
-// source: proto/account.proto
+// source: account.proto
 
 package core
 
@@ -80,11 +80,11 @@ func (x TransactionType) String() string {
 }
 
 func (TransactionType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_account_proto_enumTypes[0].Descriptor()
+	return file_account_proto_enumTypes[0].Descriptor()
 }
 
 func (TransactionType) Type() protoreflect.EnumType {
-	return &file_proto_account_proto_enumTypes[0]
+	return &file_account_proto_enumTypes[0]
 }
 
 func (x TransactionType) Number() protoreflect.EnumNumber {
@@ -93,7 +93,7 @@ func (x TransactionType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TransactionType.Descriptor instead.
 func (TransactionType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_account_proto_rawDescGZIP(), []int{0}
+	return file_account_proto_rawDescGZIP(), []int{0}
 }
 
 // You might also want to add validator-related transaction types
@@ -130,11 +130,11 @@ func (x ValidatorTransactionType) String() string {
 }
 
 func (ValidatorTransactionType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_account_proto_enumTypes[1].Descriptor()
+	return file_account_proto_enumTypes[1].Descriptor()
 }
 
 func (ValidatorTransactionType) Type() protoreflect.EnumType {
-	return &file_proto_account_proto_enumTypes[1]
+	return &file_account_proto_enumTypes[1]
 }
 
 func (x ValidatorTransactionType) Number() protoreflect.EnumNumber {
@@ -143,26 +143,30 @@ func (x ValidatorTransactionType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ValidatorTransactionType.Descriptor instead.
 func (ValidatorTransactionType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_account_proto_rawDescGZIP(), []int{1}
+	return file_account_proto_rawDescGZIP(), []int{1}
 }
 
 type Account struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Address       string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
-	Balance       string                 `protobuf:"bytes,2,opt,name=balance,proto3" json:"balance,omitempty"`
-	Nonce         uint64                 `protobuf:"varint,3,opt,name=nonce,proto3" json:"nonce,omitempty"`
-	StakedAmount  string                 `protobuf:"bytes,4,opt,name=staked_amount,json=stakedAmount,proto3" json:"staked_amount,omitempty"`                                                                        // ⚠️ CHANGED: int64 -> string (Must match balance precision)
-	DelegatedTo   map[string]string      `protobuf:"bytes,5,rep,name=delegated_to,json=delegatedTo,proto3" json:"delegated_to,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // ⚠️ CHANGED: map<string, int64> -> map<string, string>
-	Rewards       string                 `protobuf:"bytes,6,opt,name=rewards,proto3" json:"rewards,omitempty"`                                                                                                      // ⚠️ CHANGED: int64 -> string
-	CodeHash      []byte                 `protobuf:"bytes,7,opt,name=code_hash,json=codeHash,proto3" json:"code_hash,omitempty"`
-	StorageRoot   []byte                 `protobuf:"bytes,8,opt,name=storage_root,json=storageRoot,proto3" json:"storage_root,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Address           string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	Balance           string                 `protobuf:"bytes,2,opt,name=balance,proto3" json:"balance,omitempty"`
+	Nonce             uint64                 `protobuf:"varint,3,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	StakedAmount      string                 `protobuf:"bytes,4,opt,name=staked_amount,json=stakedAmount,proto3" json:"staked_amount,omitempty"`                                                                        // ⚠️ CHANGED: int64 -> string (Must match balance precision)
+	DelegatedTo       map[string]string      `protobuf:"bytes,5,rep,name=delegated_to,json=delegatedTo,proto3" json:"delegated_to,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // ⚠️ CHANGED: map<string, int64> -> map<string, string>
+	Rewards           string                 `protobuf:"bytes,6,opt,name=rewards,proto3" json:"rewards,omitempty"`                                                                                                      // ⚠️ CHANGED: int64 -> string
+	CodeHash          []byte                 `protobuf:"bytes,7,opt,name=code_hash,json=codeHash,proto3" json:"code_hash,omitempty"`
+	StorageRoot       []byte                 `protobuf:"bytes,8,opt,name=storage_root,json=storageRoot,proto3" json:"storage_root,omitempty"`
+	BalanceBytes      []byte                 `protobuf:"bytes,9,opt,name=balance_bytes,json=balanceBytes,proto3" json:"balance_bytes,omitempty"`
+	StakedAmountBytes []byte                 `protobuf:"bytes,10,opt,name=staked_amount_bytes,json=stakedAmountBytes,proto3" json:"staked_amount_bytes,omitempty"`
+	DelegatedToBytes  map[string][]byte      `protobuf:"bytes,11,rep,name=delegated_to_bytes,json=delegatedToBytes,proto3" json:"delegated_to_bytes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	RewardsBytes      []byte                 `protobuf:"bytes,12,opt,name=rewards_bytes,json=rewardsBytes,proto3" json:"rewards_bytes,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Account) Reset() {
 	*x = Account{}
-	mi := &file_proto_account_proto_msgTypes[0]
+	mi := &file_account_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -174,7 +178,7 @@ func (x *Account) String() string {
 func (*Account) ProtoMessage() {}
 
 func (x *Account) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_account_proto_msgTypes[0]
+	mi := &file_account_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -187,7 +191,7 @@ func (x *Account) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Account.ProtoReflect.Descriptor instead.
 func (*Account) Descriptor() ([]byte, []int) {
-	return file_proto_account_proto_rawDescGZIP(), []int{0}
+	return file_account_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Account) GetAddress() string {
@@ -246,29 +250,60 @@ func (x *Account) GetStorageRoot() []byte {
 	return nil
 }
 
+func (x *Account) GetBalanceBytes() []byte {
+	if x != nil {
+		return x.BalanceBytes
+	}
+	return nil
+}
+
+func (x *Account) GetStakedAmountBytes() []byte {
+	if x != nil {
+		return x.StakedAmountBytes
+	}
+	return nil
+}
+
+func (x *Account) GetDelegatedToBytes() map[string][]byte {
+	if x != nil {
+		return x.DelegatedToBytes
+	}
+	return nil
+}
+
+func (x *Account) GetRewardsBytes() []byte {
+	if x != nil {
+		return x.RewardsBytes
+	}
+	return nil
+}
+
 type Transaction struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	From          string                 `protobuf:"bytes,2,opt,name=from,proto3" json:"from,omitempty"`
-	To            string                 `protobuf:"bytes,3,opt,name=to,proto3" json:"to,omitempty"`
-	Amount        string                 `protobuf:"bytes,4,opt,name=amount,proto3" json:"amount,omitempty"`
-	Gas           int64                  `protobuf:"varint,5,opt,name=gas,proto3" json:"gas,omitempty"`
-	GasPrice      string                 `protobuf:"bytes,6,opt,name=gas_price,json=gasPrice,proto3" json:"gas_price,omitempty"`
-	Nonce         uint64                 `protobuf:"varint,7,opt,name=nonce,proto3" json:"nonce,omitempty"`
-	Data          []byte                 `protobuf:"bytes,8,opt,name=data,proto3" json:"data,omitempty"`
-	Type          TransactionType        `protobuf:"varint,9,opt,name=type,proto3,enum=thrylos.core.TransactionType" json:"type,omitempty"`
-	Signature     []byte                 `protobuf:"bytes,10,opt,name=signature,proto3" json:"signature,omitempty"`
-	Hash          string                 `protobuf:"bytes,11,opt,name=hash,proto3" json:"hash,omitempty"`
-	Timestamp     int64                  `protobuf:"varint,12,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	FromPubkey    []byte                 `protobuf:"bytes,13,opt,name=from_pubkey,json=fromPubkey,proto3" json:"from_pubkey,omitempty"`
-	ChainId       string                 `protobuf:"bytes,14,opt,name=chain_id,json=chainId,proto3" json:"chain_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	From            string                 `protobuf:"bytes,2,opt,name=from,proto3" json:"from,omitempty"`
+	To              string                 `protobuf:"bytes,3,opt,name=to,proto3" json:"to,omitempty"`
+	Amount          string                 `protobuf:"bytes,4,opt,name=amount,proto3" json:"amount,omitempty"`
+	Gas             int64                  `protobuf:"varint,5,opt,name=gas,proto3" json:"gas,omitempty"`
+	GasPrice        string                 `protobuf:"bytes,6,opt,name=gas_price,json=gasPrice,proto3" json:"gas_price,omitempty"`
+	Nonce           uint64                 `protobuf:"varint,7,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	Data            []byte                 `protobuf:"bytes,8,opt,name=data,proto3" json:"data,omitempty"`
+	Type            TransactionType        `protobuf:"varint,9,opt,name=type,proto3,enum=thrylos.core.TransactionType" json:"type,omitempty"`
+	Signature       []byte                 `protobuf:"bytes,10,opt,name=signature,proto3" json:"signature,omitempty"`
+	Hash            string                 `protobuf:"bytes,11,opt,name=hash,proto3" json:"hash,omitempty"`
+	Timestamp       int64                  `protobuf:"varint,12,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	FromPubkey      []byte                 `protobuf:"bytes,13,opt,name=from_pubkey,json=fromPubkey,proto3" json:"from_pubkey,omitempty"`
+	ChainId         string                 `protobuf:"bytes,14,opt,name=chain_id,json=chainId,proto3" json:"chain_id,omitempty"`
+	AmountBytes     []byte                 `protobuf:"bytes,15,opt,name=amount_bytes,json=amountBytes,proto3" json:"amount_bytes,omitempty"`
+	GasPriceBytes   []byte                 `protobuf:"bytes,16,opt,name=gas_price_bytes,json=gasPriceBytes,proto3" json:"gas_price_bytes,omitempty"`
+	EncodingVersion uint32                 `protobuf:"varint,17,opt,name=encoding_version,json=encodingVersion,proto3" json:"encoding_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Transaction) Reset() {
 	*x = Transaction{}
-	mi := &file_proto_account_proto_msgTypes[1]
+	mi := &file_account_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -280,7 +315,7 @@ func (x *Transaction) String() string {
 func (*Transaction) ProtoMessage() {}
 
 func (x *Transaction) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_account_proto_msgTypes[1]
+	mi := &file_account_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -293,7 +328,7 @@ func (x *Transaction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Transaction.ProtoReflect.Descriptor instead.
 func (*Transaction) Descriptor() ([]byte, []int) {
-	return file_proto_account_proto_rawDescGZIP(), []int{1}
+	return file_account_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Transaction) GetId() string {
@@ -394,6 +429,27 @@ func (x *Transaction) GetChainId() string {
 	return ""
 }
 
+func (x *Transaction) GetAmountBytes() []byte {
+	if x != nil {
+		return x.AmountBytes
+	}
+	return nil
+}
+
+func (x *Transaction) GetGasPriceBytes() []byte {
+	if x != nil {
+		return x.GasPriceBytes
+	}
+	return nil
+}
+
+func (x *Transaction) GetEncodingVersion() uint32 {
+	if x != nil {
+		return x.EncodingVersion
+	}
+	return 0
+}
+
 type Block struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	Header            *BlockHeader           `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
@@ -407,7 +463,7 @@ type Block struct {
 
 func (x *Block) Reset() {
 	*x = Block{}
-	mi := &file_proto_account_proto_msgTypes[2]
+	mi := &file_account_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -419,7 +475,7 @@ func (x *Block) String() string {
 func (*Block) ProtoMessage() {}
 
 func (x *Block) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_account_proto_msgTypes[2]
+	mi := &file_account_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -432,7 +488,7 @@ func (x *Block) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Block.ProtoReflect.Descriptor instead.
 func (*Block) Descriptor() ([]byte, []int) {
-	return file_proto_account_proto_rawDescGZIP(), []int{2}
+	return file_account_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Block) GetHeader() *BlockHeader {
@@ -471,28 +527,30 @@ func (x *Block) GetProposalSignature() []byte {
 }
 
 type BlockHeader struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Index         int64                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
-	PrevHash      string                 `protobuf:"bytes,2,opt,name=prev_hash,json=prevHash,proto3" json:"prev_hash,omitempty"`
-	Timestamp     int64                  `protobuf:"varint,3,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Validator     string                 `protobuf:"bytes,4,opt,name=validator,proto3" json:"validator,omitempty"`
-	TxRoot        string                 `protobuf:"bytes,5,opt,name=tx_root,json=txRoot,proto3" json:"tx_root,omitempty"`
-	StateRoot     string                 `protobuf:"bytes,6,opt,name=state_root,json=stateRoot,proto3" json:"state_root,omitempty"`
-	GasUsed       int64                  `protobuf:"varint,7,opt,name=gas_used,json=gasUsed,proto3" json:"gas_used,omitempty"`
-	GasLimit      int64                  `protobuf:"varint,8,opt,name=gas_limit,json=gasLimit,proto3" json:"gas_limit,omitempty"`
-	Slot          uint64                 `protobuf:"varint,9,opt,name=slot,proto3" json:"slot,omitempty"`
-	Epoch         uint64                 `protobuf:"varint,10,opt,name=epoch,proto3" json:"epoch,omitempty"`
-	TotalFees     string                 `protobuf:"bytes,11,opt,name=total_fees,json=totalFees,proto3" json:"total_fees,omitempty"`
-	MerkleRoot    string                 `protobuf:"bytes,12,opt,name=merkle_root,json=merkleRoot,proto3" json:"merkle_root,omitempty"`
-	VrfOutput     []byte                 `protobuf:"bytes,13,opt,name=vrf_output,json=vrfOutput,proto3" json:"vrf_output,omitempty"` // VRF randomness output
-	VrfProof      []byte                 `protobuf:"bytes,14,opt,name=vrf_proof,json=vrfProof,proto3" json:"vrf_proof,omitempty"`    // VRF proof for verification
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	Index                int64                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	PrevHash             string                 `protobuf:"bytes,2,opt,name=prev_hash,json=prevHash,proto3" json:"prev_hash,omitempty"`
+	Timestamp            int64                  `protobuf:"varint,3,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Validator            string                 `protobuf:"bytes,4,opt,name=validator,proto3" json:"validator,omitempty"`
+	TxRoot               string                 `protobuf:"bytes,5,opt,name=tx_root,json=txRoot,proto3" json:"tx_root,omitempty"`
+	StateRoot            string                 `protobuf:"bytes,6,opt,name=state_root,json=stateRoot,proto3" json:"state_root,omitempty"`
+	GasUsed              int64                  `protobuf:"varint,7,opt,name=gas_used,json=gasUsed,proto3" json:"gas_used,omitempty"`
+	GasLimit             int64                  `protobuf:"varint,8,opt,name=gas_limit,json=gasLimit,proto3" json:"gas_limit,omitempty"`
+	Slot                 uint64                 `protobuf:"varint,9,opt,name=slot,proto3" json:"slot,omitempty"`
+	Epoch                uint64                 `protobuf:"varint,10,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	TotalFees            string                 `protobuf:"bytes,11,opt,name=total_fees,json=totalFees,proto3" json:"total_fees,omitempty"`
+	MerkleRoot           string                 `protobuf:"bytes,12,opt,name=merkle_root,json=merkleRoot,proto3" json:"merkle_root,omitempty"`
+	VrfOutput            []byte                 `protobuf:"bytes,13,opt,name=vrf_output,json=vrfOutput,proto3" json:"vrf_output,omitempty"` // VRF randomness output
+	VrfProof             []byte                 `protobuf:"bytes,14,opt,name=vrf_proof,json=vrfProof,proto3" json:"vrf_proof,omitempty"`    // VRF proof for verification
+	TotalFeesBytes       []byte                 `protobuf:"bytes,15,opt,name=total_fees_bytes,json=totalFeesBytes,proto3" json:"total_fees_bytes,omitempty"`
+	StateEncodingVersion uint32                 `protobuf:"varint,16,opt,name=state_encoding_version,json=stateEncodingVersion,proto3" json:"state_encoding_version,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *BlockHeader) Reset() {
 	*x = BlockHeader{}
-	mi := &file_proto_account_proto_msgTypes[3]
+	mi := &file_account_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -504,7 +562,7 @@ func (x *BlockHeader) String() string {
 func (*BlockHeader) ProtoMessage() {}
 
 func (x *BlockHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_account_proto_msgTypes[3]
+	mi := &file_account_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -517,7 +575,7 @@ func (x *BlockHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockHeader.ProtoReflect.Descriptor instead.
 func (*BlockHeader) Descriptor() ([]byte, []int) {
-	return file_proto_account_proto_rawDescGZIP(), []int{3}
+	return file_account_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *BlockHeader) GetIndex() int64 {
@@ -618,31 +676,49 @@ func (x *BlockHeader) GetVrfProof() []byte {
 	return nil
 }
 
+func (x *BlockHeader) GetTotalFeesBytes() []byte {
+	if x != nil {
+		return x.TotalFeesBytes
+	}
+	return nil
+}
+
+func (x *BlockHeader) GetStateEncodingVersion() uint32 {
+	if x != nil {
+		return x.StateEncodingVersion
+	}
+	return 0
+}
+
 type Validator struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Address        string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
-	Pubkey         []byte                 `protobuf:"bytes,2,opt,name=pubkey,proto3" json:"pubkey,omitempty"`
-	Name           string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`               // Add validator name
-	Description    string                 `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"` // Add validator description
-	Website        string                 `protobuf:"bytes,5,opt,name=website,proto3" json:"website,omitempty"`         // Add validator website
-	Stake          string                 `protobuf:"bytes,6,opt,name=stake,proto3" json:"stake,omitempty"`             // Updated field numbers
-	SelfStake      string                 `protobuf:"bytes,7,opt,name=self_stake,json=selfStake,proto3" json:"self_stake,omitempty"`
-	DelegatedStake string                 `protobuf:"bytes,8,opt,name=delegated_stake,json=delegatedStake,proto3" json:"delegated_stake,omitempty"`
-	Delegators     map[string]string      `protobuf:"bytes,9,rep,name=delegators,proto3" json:"delegators,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // delegator address -> amount
-	Commission     float64                `protobuf:"fixed64,10,opt,name=commission,proto3" json:"commission,omitempty"`                                                                        // commission rate (0.0 to 1.0)
-	Active         bool                   `protobuf:"varint,11,opt,name=active,proto3" json:"active,omitempty"`
-	BlocksProposed int64                  `protobuf:"varint,12,opt,name=blocks_proposed,json=blocksProposed,proto3" json:"blocks_proposed,omitempty"`
-	BlocksMissed   int64                  `protobuf:"varint,13,opt,name=blocks_missed,json=blocksMissed,proto3" json:"blocks_missed,omitempty"`
-	JailUntil      int64                  `protobuf:"varint,14,opt,name=jail_until,json=jailUntil,proto3" json:"jail_until,omitempty"` // Unix timestamp, 0 means not jailed
-	CreatedAt      int64                  `protobuf:"varint,15,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // When validator was created
-	UpdatedAt      int64                  `protobuf:"varint,16,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // Last update timestamp
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Address             string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	Pubkey              []byte                 `protobuf:"bytes,2,opt,name=pubkey,proto3" json:"pubkey,omitempty"`
+	Name                string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`               // Add validator name
+	Description         string                 `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"` // Add validator description
+	Website             string                 `protobuf:"bytes,5,opt,name=website,proto3" json:"website,omitempty"`         // Add validator website
+	Stake               string                 `protobuf:"bytes,6,opt,name=stake,proto3" json:"stake,omitempty"`             // Updated field numbers
+	SelfStake           string                 `protobuf:"bytes,7,opt,name=self_stake,json=selfStake,proto3" json:"self_stake,omitempty"`
+	DelegatedStake      string                 `protobuf:"bytes,8,opt,name=delegated_stake,json=delegatedStake,proto3" json:"delegated_stake,omitempty"`
+	Delegators          map[string]string      `protobuf:"bytes,9,rep,name=delegators,proto3" json:"delegators,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // delegator address -> amount
+	Commission          float64                `protobuf:"fixed64,10,opt,name=commission,proto3" json:"commission,omitempty"`                                                                        // commission rate (0.0 to 1.0)
+	Active              bool                   `protobuf:"varint,11,opt,name=active,proto3" json:"active,omitempty"`
+	BlocksProposed      int64                  `protobuf:"varint,12,opt,name=blocks_proposed,json=blocksProposed,proto3" json:"blocks_proposed,omitempty"`
+	BlocksMissed        int64                  `protobuf:"varint,13,opt,name=blocks_missed,json=blocksMissed,proto3" json:"blocks_missed,omitempty"`
+	JailUntil           int64                  `protobuf:"varint,14,opt,name=jail_until,json=jailUntil,proto3" json:"jail_until,omitempty"` // Unix timestamp, 0 means not jailed
+	CreatedAt           int64                  `protobuf:"varint,15,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // When validator was created
+	UpdatedAt           int64                  `protobuf:"varint,16,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // Last update timestamp
+	StakeBytes          []byte                 `protobuf:"bytes,17,opt,name=stake_bytes,json=stakeBytes,proto3" json:"stake_bytes,omitempty"`
+	SelfStakeBytes      []byte                 `protobuf:"bytes,18,opt,name=self_stake_bytes,json=selfStakeBytes,proto3" json:"self_stake_bytes,omitempty"`
+	DelegatedStakeBytes []byte                 `protobuf:"bytes,19,opt,name=delegated_stake_bytes,json=delegatedStakeBytes,proto3" json:"delegated_stake_bytes,omitempty"`
+	DelegatorsBytes     map[string][]byte      `protobuf:"bytes,20,rep,name=delegators_bytes,json=delegatorsBytes,proto3" json:"delegators_bytes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Validator) Reset() {
 	*x = Validator{}
-	mi := &file_proto_account_proto_msgTypes[4]
+	mi := &file_account_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -654,7 +730,7 @@ func (x *Validator) String() string {
 func (*Validator) ProtoMessage() {}
 
 func (x *Validator) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_account_proto_msgTypes[4]
+	mi := &file_account_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -667,7 +743,7 @@ func (x *Validator) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Validator.ProtoReflect.Descriptor instead.
 func (*Validator) Descriptor() ([]byte, []int) {
-	return file_proto_account_proto_rawDescGZIP(), []int{4}
+	return file_account_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Validator) GetAddress() string {
@@ -782,6 +858,34 @@ func (x *Validator) GetUpdatedAt() int64 {
 	return 0
 }
 
+func (x *Validator) GetStakeBytes() []byte {
+	if x != nil {
+		return x.StakeBytes
+	}
+	return nil
+}
+
+func (x *Validator) GetSelfStakeBytes() []byte {
+	if x != nil {
+		return x.SelfStakeBytes
+	}
+	return nil
+}
+
+func (x *Validator) GetDelegatedStakeBytes() []byte {
+	if x != nil {
+		return x.DelegatedStakeBytes
+	}
+	return nil
+}
+
+func (x *Validator) GetDelegatorsBytes() map[string][]byte {
+	if x != nil {
+		return x.DelegatorsBytes
+	}
+	return nil
+}
+
 // And potentially a ValidatorSet message for consensus
 type ValidatorSet struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
@@ -794,7 +898,7 @@ type ValidatorSet struct {
 
 func (x *ValidatorSet) Reset() {
 	*x = ValidatorSet{}
-	mi := &file_proto_account_proto_msgTypes[5]
+	mi := &file_account_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -806,7 +910,7 @@ func (x *ValidatorSet) String() string {
 func (*ValidatorSet) ProtoMessage() {}
 
 func (x *ValidatorSet) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_account_proto_msgTypes[5]
+	mi := &file_account_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -819,7 +923,7 @@ func (x *ValidatorSet) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidatorSet.ProtoReflect.Descriptor instead.
 func (*ValidatorSet) Descriptor() ([]byte, []int) {
-	return file_proto_account_proto_rawDescGZIP(), []int{5}
+	return file_account_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ValidatorSet) GetValidators() []*Validator {
@@ -843,11 +947,11 @@ func (x *ValidatorSet) GetHeight() int64 {
 	return 0
 }
 
-var File_proto_account_proto protoreflect.FileDescriptor
+var File_account_proto protoreflect.FileDescriptor
 
-const file_proto_account_proto_rawDesc = "" +
+const file_account_proto_rawDesc = "" +
 	"\n" +
-	"\x13proto/account.proto\x12\fthrylos.core\"\xdd\x02\n" +
+	"\raccount.proto\x12\fthrylos.core\"\xf7\x04\n" +
 	"\aAccount\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x18\n" +
 	"\abalance\x18\x02 \x01(\tR\abalance\x12\x14\n" +
@@ -856,10 +960,18 @@ const file_proto_account_proto_rawDesc = "" +
 	"\fdelegated_to\x18\x05 \x03(\v2&.thrylos.core.Account.DelegatedToEntryR\vdelegatedTo\x12\x18\n" +
 	"\arewards\x18\x06 \x01(\tR\arewards\x12\x1b\n" +
 	"\tcode_hash\x18\a \x01(\fR\bcodeHash\x12!\n" +
-	"\fstorage_root\x18\b \x01(\fR\vstorageRoot\x1a>\n" +
+	"\fstorage_root\x18\b \x01(\fR\vstorageRoot\x12#\n" +
+	"\rbalance_bytes\x18\t \x01(\fR\fbalanceBytes\x12.\n" +
+	"\x13staked_amount_bytes\x18\n" +
+	" \x01(\fR\x11stakedAmountBytes\x12Y\n" +
+	"\x12delegated_to_bytes\x18\v \x03(\v2+.thrylos.core.Account.DelegatedToBytesEntryR\x10delegatedToBytes\x12#\n" +
+	"\rrewards_bytes\x18\f \x01(\fR\frewardsBytes\x1a>\n" +
 	"\x10DelegatedToEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xf1\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aC\n" +
+	"\x15DelegatedToBytesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\xe7\x03\n" +
 	"\vTransaction\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\tR\x04from\x12\x0e\n" +
@@ -876,13 +988,16 @@ const file_proto_account_proto_rawDesc = "" +
 	"\ttimestamp\x18\f \x01(\x03R\ttimestamp\x12\x1f\n" +
 	"\vfrom_pubkey\x18\r \x01(\fR\n" +
 	"fromPubkey\x12\x19\n" +
-	"\bchain_id\x18\x0e \x01(\tR\achainId\"\xda\x01\n" +
+	"\bchain_id\x18\x0e \x01(\tR\achainId\x12!\n" +
+	"\famount_bytes\x18\x0f \x01(\fR\vamountBytes\x12&\n" +
+	"\x0fgas_price_bytes\x18\x10 \x01(\fR\rgasPriceBytes\x12)\n" +
+	"\x10encoding_version\x18\x11 \x01(\rR\x0fencodingVersion\"\xda\x01\n" +
 	"\x05Block\x121\n" +
 	"\x06header\x18\x01 \x01(\v2\x19.thrylos.core.BlockHeaderR\x06header\x12=\n" +
 	"\ftransactions\x18\x02 \x03(\v2\x19.thrylos.core.TransactionR\ftransactions\x12\x12\n" +
 	"\x04hash\x18\x03 \x01(\tR\x04hash\x12\x1c\n" +
 	"\tsignature\x18\x04 \x01(\fR\tsignature\x12-\n" +
-	"\x12proposal_signature\x18\x05 \x01(\fR\x11proposalSignature\"\x92\x03\n" +
+	"\x12proposal_signature\x18\x05 \x01(\fR\x11proposalSignature\"\xf2\x03\n" +
 	"\vBlockHeader\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x03R\x05index\x12\x1b\n" +
 	"\tprev_hash\x18\x02 \x01(\tR\bprevHash\x12\x1c\n" +
@@ -902,7 +1017,9 @@ const file_proto_account_proto_rawDesc = "" +
 	"merkleRoot\x12\x1d\n" +
 	"\n" +
 	"vrf_output\x18\r \x01(\fR\tvrfOutput\x12\x1b\n" +
-	"\tvrf_proof\x18\x0e \x01(\fR\bvrfProof\"\xd6\x04\n" +
+	"\tvrf_proof\x18\x0e \x01(\fR\bvrfProof\x12(\n" +
+	"\x10total_fees_bytes\x18\x0f \x01(\fR\x0etotalFeesBytes\x124\n" +
+	"\x16state_encoding_version\x18\x10 \x01(\rR\x14stateEncodingVersion\"\xf2\x06\n" +
 	"\tValidator\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x16\n" +
 	"\x06pubkey\x18\x02 \x01(\fR\x06pubkey\x12\x12\n" +
@@ -928,10 +1045,18 @@ const file_proto_account_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x0f \x01(\x03R\tcreatedAt\x12\x1d\n" +
 	"\n" +
-	"updated_at\x18\x10 \x01(\x03R\tupdatedAt\x1a=\n" +
+	"updated_at\x18\x10 \x01(\x03R\tupdatedAt\x12\x1f\n" +
+	"\vstake_bytes\x18\x11 \x01(\fR\n" +
+	"stakeBytes\x12(\n" +
+	"\x10self_stake_bytes\x18\x12 \x01(\fR\x0eselfStakeBytes\x122\n" +
+	"\x15delegated_stake_bytes\x18\x13 \x01(\fR\x13delegatedStakeBytes\x12W\n" +
+	"\x10delegators_bytes\x18\x14 \x03(\v2,.thrylos.core.Validator.DelegatorsBytesEntryR\x0fdelegatorsBytes\x1a=\n" +
 	"\x0fDelegatorsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8d\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aB\n" +
+	"\x14DelegatorsBytesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\x8d\x01\n" +
 	"\fValidatorSet\x127\n" +
 	"\n" +
 	"validators\x18\x01 \x03(\v2\x17.thrylos.core.ValidatorR\n" +
@@ -958,20 +1083,20 @@ const file_proto_account_proto_rawDesc = "" +
 	"\x10UNJAIL_VALIDATOR\x10\x02B/Z-github.com/thrylos-labs/thrylos-v2/proto/coreb\x06proto3"
 
 var (
-	file_proto_account_proto_rawDescOnce sync.Once
-	file_proto_account_proto_rawDescData []byte
+	file_account_proto_rawDescOnce sync.Once
+	file_account_proto_rawDescData []byte
 )
 
-func file_proto_account_proto_rawDescGZIP() []byte {
-	file_proto_account_proto_rawDescOnce.Do(func() {
-		file_proto_account_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_account_proto_rawDesc), len(file_proto_account_proto_rawDesc)))
+func file_account_proto_rawDescGZIP() []byte {
+	file_account_proto_rawDescOnce.Do(func() {
+		file_account_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_account_proto_rawDesc), len(file_account_proto_rawDesc)))
 	})
-	return file_proto_account_proto_rawDescData
+	return file_account_proto_rawDescData
 }
 
-var file_proto_account_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_account_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
-var file_proto_account_proto_goTypes = []any{
+var file_account_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_account_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_account_proto_goTypes = []any{
 	(TransactionType)(0),          // 0: thrylos.core.TransactionType
 	(ValidatorTransactionType)(0), // 1: thrylos.core.ValidatorTransactionType
 	(*Account)(nil),               // 2: thrylos.core.Account
@@ -981,43 +1106,47 @@ var file_proto_account_proto_goTypes = []any{
 	(*Validator)(nil),             // 6: thrylos.core.Validator
 	(*ValidatorSet)(nil),          // 7: thrylos.core.ValidatorSet
 	nil,                           // 8: thrylos.core.Account.DelegatedToEntry
-	nil,                           // 9: thrylos.core.Validator.DelegatorsEntry
+	nil,                           // 9: thrylos.core.Account.DelegatedToBytesEntry
+	nil,                           // 10: thrylos.core.Validator.DelegatorsEntry
+	nil,                           // 11: thrylos.core.Validator.DelegatorsBytesEntry
 }
-var file_proto_account_proto_depIdxs = []int32{
-	8, // 0: thrylos.core.Account.delegated_to:type_name -> thrylos.core.Account.DelegatedToEntry
-	0, // 1: thrylos.core.Transaction.type:type_name -> thrylos.core.TransactionType
-	5, // 2: thrylos.core.Block.header:type_name -> thrylos.core.BlockHeader
-	3, // 3: thrylos.core.Block.transactions:type_name -> thrylos.core.Transaction
-	9, // 4: thrylos.core.Validator.delegators:type_name -> thrylos.core.Validator.DelegatorsEntry
-	6, // 5: thrylos.core.ValidatorSet.validators:type_name -> thrylos.core.Validator
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+var file_account_proto_depIdxs = []int32{
+	8,  // 0: thrylos.core.Account.delegated_to:type_name -> thrylos.core.Account.DelegatedToEntry
+	9,  // 1: thrylos.core.Account.delegated_to_bytes:type_name -> thrylos.core.Account.DelegatedToBytesEntry
+	0,  // 2: thrylos.core.Transaction.type:type_name -> thrylos.core.TransactionType
+	5,  // 3: thrylos.core.Block.header:type_name -> thrylos.core.BlockHeader
+	3,  // 4: thrylos.core.Block.transactions:type_name -> thrylos.core.Transaction
+	10, // 5: thrylos.core.Validator.delegators:type_name -> thrylos.core.Validator.DelegatorsEntry
+	11, // 6: thrylos.core.Validator.delegators_bytes:type_name -> thrylos.core.Validator.DelegatorsBytesEntry
+	6,  // 7: thrylos.core.ValidatorSet.validators:type_name -> thrylos.core.Validator
+	8,  // [8:8] is the sub-list for method output_type
+	8,  // [8:8] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
-func init() { file_proto_account_proto_init() }
-func file_proto_account_proto_init() {
-	if File_proto_account_proto != nil {
+func init() { file_account_proto_init() }
+func file_account_proto_init() {
+	if File_account_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_account_proto_rawDesc), len(file_proto_account_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_account_proto_rawDesc), len(file_account_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   8,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_proto_account_proto_goTypes,
-		DependencyIndexes: file_proto_account_proto_depIdxs,
-		EnumInfos:         file_proto_account_proto_enumTypes,
-		MessageInfos:      file_proto_account_proto_msgTypes,
+		GoTypes:           file_account_proto_goTypes,
+		DependencyIndexes: file_account_proto_depIdxs,
+		EnumInfos:         file_account_proto_enumTypes,
+		MessageInfos:      file_account_proto_msgTypes,
 	}.Build()
-	File_proto_account_proto = out.File
-	file_proto_account_proto_goTypes = nil
-	file_proto_account_proto_depIdxs = nil
+	File_account_proto = out.File
+	file_account_proto_goTypes = nil
+	file_account_proto_depIdxs = nil
 }

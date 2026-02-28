@@ -30,6 +30,11 @@ import (
 	"github.com/thrylos-labs/go-thrylos/types"
 )
 
+const (
+	stateRootEncodingVersionLegacy    uint32 = 1
+	stateRootEncodingVersionCanonical uint32 = 2
+)
+
 // WorldState manages the global state for a shard
 type WorldState struct {
 	// Configuration
@@ -71,7 +76,8 @@ type WorldState struct {
 	lastTimestamp int64
 
 	// State root for Merkle tree
-	stateRoot string
+	stateRoot                string
+	stateRootEncodingVersion uint32
 
 	// Cross-shard manager
 	crossShardManager *CrossShardManager
@@ -186,13 +192,14 @@ func (ws *WorldState) initializeFromConfig(verbose bool) error {
 	// Initialize genesis block (block 0)
 	genesisBlock := &core.Block{
 		Header: &core.BlockHeader{
-			Index:     0,
-			PrevHash:  "",
-			Timestamp: genesisTimestamp,
-			Validator: "",
-			GasLimit:  ws.config.Consensus.MaxBlockSize,
-			GasUsed:   0,
-			StateRoot: "",
+			Index:                0,
+			PrevHash:             "",
+			Timestamp:            genesisTimestamp,
+			Validator:            "",
+			GasLimit:             ws.config.Consensus.MaxBlockSize,
+			GasUsed:              0,
+			StateRoot:            "",
+			StateEncodingVersion: ws.GetStateRootEncodingVersion(),
 		},
 		Transactions: []*core.Transaction{},
 		Hash:         "",
@@ -208,6 +215,7 @@ func (ws *WorldState) initializeFromConfig(verbose bool) error {
 
 	// Set the state root in genesis block
 	genesisBlock.Header.StateRoot = ws.stateRoot
+	genesisBlock.Header.StateEncodingVersion = ws.GetStateRootEncodingVersion()
 
 	// Add genesis block
 	ws.currentHash = genesisBlock.Hash
@@ -257,6 +265,11 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 
 	txValidator := transaction.NewValidator(shardID, totalShards, cfg)
 
+	initialStateEncodingVersion := stateRootEncodingVersionCanonical
+	if cfg != nil && cfg.Consensus.StateEncodingUpgradeHeight > 0 {
+		initialStateEncodingVersion = stateRootEncodingVersionLegacy
+	}
+
 	// 3. PHASE ONE: Create WorldState struct WITHOUT Executor
 	ws := &WorldState{
 		config:         cfg,
@@ -274,7 +287,8 @@ func NewWorldState(dataDir string, shardID account.ShardID, totalShards int, cfg
 		// ✅ FIX: Initialize as string "0"
 		totalStaked: "0",
 
-		lastTimestamp: time.Now().Unix(),
+		lastTimestamp:            time.Now().Unix(),
+		stateRootEncodingVersion: initialStateEncodingVersion,
 
 		totalTransactions: 0,
 		badgerStorage:     badgerStorage,
@@ -457,6 +471,12 @@ func (ws *WorldState) AddBlockFromSync(block *core.Block) error {
 		return fmt.Errorf("block validation failed: %v", err)
 	}
 
+	if block != nil && block.Header != nil && block.Header.StateEncodingVersion != 0 {
+		ws.stateRootMu.Lock()
+		ws.stateRootEncodingVersion = block.Header.StateEncodingVersion
+		ws.stateRootMu.Unlock()
+	}
+
 	for _, tx := range block.Transactions {
 		receipt, err := ws.ExecuteTransaction(tx)
 		if err != nil {
@@ -479,6 +499,11 @@ func (ws *WorldState) AddBlockFromSync(block *core.Block) error {
 	if block.Header.Index == 0 {
 		ws.stateRootMu.Lock()
 		ws.stateRoot = block.Header.StateRoot
+		if block.Header.StateEncodingVersion != 0 {
+			ws.stateRootEncodingVersion = block.Header.StateEncodingVersion
+		} else {
+			ws.stateRootEncodingVersion = stateRootEncodingVersionLegacy
+		}
 		ws.stateRootMu.Unlock()
 		log.Printf("✅ AddBlockFromSync: accepted genesis stateRoot %s", block.Header.StateRoot)
 	} else {
@@ -490,6 +515,7 @@ func (ws *WorldState) AddBlockFromSync(block *core.Block) error {
 				block.Header.StateRoot, ws.stateRoot)
 		}
 		block.Header.StateRoot = ws.stateRoot
+		block.Header.StateEncodingVersion = ws.GetStateRootEncodingVersion()
 		log.Printf("✅ AddBlockFromSync: verified stateRoot %s for block %d", ws.stateRoot, block.Header.Index)
 	}
 
@@ -556,6 +582,7 @@ func (ws *WorldState) AddBlock(block *core.Block) error {
 	}
 
 	block.Header.StateRoot = ws.stateRoot
+	block.Header.StateEncodingVersion = ws.GetStateRootEncodingVersion()
 
 	if err := ws.db.SaveBlock(block); err != nil {
 		return fmt.Errorf("failed to save block: %v", err)
@@ -714,7 +741,11 @@ func (ws *WorldState) GetBalance(address string) (*big.Int, error) {
 	if err != nil {
 		return big.NewInt(0), err
 	}
-	return math.ParseBigInt(acc.Balance), nil
+	balance, err := math.ParseUint256Compat(acc.BalanceBytes, acc.Balance)
+	if err != nil {
+		return big.NewInt(0), fmt.Errorf("invalid balance for %s: %w", address, err)
+	}
+	return balance, nil
 }
 
 // UpdateBalance updates the balance for a given address (needed for slashing)
@@ -843,6 +874,56 @@ func (ws *WorldState) GetStateRoot() string {
 	defer ws.stateRootMu.RUnlock()
 
 	return ws.stateRoot
+}
+
+func (ws *WorldState) GetStateRootEncodingVersion() uint32 {
+	ws.stateRootMu.RLock()
+	defer ws.stateRootMu.RUnlock()
+
+	if ws.stateRootEncodingVersion == 0 {
+		return stateRootEncodingVersionLegacy
+	}
+
+	return ws.stateRootEncodingVersion
+}
+
+func (ws *WorldState) GetStateRootEncodingVersionForHeight(height int64) uint32 {
+	return ws.desiredStateRootEncodingVersionForHeight(height)
+}
+
+func (ws *WorldState) desiredStateRootEncodingVersionForHeight(height int64) uint32 {
+	if ws == nil {
+		return stateRootEncodingVersionLegacy
+	}
+
+	upgradeHeight := int64(0)
+	if ws.config != nil {
+		upgradeHeight = ws.config.Consensus.StateEncodingUpgradeHeight
+	}
+
+	if upgradeHeight > 0 && height >= upgradeHeight {
+		return stateRootEncodingVersionCanonical
+	}
+
+	if ws.stateRootEncodingVersion != 0 {
+		return ws.stateRootEncodingVersion
+	}
+
+	if upgradeHeight > 0 {
+		return stateRootEncodingVersionLegacy
+	}
+
+	return stateRootEncodingVersionCanonical
+}
+
+func (ws *WorldState) applyStateRootEncodingVersionForHeight(height int64) uint32 {
+	ws.stateRootMu.Lock()
+	defer ws.stateRootMu.Unlock()
+
+	version := ws.desiredStateRootEncodingVersionForHeight(height)
+	ws.stateRootEncodingVersion = version
+
+	return version
 }
 
 // AddValidator adds a validator to the state
@@ -1119,6 +1200,7 @@ func (ws *WorldState) addValidator(validator *core.Validator) error {
 func (ws *WorldState) updateStateRoot() error {
 	// Calculate state root based on all accounts and validators
 	var stateData []byte
+	stateEncodingVersion := ws.applyStateRootEncodingVersionForHeight(ws.height)
 
 	// Get all accounts
 	accounts := ws.accountManager.GetAllAccounts()
@@ -1137,17 +1219,15 @@ func (ws *WorldState) updateStateRoot() error {
 		// Serialize account data
 		stateData = append(stateData, []byte(account.Address)...)
 
-		// ✅ FIX: Append string bytes directly instead of converting to uint64
-		stateData = append(stateData, []byte(account.Balance)...)
+		appendStateUint256(&stateData, stateEncodingVersion, account.BalanceBytes, account.Balance)
 
 		// Nonce is still uint64, so this remains correct
 		nonceBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(nonceBytes, account.Nonce)
 		stateData = append(stateData, nonceBytes...)
 
-		// ✅ FIX: Append string bytes directly
-		stateData = append(stateData, []byte(account.StakedAmount)...)
-		stateData = append(stateData, []byte(account.Rewards)...)
+		appendStateUint256(&stateData, stateEncodingVersion, account.StakedAmountBytes, account.StakedAmount)
+		appendStateUint256(&stateData, stateEncodingVersion, account.RewardsBytes, account.Rewards)
 
 		// Sort delegation keys for deterministic state
 		if len(account.DelegatedTo) > 0 {
@@ -1161,8 +1241,7 @@ func (ws *WorldState) updateStateRoot() error {
 				amountStr := account.DelegatedTo[valAddr]
 
 				stateData = append(stateData, []byte(valAddr)...)
-				// ✅ FIX: Append string bytes directly
-				stateData = append(stateData, []byte(amountStr)...)
+				appendStateUint256(&stateData, stateEncodingVersion, account.DelegatedToBytes[valAddr], amountStr)
 			}
 		}
 	}
@@ -1181,8 +1260,7 @@ func (ws *WorldState) updateStateRoot() error {
 		stateData = append(stateData, []byte(validator.Address)...)
 		stateData = append(stateData, validator.Pubkey...)
 
-		// ✅ FIX: Append string bytes directly
-		stateData = append(stateData, []byte(validator.Stake)...)
+		appendStateUint256(&stateData, stateEncodingVersion, validator.StakeBytes, validator.Stake)
 
 		// Add active status
 		if validator.Active {
@@ -1197,6 +1275,24 @@ func (ws *WorldState) updateStateRoot() error {
 	ws.stateRoot = fmt.Sprintf("%x", hashBytes)
 
 	return nil
+}
+
+func appendStateUint256(dst *[]byte, version uint32, raw []byte, decimal string) {
+	if version >= stateRootEncodingVersionCanonical {
+		value, err := math.ParseUint256Compat(raw, decimal)
+		if err == nil {
+			canonical, err := math.BigIntToUint256Bytes(value)
+			if err == nil {
+				lengthBytes := make([]byte, 2)
+				binary.BigEndian.PutUint16(lengthBytes, uint16(len(canonical)))
+				*dst = append(*dst, lengthBytes...)
+				*dst = append(*dst, canonical...)
+				return
+			}
+		}
+	}
+
+	*dst = append(*dst, []byte(decimal)...)
 }
 
 // ValidateStateConsistency validates the consistency of the world state
@@ -2637,10 +2733,17 @@ func (ws *WorldState) SetStake(delegatorAddr, validatorAddr string, amount strin
 
 // SetStateRoot sets the state root
 func (ws *WorldState) SetStateRoot(stateRoot string) error {
+	return ws.SetStateRootWithVersion(stateRoot, ws.GetStateRootEncodingVersion())
+}
+
+func (ws *WorldState) SetStateRootWithVersion(stateRoot string, version uint32) error {
 	ws.stateRootMu.Lock()
 	defer ws.stateRootMu.Unlock()
 
 	ws.stateRoot = stateRoot
+	if version != 0 {
+		ws.stateRootEncodingVersion = version
+	}
 	return nil
 }
 
@@ -2680,6 +2783,9 @@ func (ws *WorldState) SaveState() error {
 	// Save state root
 	if err := ws.state.SaveStateRoot(stateRoot); err != nil {
 		return fmt.Errorf("failed to save state root: %v", err)
+	}
+	if err := ws.state.SaveStateRootEncodingVersion(ws.GetStateRootEncodingVersion()); err != nil {
+		return fmt.Errorf("failed to save state root encoding version: %v", err)
 	}
 
 	// Save all accounts
@@ -2737,6 +2843,15 @@ func (ws *WorldState) LoadState() error {
 
 	fmt.Printf("🔍 LoadState: Found state root: %s\n", stateRoot)
 	ws.stateRoot = stateRoot
+
+	stateRootEncodingVersion, err := ws.state.GetStateRootEncodingVersion()
+	if err != nil {
+		return fmt.Errorf("failed to load state root encoding version: %v", err)
+	}
+	if stateRootEncodingVersion == 0 {
+		stateRootEncodingVersion = stateRootEncodingVersionLegacy
+	}
+	ws.stateRootEncodingVersion = stateRootEncodingVersion
 
 	// Load total transactions
 	totalTx, err := ws.state.GetTotalTransactions()
@@ -3141,18 +3256,19 @@ func (ws *WorldState) calculateStateRootFromOverlay(store *simulationStore) (str
 	sort.Strings(addresses)
 
 	var stateData []byte
+	stateEncodingVersion := ws.desiredStateRootEncodingVersionForHeight(ws.height)
 
 	for _, addr := range addresses {
 		acc := merged[addr]
 		stateData = append(stateData, []byte(acc.Address)...)
-		stateData = append(stateData, []byte(acc.Balance)...)
+		appendStateUint256(&stateData, stateEncodingVersion, acc.BalanceBytes, acc.Balance)
 
 		nonceBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(nonceBytes, acc.Nonce)
 		stateData = append(stateData, nonceBytes...)
 
-		stateData = append(stateData, []byte(acc.StakedAmount)...)
-		stateData = append(stateData, []byte(acc.Rewards)...)
+		appendStateUint256(&stateData, stateEncodingVersion, acc.StakedAmountBytes, acc.StakedAmount)
+		appendStateUint256(&stateData, stateEncodingVersion, acc.RewardsBytes, acc.Rewards)
 
 		if len(acc.DelegatedTo) > 0 {
 			valAddrs := make([]string, 0, len(acc.DelegatedTo))
@@ -3162,7 +3278,7 @@ func (ws *WorldState) calculateStateRootFromOverlay(store *simulationStore) (str
 			sort.Strings(valAddrs)
 			for _, valAddr := range valAddrs {
 				stateData = append(stateData, []byte(valAddr)...)
-				stateData = append(stateData, []byte(acc.DelegatedTo[valAddr])...)
+				appendStateUint256(&stateData, stateEncodingVersion, acc.DelegatedToBytes[valAddr], acc.DelegatedTo[valAddr])
 			}
 		}
 	}
@@ -3180,7 +3296,7 @@ func (ws *WorldState) calculateStateRootFromOverlay(store *simulationStore) (str
 		v := ws.validators[addr]
 		stateData = append(stateData, []byte(v.Address)...)
 		stateData = append(stateData, v.Pubkey...)
-		stateData = append(stateData, []byte(v.Stake)...)
+		appendStateUint256(&stateData, stateEncodingVersion, v.StakeBytes, v.Stake)
 		if v.Active {
 			stateData = append(stateData, 1)
 		} else {

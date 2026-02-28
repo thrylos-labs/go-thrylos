@@ -357,8 +357,15 @@ func (bc *Creator) GetShardID() account.ShardID {
 
 // SetStateRoot sets the state root in a block header
 func (bc *Creator) SetStateRoot(block *core.Block, stateRoot string) {
+	bc.SetStateRootWithVersion(block, stateRoot, 0)
+}
+
+func (bc *Creator) SetStateRootWithVersion(block *core.Block, stateRoot string, version uint32) {
 	if block != nil && block.Header != nil {
 		block.Header.StateRoot = stateRoot
+		if version != 0 {
+			block.Header.StateEncodingVersion = version
+		}
 
 		// Recalculate block hash since state root changed
 		newHash, err := bc.calculateBlockHash(block)

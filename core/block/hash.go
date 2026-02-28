@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
@@ -38,6 +39,12 @@ func CanonicalBlockHash(b *core.Block) (string, error) {
 	// Tx root
 	buf.WriteString(h.TxRoot)
 
+	if h.StateEncodingVersion >= 2 {
+		versionBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(versionBytes, h.StateEncodingVersion)
+		buf.Write(versionBytes)
+	}
+
 	// State root
 	buf.WriteString(h.StateRoot)
 
@@ -60,8 +67,23 @@ func CanonicalBlockHash(b *core.Block) (string, error) {
 	binary.BigEndian.PutUint64(epochBytes, h.Epoch)
 	buf.Write(epochBytes)
 
-	// TotalFees
-	buf.WriteString(h.TotalFees)
+	if h.StateEncodingVersion >= 2 {
+		totalFees, err := coremath.ParseUint256Compat(h.TotalFeesBytes, h.TotalFees)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse total fees: %w", err)
+		}
+		totalFeesBytes, err := coremath.BigIntToUint256Bytes(totalFees)
+		if err != nil {
+			return "", fmt.Errorf("failed to encode total fees: %w", err)
+		}
+		totalFeeLen := make([]byte, 2)
+		binary.BigEndian.PutUint16(totalFeeLen, uint16(len(totalFeesBytes)))
+		buf.Write(totalFeeLen)
+		buf.Write(totalFeesBytes)
+	} else {
+		// TotalFees
+		buf.WriteString(h.TotalFees)
+	}
 
 	// MerkleRoot
 	buf.WriteString(h.MerkleRoot)

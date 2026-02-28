@@ -50,6 +50,10 @@ func (ss *StateStorage) Close() error {
 
 // Account operations
 func (ss *StateStorage) SaveAccount(account *core.Account) error {
+	if err := syncAccountCompatForWrite(account); err != nil {
+		return fmt.Errorf("failed to normalize account amounts: %v", err)
+	}
+
 	data, err := json.Marshal(account)
 	if err != nil {
 		return fmt.Errorf("failed to marshal account: %v", err)
@@ -71,12 +75,19 @@ func (ss *StateStorage) GetAccount(address string) (*core.Account, error) {
 	if err := json.Unmarshal(data, &account); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal account: %v", err)
 	}
+	if err := normalizeAccountCompat(&account); err != nil {
+		return nil, fmt.Errorf("failed to normalize account amounts: %v", err)
+	}
 
 	return &account, nil
 }
 
 // Validator operations
 func (ss *StateStorage) SaveValidator(validator *core.Validator) error {
+	if err := syncValidatorCompatForWrite(validator); err != nil {
+		return fmt.Errorf("failed to normalize validator amounts: %v", err)
+	}
+
 	data, err := json.Marshal(validator)
 	if err != nil {
 		return fmt.Errorf("failed to marshal validator: %v", err)
@@ -98,6 +109,9 @@ func (ss *StateStorage) GetValidator(address string) (*core.Validator, error) {
 	if err := json.Unmarshal(data, &validator); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal validator: %v", err)
 	}
+	if err := normalizeValidatorCompat(&validator); err != nil {
+		return nil, fmt.Errorf("failed to normalize validator amounts: %v", err)
+	}
 
 	return &validator, nil
 }
@@ -113,6 +127,9 @@ func (ss *StateStorage) GetAllAccounts() (map[string]*core.Account, error) {
 		var account core.Account
 		if err := json.Unmarshal(iter.Value(), &account); err != nil {
 			continue // Skip invalid accounts
+		}
+		if err := normalizeAccountCompat(&account); err != nil {
+			continue
 		}
 		accounts[account.Address] = &account
 	}
@@ -146,6 +163,10 @@ func (ss *StateStorage) SaveStateRoot(stateRoot string) error {
 	return ss.storage.Set(StateRootKey(), []byte(stateRoot))
 }
 
+func (ss *StateStorage) SaveStateRootEncodingVersion(version uint32) error {
+	return ss.storage.Set(StateRootEncodingVersionKey(), []byte(fmt.Sprintf("%d", version)))
+}
+
 func (ss *StateStorage) GetStateRoot() (string, error) {
 	data, err := ss.storage.Get(StateRootKey())
 	if err != nil {
@@ -158,6 +179,23 @@ func (ss *StateStorage) GetStateRoot() (string, error) {
 	return string(data), nil
 }
 
+func (ss *StateStorage) GetStateRootEncodingVersion() (uint32, error) {
+	data, err := ss.storage.Get(StateRootEncodingVersionKey())
+	if err != nil {
+		if err == ErrKeyNotFound {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	var version uint32
+	if _, err := fmt.Sscanf(string(data), "%d", &version); err != nil {
+		return 0, fmt.Errorf("failed to parse state root encoding version: %v", err)
+	}
+
+	return version, nil
+}
+
 func (ss *StateStorage) GetAllValidators() (map[string]*core.Validator, error) {
 	validators := make(map[string]*core.Validator)
 
@@ -168,6 +206,9 @@ func (ss *StateStorage) GetAllValidators() (map[string]*core.Validator, error) {
 		var validator core.Validator
 		if err := json.Unmarshal(iter.Value(), &validator); err != nil {
 			continue // Skip invalid validators
+		}
+		if err := normalizeValidatorCompat(&validator); err != nil {
+			continue
 		}
 		validators[validator.Address] = &validator
 	}

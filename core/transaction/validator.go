@@ -102,16 +102,20 @@ func (v *Validator) CreateTransaction(from, to string, amount string, gas int64,
 
 	// Create the transaction
 	tx := &core.Transaction{
-		Id:        uuid.New().String(),
-		From:      from,
-		To:        to,
-		Amount:    amount,
-		Gas:       gas,
-		GasPrice:  gasPrice,
-		Nonce:     nonce,
-		Type:      txType,
-		Data:      data,
-		Timestamp: time.Now().Unix(),
+		Id:              uuid.New().String(),
+		From:            from,
+		To:              to,
+		Amount:          amount,
+		Gas:             gas,
+		GasPrice:        gasPrice,
+		Nonce:           nonce,
+		Type:            txType,
+		Data:            data,
+		Timestamp:       time.Now().Unix(),
+		EncodingVersion: 2,
+	}
+	if err := syncTransactionAmountsForWrite(tx); err != nil {
+		return nil, fmt.Errorf("failed to normalize transaction amounts: %v", err)
 	}
 
 	if err := EnsureReplayProtection(tx, v.config); err != nil {
@@ -130,6 +134,67 @@ func (v *Validator) CreateTransaction(from, to string, amount string, gas int64,
 	}
 
 	return tx, nil
+}
+
+func syncTransactionAmountsForWrite(tx *core.Transaction) error {
+	if tx == nil {
+		return fmt.Errorf("transaction cannot be nil")
+	}
+	if err := math.SyncUint256ForWrite(&tx.AmountBytes, &tx.Amount); err != nil {
+		return err
+	}
+	if err := math.SyncUint256ForWrite(&tx.GasPriceBytes, &tx.GasPrice); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func normalizeTransactionAmounts(tx *core.Transaction) error {
+	if tx == nil {
+		return fmt.Errorf("transaction cannot be nil")
+	}
+
+	if transactionEncodingVersion(tx) >= 2 {
+		amount, err := math.ValidateUint256Compat(tx.AmountBytes, tx.Amount)
+		if err != nil {
+			return err
+		}
+		tx.AmountBytes, err = math.BigIntToUint256Bytes(amount)
+		if err != nil {
+			return err
+		}
+		tx.Amount = amount.String()
+
+		gasPrice, err := math.ValidateUint256Compat(tx.GasPriceBytes, tx.GasPrice)
+		if err != nil {
+			return err
+		}
+		tx.GasPriceBytes, err = math.BigIntToUint256Bytes(gasPrice)
+		if err != nil {
+			return err
+		}
+		tx.GasPrice = gasPrice.String()
+
+		return nil
+	}
+
+	if err := math.SyncUint256ForWrite(&tx.AmountBytes, &tx.Amount); err != nil {
+		return err
+	}
+	if err := math.SyncUint256ForWrite(&tx.GasPriceBytes, &tx.GasPrice); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func transactionEncodingVersion(tx *core.Transaction) uint32 {
+	if tx == nil || tx.EncodingVersion < 2 {
+		return 1
+	}
+
+	return tx.EncodingVersion
 }
 
 // CreateTransferTransaction creates a transfer transaction
@@ -216,6 +281,50 @@ func (v *Validator) CreateGovernanceFinalizeTransaction(from, proposalID string,
 // CalculateTransactionHash calculates the Blake2b hash of a transaction
 func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, error) {
 	var buf bytes.Buffer
+	version := transactionEncodingVersion(tx)
+
+	if version >= 2 {
+		if err := normalizeTransactionAmounts(tx); err != nil {
+			return "", fmt.Errorf("invalid transaction amounts: %w", err)
+		}
+
+		versionBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(versionBytes, version)
+		buf.Write(versionBytes)
+
+		buf.WriteString(tx.Id)
+		buf.WriteString(tx.From)
+		buf.WriteString(tx.To)
+
+		appendLengthPrefixedBytes(&buf, tx.AmountBytes)
+
+		gasBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
+		buf.Write(gasBytes)
+
+		appendLengthPrefixedBytes(&buf, tx.GasPriceBytes)
+
+		nonceBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(nonceBytes, tx.Nonce)
+		buf.Write(nonceBytes)
+
+		typeBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(typeBytes, uint32(tx.Type))
+		buf.Write(typeBytes)
+
+		timestampBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(timestampBytes, uint64(tx.Timestamp))
+		buf.Write(timestampBytes)
+
+		buf.Write(tx.Data)
+
+		hashBytes, err := hash.HashData(buf.Bytes())
+		if err != nil {
+			return "", fmt.Errorf("failed to hash buffer: %w", err)
+		}
+
+		return fmt.Sprintf("%x", hashBytes), nil
+	}
 
 	// Serialize transaction fields for hashing (excluding signature and hash)
 	buf.WriteString(tx.Id)
@@ -258,6 +367,13 @@ func (v *Validator) CalculateTransactionHash(tx *core.Transaction) (string, erro
 	}
 
 	return fmt.Sprintf("%x", hashBytes), err
+}
+
+func appendLengthPrefixedBytes(buf *bytes.Buffer, payload []byte) {
+	lengthBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(lengthBytes, uint16(len(payload)))
+	buf.Write(lengthBytes)
+	buf.Write(payload)
 }
 
 // SignTransaction signs a transaction using the secp256k1 private key.
@@ -549,10 +665,52 @@ func parseEVMChainID(chainID string) *big.Int {
 // calculateSignableHash creates a hash that includes chain ID and all transaction context
 func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) {
 	var buf bytes.Buffer
+	version := transactionEncodingVersion(tx)
 
 	// 1. Include chain ID to prevent cross-chain replay attacks
 	chainID := v.config.Network.ChainID
 	buf.WriteString(chainID)
+
+	if version >= 2 {
+		if err := normalizeTransactionAmounts(tx); err != nil {
+			return nil, fmt.Errorf("invalid transaction amounts: %w", err)
+		}
+
+		// 2. Include protocol version
+		buf.WriteString("v3")
+
+		versionBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(versionBytes, version)
+		buf.Write(versionBytes)
+
+		buf.WriteString(tx.Id)
+		buf.WriteString(tx.From)
+		buf.WriteString(tx.To)
+
+		appendLengthPrefixedBytes(&buf, tx.AmountBytes)
+
+		gasBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
+		buf.Write(gasBytes)
+
+		appendLengthPrefixedBytes(&buf, tx.GasPriceBytes)
+
+		nonceBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(nonceBytes, tx.Nonce)
+		buf.Write(nonceBytes)
+
+		typeBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(typeBytes, uint32(tx.Type))
+		buf.Write(typeBytes)
+
+		timestampBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(timestampBytes, uint64(tx.Timestamp))
+		buf.Write(timestampBytes)
+
+		buf.Write(tx.Data)
+
+		return hash.HashData(buf.Bytes())
+	}
 
 	// 2. Include protocol version
 	buf.WriteString("v1")
@@ -599,10 +757,57 @@ func (v *Validator) calculateSignableHash(tx *core.Transaction) ([]byte, error) 
 // This is the ENHANCED version that includes finalized block hash to prevent post-reorg replay
 func (v *Validator) calculateSignableHashWithReplayProtection(tx *core.Transaction, finalizedBlockHash string) ([]byte, error) {
 	var buf bytes.Buffer
+	version := transactionEncodingVersion(tx)
 
 	// 1. Include chain ID
 	chainID := v.config.Network.ChainID
 	buf.WriteString(chainID)
+
+	if version >= 2 {
+		if err := normalizeTransactionAmounts(tx); err != nil {
+			return nil, fmt.Errorf("invalid transaction amounts: %w", err)
+		}
+
+		// 2. Include protocol version
+		buf.WriteString("v4")
+
+		versionBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(versionBytes, version)
+		buf.Write(versionBytes)
+
+		if finalizedBlockHash != "" {
+			buf.WriteString(finalizedBlockHash)
+		} else if v.replayConfig.RequireFinalizedBlock && !v.replayConfig.AllowEmptyFinalizedBlock {
+			return nil, fmt.Errorf("finalized block hash required for replay protection")
+		}
+
+		buf.WriteString(tx.Id)
+		buf.WriteString(tx.From)
+		buf.WriteString(tx.To)
+		appendLengthPrefixedBytes(&buf, tx.AmountBytes)
+
+		gasBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(gasBytes, uint64(tx.Gas))
+		buf.Write(gasBytes)
+
+		appendLengthPrefixedBytes(&buf, tx.GasPriceBytes)
+
+		nonceBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(nonceBytes, tx.Nonce)
+		buf.Write(nonceBytes)
+
+		typeBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(typeBytes, uint32(tx.Type))
+		buf.Write(typeBytes)
+
+		timestampBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(timestampBytes, uint64(tx.Timestamp))
+		buf.Write(timestampBytes)
+
+		buf.Write(tx.Data)
+
+		return hash.HashData(buf.Bytes())
+	}
 
 	// 2. Include protocol version
 	buf.WriteString("v2")
@@ -778,6 +983,9 @@ func (v *Validator) GetReplayNonce(address string) (uint64, bool) {
 func (v *Validator) ValidateTransaction(tx *core.Transaction, currentHeight int64, stateReader StateInterface) error {
 	if tx == nil {
 		return fmt.Errorf("transaction cannot be nil")
+	}
+	if err := normalizeTransactionAmounts(tx); err != nil {
+		return fmt.Errorf("invalid transaction amounts: %w", err)
 	}
 
 	// ========================================================================
@@ -1038,6 +1246,10 @@ func (v *Validator) validateNonce(txNonce, accountNonce uint64, address string) 
 // ValidateForMempool validates a transaction for mempool inclusion
 // This allows future nonces within a reasonable range for queued transactions
 func (v *Validator) ValidateForMempool(tx *core.Transaction, stateReader StateInterface) error {
+	if err := normalizeTransactionAmounts(tx); err != nil {
+		return fmt.Errorf("invalid transaction amounts: %w", err)
+	}
+
 	// First, ensure signature is valid
 	if err := v.validateSignature(tx); err != nil {
 		return fmt.Errorf("signature validation failed: %v", err)

@@ -15,6 +15,7 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/thrylos-labs/go-thrylos/config"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/storage"
 
 	"github.com/thrylos-labs/go-thrylos/crypto"
@@ -168,6 +169,21 @@ func (am *AccountManager) UpdateAccount(account *core.Account) error {
 	if account == nil {
 		return fmt.Errorf("account cannot be nil")
 	}
+	if err := coremath.SyncUint256ForWrite(&account.BalanceBytes, &account.Balance); err != nil {
+		return fmt.Errorf("invalid account balance: %w", err)
+	}
+	if err := coremath.SyncUint256ForWrite(&account.StakedAmountBytes, &account.StakedAmount); err != nil {
+		return fmt.Errorf("invalid staked amount: %w", err)
+	}
+	if err := coremath.SyncUint256ForWrite(&account.RewardsBytes, &account.Rewards); err != nil {
+		return fmt.Errorf("invalid rewards amount: %w", err)
+	}
+	delegatedToBytes, delegatedTo, err := coremath.SyncUint256MapForWrite(account.DelegatedToBytes, account.DelegatedTo)
+	if err != nil {
+		return fmt.Errorf("invalid delegated amounts: %w", err)
+	}
+	account.DelegatedToBytes = delegatedToBytes
+	account.DelegatedTo = delegatedTo
 
 	if err := am.ValidateAccount(account); err != nil {
 		return fmt.Errorf("account validation failed: %v", err)
@@ -201,18 +217,27 @@ func (am *AccountManager) ValidateAccount(account *core.Account) error {
 	// ✅ Fix: Use BigInt comparisons
 	zero := big.NewInt(0)
 
-	bal, _ := new(big.Int).SetString(account.Balance, 10)
-	if bal != nil && bal.Cmp(zero) < 0 {
+	bal, err := coremath.ParseUint256Compat(account.BalanceBytes, account.Balance)
+	if err != nil {
+		return fmt.Errorf("invalid account balance: %w", err)
+	}
+	if bal.Cmp(zero) < 0 {
 		return fmt.Errorf("account balance cannot be negative: %s", account.Balance)
 	}
 
-	staked, _ := new(big.Int).SetString(account.StakedAmount, 10)
-	if staked != nil && staked.Cmp(zero) < 0 {
+	staked, err := coremath.ParseUint256Compat(account.StakedAmountBytes, account.StakedAmount)
+	if err != nil {
+		return fmt.Errorf("invalid staked amount: %w", err)
+	}
+	if staked.Cmp(zero) < 0 {
 		return fmt.Errorf("staked amount cannot be negative: %s", account.StakedAmount)
 	}
 
-	rewards, _ := new(big.Int).SetString(account.Rewards, 10)
-	if rewards != nil && rewards.Cmp(zero) < 0 {
+	rewards, err := coremath.ParseUint256Compat(account.RewardsBytes, account.Rewards)
+	if err != nil {
+		return fmt.Errorf("invalid rewards amount: %w", err)
+	}
+	if rewards.Cmp(zero) < 0 {
 		return fmt.Errorf("rewards cannot be negative: %s", account.Rewards)
 	}
 
@@ -222,17 +247,20 @@ func (am *AccountManager) ValidateAccount(account *core.Account) error {
 			return fmt.Errorf("invalid validator address %s: %v", validator, err)
 		}
 
-		amount, _ := new(big.Int).SetString(amountStr, 10)
-		if amount == nil || amount.Sign() <= 0 {
+		amount, err := coremath.ParseUint256Compat(account.DelegatedToBytes[validator], amountStr)
+		if err != nil {
+			return fmt.Errorf("invalid delegation amount to %s: %w", validator, err)
+		}
+		if amount.Sign() <= 0 {
 			return fmt.Errorf("delegation amount to %s must be positive: %s", validator, amountStr)
 		}
 		totalDelegated.Add(totalDelegated, amount)
 	}
 
 	// Check if totalDelegated > StakedAmount
-	stakedVal, _ := new(big.Int).SetString(account.StakedAmount, 10)
-	if stakedVal == nil {
-		stakedVal = big.NewInt(0)
+	stakedVal, err := coremath.ParseUint256Compat(account.StakedAmountBytes, account.StakedAmount)
+	if err != nil {
+		return fmt.Errorf("invalid staked amount: %w", err)
 	}
 
 	if totalDelegated.Cmp(stakedVal) > 0 {

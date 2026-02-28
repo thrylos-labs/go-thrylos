@@ -70,6 +70,9 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 	if tx == nil {
 		return nil, fmt.Errorf("transaction cannot be nil")
 	}
+	if err := normalizeTransactionAmounts(tx); err != nil {
+		return nil, fmt.Errorf("invalid transaction amounts: %w", err)
+	}
 
 	// Create initial receipt
 	receipt := &ExecutionReceipt{
@@ -248,20 +251,14 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 	contract := common.HexToAddress(tx.To)
 
 	// 3. 🛡️ INPUT VALIDATION (Medium): Strict Amount Parsing
-	value := new(big.Int)
-	if _, ok := value.SetString(tx.Amount, 10); !ok {
-		return nil, fmt.Errorf("invalid transaction amount: %s", tx.Amount)
-	}
-	if value.Sign() < 0 {
-		return nil, fmt.Errorf("transaction amount cannot be negative")
+	value, err := math.ParseUint256Decimal(tx.Amount)
+	if err != nil {
+		return nil, fmt.Errorf("invalid transaction amount: %w", err)
 	}
 
-	gasPrice := new(big.Int)
-	if _, ok := gasPrice.SetString(tx.GasPrice, 10); !ok {
-		return nil, fmt.Errorf("invalid gas price: %s", tx.GasPrice)
-	}
-	if gasPrice.Sign() < 0 {
-		return nil, fmt.Errorf("gas price cannot be negative")
+	gasPrice, err := math.ParseUint256Decimal(tx.GasPrice)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gas price: %w", err)
 	}
 
 	// 4. 🛡️ SECURITY FIX (H-02): Fetch Nonce EARLY
@@ -361,20 +358,14 @@ func (e *Executor) executeEVMDeploy(tx *core.Transaction) error {
 	}
 
 	deployer := common.HexToAddress(tx.From)
-	value := new(big.Int)
-	if _, ok := value.SetString(tx.Amount, 10); !ok {
-		return fmt.Errorf("invalid transaction amount: %s", tx.Amount)
-	}
-	if value.Sign() < 0 {
-		return fmt.Errorf("transaction amount cannot be negative")
+	value, err := math.ParseUint256Decimal(tx.Amount)
+	if err != nil {
+		return fmt.Errorf("invalid transaction amount: %w", err)
 	}
 
-	gasPrice := new(big.Int)
-	if _, ok := gasPrice.SetString(tx.GasPrice, 10); !ok {
-		return fmt.Errorf("invalid gas price: %s", tx.GasPrice)
-	}
-	if gasPrice.Sign() < 0 {
-		return fmt.Errorf("gas price cannot be negative")
+	gasPrice, err := math.ParseUint256Decimal(tx.GasPrice)
+	if err != nil {
+		return fmt.Errorf("invalid gas price: %w", err)
 	}
 
 	nonce, err := e.worldState.GetNonce(tx.From)

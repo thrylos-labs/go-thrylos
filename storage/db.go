@@ -51,6 +51,10 @@ func (db *DB) Close() error {
 
 // Block operations
 func (db *DB) SaveBlock(block *core.Block) error {
+	if err := syncBlockCompatForWrite(block); err != nil {
+		return fmt.Errorf("failed to normalize block amounts: %v", err)
+	}
+
 	data, err := json.Marshal(block)
 	if err != nil {
 		return fmt.Errorf("failed to marshal block: %v", err)
@@ -69,12 +73,19 @@ func (db *DB) GetBlock(hash string) (*core.Block, error) {
 	if err := json.Unmarshal(data, &block); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal block: %v", err)
 	}
+	if err := normalizeBlockCompat(&block); err != nil {
+		return nil, fmt.Errorf("failed to normalize block amounts: %v", err)
+	}
 
 	return &block, nil
 }
 
 // Transaction operations
 func (db *DB) SaveTransaction(tx *core.Transaction) error {
+	if err := syncTransactionCompatForWrite(tx); err != nil {
+		return fmt.Errorf("failed to normalize transaction amounts: %v", err)
+	}
+
 	data, err := json.Marshal(tx)
 	if err != nil {
 		return fmt.Errorf("failed to marshal transaction: %v", err)
@@ -93,6 +104,9 @@ func (db *DB) GetTransaction(hash string) (*core.Transaction, error) {
 	if err := json.Unmarshal(data, &tx); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal transaction: %v", err)
 	}
+	if err := normalizeTransactionCompat(&tx); err != nil {
+		return nil, fmt.Errorf("failed to normalize transaction amounts: %v", err)
+	}
 
 	return &tx, nil
 }
@@ -101,6 +115,10 @@ func (db *DB) GetTransaction(hash string) (*core.Transaction, error) {
 // Update the method signature to include totalTransactions
 func (db *DB) CommitBlock(block *core.Block, accounts []*core.Account, validators []*core.Validator, totalTransactions int64) error {
 	return db.storage.Update(func(txn Transaction) error {
+		if err := syncBlockCompatForWrite(block); err != nil {
+			return fmt.Errorf("failed to normalize block amounts: %v", err)
+		}
+
 		// Save block
 		blockData, _ := json.Marshal(block)
 		if err := txn.Set(BlockKey(block.Hash), blockData); err != nil {
@@ -119,6 +137,9 @@ func (db *DB) CommitBlock(block *core.Block, accounts []*core.Account, validator
 
 		// Save accounts
 		for _, account := range accounts {
+			if err := syncAccountCompatForWrite(account); err != nil {
+				return fmt.Errorf("failed to normalize account amounts: %v", err)
+			}
 			accountData, _ := json.Marshal(account)
 			if err := txn.Set(AccountKey(account.Address), accountData); err != nil {
 				return err
@@ -127,6 +148,9 @@ func (db *DB) CommitBlock(block *core.Block, accounts []*core.Account, validator
 
 		// Save validators
 		for _, validator := range validators {
+			if err := syncValidatorCompatForWrite(validator); err != nil {
+				return fmt.Errorf("failed to normalize validator amounts: %v", err)
+			}
 			validatorData, _ := json.Marshal(validator)
 			if err := txn.Set(ValidatorKey(validator.Address), validatorData); err != nil {
 				return err
@@ -142,6 +166,10 @@ func (db *DB) CommitBlock(block *core.Block, accounts []*core.Account, validator
 // SaveTransactionWithIndex saves a transaction and creates address indexes
 func (db *DB) SaveTransactionWithIndex(tx *core.Transaction) error {
 	return db.storage.Update(func(txn Transaction) error {
+		if err := syncTransactionCompatForWrite(tx); err != nil {
+			return fmt.Errorf("failed to normalize transaction amounts: %v", err)
+		}
+
 		// Save the transaction itself
 		txData, err := json.Marshal(tx)
 		if err != nil {
@@ -274,6 +302,9 @@ func (db *DB) SaveBlockByHeight(block *core.Block) error {
 	if block == nil || block.Header == nil {
 		return fmt.Errorf("block or header is nil")
 	}
+	if err := syncBlockCompatForWrite(block); err != nil {
+		return fmt.Errorf("failed to normalize block amounts: %w", err)
+	}
 
 	data, err := json.Marshal(block) // or proto.Marshal if you're using protobuf
 	if err != nil {
@@ -292,6 +323,9 @@ func (db *DB) GetBlockByHeight(height int64) (*core.Block, error) {
 	var block core.Block
 	if err := json.Unmarshal(data, &block); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal block by height %d: %w", height, err)
+	}
+	if err := normalizeBlockCompat(&block); err != nil {
+		return nil, fmt.Errorf("failed to normalize block amounts by height %d: %w", height, err)
 	}
 
 	return &block, nil
