@@ -1201,6 +1201,17 @@ func (ce *ConsensusEngine) handleVote(vote *Vote) {
 		return
 	}
 
+	if err := ce.slashingManager.ProcessVote(vote); err != nil {
+		fmt.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n", vote.ValidatorAddress, err)
+		if svErr, ok := err.(*SurroundVotingError); ok {
+			if slashErr := ce.slashingManager.ApplySurroundVoteSlashing(svErr.InnerVote, svErr.OuterVote); slashErr != nil {
+				log.Printf("❌ Failed to apply surround-vote slashing: %v", slashErr)
+			}
+		}
+
+		return
+	}
+
 	// 2. Persist Vote
 	storageVote := &types.Vote{
 		ValidatorAddress: vote.ValidatorAddress,

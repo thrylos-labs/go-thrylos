@@ -362,6 +362,9 @@ func (v *Validator) validateSignature(tx *core.Transaction) error {
 	if len(tx.Signature) == 0 {
 		return fmt.Errorf("transaction signature cannot be empty")
 	}
+	if err := validateCanonicalSignature(tx.Signature); err != nil {
+		return err
+	}
 	// ==================== V3 ENHANCEMENT ====================
 	// Validate chain ID before signature verification
 	if err := ValidateChainIDMatch(tx.ChainId, v.config.Network.ChainID); err != nil {
@@ -395,6 +398,18 @@ func (v *Validator) validateSignature(tx *core.Transaction) error {
 	// Delegate to existing verification logic (also checks address ↔ pubkey match)
 	if err := v.VerifyTransactionSignature(tx, pubKey); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func validateCanonicalSignature(signatureBytes []byte) error {
+	signature, err := crypto.SignatureFromBytes(signatureBytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse signature: %v", err)
+	}
+	if !signature.IsNormalized() {
+		return fmt.Errorf("transaction signature is malleable (high-S value)")
 	}
 
 	return nil

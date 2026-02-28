@@ -56,6 +56,22 @@ func (e *DoubleSigningError) Error() string {
 	return fmt.Sprintf("double signing detected against block %s", e.ConflictingRecord.BlockHash)
 }
 
+// SurroundVotingError carries the surrounding and surrounded votes.
+type SurroundVotingError struct {
+	InnerVote *Vote
+	OuterVote *Vote
+}
+
+func (e *SurroundVotingError) Error() string {
+	return fmt.Sprintf(
+		"surround voting detected: %d<%d<%d<%d",
+		e.OuterVote.SourceEpoch,
+		e.InnerVote.SourceEpoch,
+		e.InnerVote.TargetEpoch,
+		e.OuterVote.TargetEpoch,
+	)
+}
+
 // SlashingManager handles all slashing-related operations
 type SlashingManager struct {
 	config     *storage.SlashingConfig
@@ -63,6 +79,9 @@ type SlashingManager struct {
 
 	// Track all attestations by validator for double voting detection
 	attestationsByValidator map[string][]*storage.AttestationRecord
+
+	// Track votes by validator for surround-voting detection.
+	votesByValidator map[string][]*Vote
 
 	// Track jailed validators
 	jailedValidators map[string]*storage.JailedValidator
@@ -130,6 +149,7 @@ func NewSlashingManager(
 		config:                  config,
 		policy:                  policy,
 		attestationsByValidator: make(map[string][]*storage.AttestationRecord),
+		votesByValidator:        make(map[string][]*Vote),
 		jailedValidators:        make(map[string]*storage.JailedValidator),
 		slashingRecords:         make(map[string][]*types.SlashingRecord),
 		attestationHistory:      make(map[string]*storage.AttestationHistory),
@@ -362,6 +382,57 @@ func (sm *SlashingManager) loadFromStorage() error {
 	return nil
 }
 
+// ProcessVote checks a vote for surround-voting offenses.
+func (sm *SlashingManager) ProcessVote(vote *Vote) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if vote == nil {
+		return fmt.Errorf("vote cannot be nil")
+	}
+
+	if sm.worldState != nil && sm.worldState.GetHeight() < 100 {
+		return nil
+	}
+
+	if sm.votesByValidator == nil {
+		sm.votesByValidator = make(map[string][]*Vote)
+	}
+
+	validatorAddress := vote.ValidatorAddress
+	if sm.isValidatorJailed(validatorAddress) {
+		return fmt.Errorf("validator %s is jailed and cannot vote", validatorAddress)
+	}
+
+	prevVotes := sm.votesByValidator[validatorAddress]
+	for _, prev := range prevVotes {
+		if prev == nil {
+			continue
+		}
+
+		switch {
+		case vote.SourceEpoch < prev.SourceEpoch && vote.TargetEpoch > prev.TargetEpoch:
+			return &SurroundVotingError{
+				InnerVote: cloneVote(prev),
+				OuterVote: cloneVote(vote),
+			}
+		case prev.SourceEpoch < vote.SourceEpoch && prev.TargetEpoch > vote.TargetEpoch:
+			return &SurroundVotingError{
+				InnerVote: cloneVote(vote),
+				OuterVote: cloneVote(prev),
+			}
+		}
+	}
+
+	sm.votesByValidator[validatorAddress] = append(sm.votesByValidator[validatorAddress], cloneVote(vote))
+	if len(sm.votesByValidator[validatorAddress]) > 1000 {
+		votes := sm.votesByValidator[validatorAddress]
+		sm.votesByValidator[validatorAddress] = votes[len(votes)-1000:]
+	}
+
+	return nil
+}
+
 // ProcessAttestation checks an attestation for slashable offenses
 func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 	sm.mu.Lock()
@@ -469,6 +540,19 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 	return nil
 }
 
+func cloneVote(vote *Vote) *Vote {
+	if vote == nil {
+		return nil
+	}
+
+	cloned := *vote
+	if vote.Signature != nil {
+		cloned.Signature = append([]byte(nil), vote.Signature...)
+	}
+
+	return &cloned
+}
+
 // ApplyDoubleVoteSlashing is called by ConsensusEngine AFTER evidence verification.
 func (sm *SlashingManager) ApplyDoubleVoteSlashing(att1, att2 *types.Attestation) error {
 	sm.mu.Lock()
@@ -499,6 +583,81 @@ func (sm *SlashingManager) ApplyDoubleVoteSlashing(att1, att2 *types.Attestation
 	}
 
 	return sm.slashDoubleVoting(att1, rec1, rec2)
+}
+
+// ApplySurroundVoteSlashing applies the configured surround-voting penalty.
+func (sm *SlashingManager) ApplySurroundVoteSlashing(inner, outer *Vote) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if inner == nil || outer == nil {
+		return fmt.Errorf("ApplySurroundVoteSlashing: nil vote")
+	}
+
+	if inner.ValidatorAddress != outer.ValidatorAddress {
+		return fmt.Errorf("ApplySurroundVoteSlashing: votes from different validators")
+	}
+
+	if !(outer.SourceEpoch < inner.SourceEpoch && outer.TargetEpoch > inner.TargetEpoch) {
+		return fmt.Errorf("ApplySurroundVoteSlashing: votes do not form a surround-vote pair")
+	}
+
+	validatorAddress := inner.ValidatorAddress
+
+	evidence := types.SlashingEvidence{
+		SurroundedAttestation: &types.Attestation{
+			ValidatorAddress: inner.ValidatorAddress,
+			BlockHash:        inner.TargetBlockHash,
+			BlockHeight:      int64(inner.TargetEpoch * 32),
+			Epoch:            inner.TargetEpoch,
+			Slot:             inner.TargetEpoch * 32,
+			Signature:        append([]byte(nil), inner.Signature...),
+			Timestamp:        time.Now().Unix(),
+		},
+		SurroundingAttestation: &types.Attestation{
+			ValidatorAddress: outer.ValidatorAddress,
+			BlockHash:        outer.TargetBlockHash,
+			BlockHeight:      int64(outer.TargetEpoch * 32),
+			Epoch:            outer.TargetEpoch,
+			Slot:             outer.TargetEpoch * 32,
+			Signature:        append([]byte(nil), outer.Signature...),
+			Timestamp:        time.Now().Unix(),
+		},
+	}
+
+	evidenceHash := evidence.Hash()
+	if sm.processedEvidence[evidenceHash] {
+		return fmt.Errorf("already slashed for this offense")
+	}
+
+	balance, err := sm.worldState.GetBalance(validatorAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get validator balance: %w", err)
+	}
+
+	penaltyPercent := int64(sm.config.SurroundVotingPenalty)
+	penaltyAmountBig, err := coremath.SafePercentageBig(balance, penaltyPercent)
+	if err != nil {
+		return fmt.Errorf("failed to calculate penalty: %v", err)
+	}
+
+	record := &types.SlashingRecord{
+		ValidatorAddress: validatorAddress,
+		Condition:        types.SurroundVoting,
+		Epoch:            outer.TargetEpoch,
+		Timestamp:        time.Now(),
+		Evidence:         evidence,
+		SlashedAmount:    penaltyAmountBig.Int64(),
+		Reason: fmt.Sprintf(
+			"Surround voting: %d<%d<%d<%d",
+			outer.SourceEpoch,
+			inner.SourceEpoch,
+			inner.TargetEpoch,
+			outer.TargetEpoch,
+		),
+	}
+
+	return sm.applySlashing(record)
 }
 
 // ReportBlockWithholding penalizes a validator for consecutively failing to propose blocks

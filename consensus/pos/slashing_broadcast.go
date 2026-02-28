@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"sync"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
@@ -17,27 +18,28 @@ import (
 
 // EvidenceTracker tracks processed slashing evidence to prevent duplicates
 type EvidenceTracker struct {
-	mu              sync.RWMutex
-	processedHashes map[string]bool // Hash -> processed
-	evidenceByID    map[string]*SlashingEvidence
-	maxTrackedSize  int
+	mu           sync.RWMutex
+	evidenceByID *lru.Cache[string, *SlashingEvidence]
 }
 
 // NewEvidenceTracker creates a new evidence tracker
 func NewEvidenceTracker() *EvidenceTracker {
+	cache, err := lru.New[string, *SlashingEvidence](10000)
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialize evidence tracker cache: %v", err))
+	}
+
 	return &EvidenceTracker{
-		processedHashes: make(map[string]bool),
-		evidenceByID:    make(map[string]*SlashingEvidence),
-		maxTrackedSize:  10000, // Track last 10k evidence items
+		evidenceByID: cache,
 	}
 }
 
 // IsProcessed checks if evidence has been processed
 func (et *EvidenceTracker) IsProcessed(evidenceID string) bool {
-	et.mu.RLock()
-	defer et.mu.RUnlock()
+	et.mu.Lock()
+	defer et.mu.Unlock()
 
-	_, exists := et.evidenceByID[evidenceID]
+	_, exists := et.evidenceByID.Get(evidenceID)
 	return exists
 }
 
@@ -46,28 +48,8 @@ func (et *EvidenceTracker) MarkProcessed(evidence *SlashingEvidence) {
 	et.mu.Lock()
 	defer et.mu.Unlock()
 
-	et.processedHashes[evidence.Hash()] = true
-	et.evidenceByID[evidence.ID] = evidence
-
-	// Cleanup if too many entries
-	if len(et.evidenceByID) > et.maxTrackedSize {
-		et.cleanup()
-	}
-}
-
-// cleanup removes old evidence (FIFO)
-func (et *EvidenceTracker) cleanup() {
-	// Remove oldest 20% of entries
-	toRemove := et.maxTrackedSize / 5
-	removed := 0
-
-	for id := range et.evidenceByID {
-		if removed >= toRemove {
-			break
-		}
-		delete(et.evidenceByID, id)
-		removed++
-	}
+	// Add updates recency and evicts the least recently used evidence deterministically.
+	et.evidenceByID.Add(evidence.ID, evidence)
 }
 
 // ============================================================================
