@@ -10,24 +10,26 @@
 //      (Go must never call free() on these pointers directly).
 //   4. Added revm_free_return_data for symmetric return-data deallocation.
 
-use std::ffi::{CStr, CString};
+use crate::memory_tracker::get_memory_tracker;
+#[cfg(test)]
+use std::ffi::CStr;
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{self, UnwindSafe};
-use crate::memory_tracker::get_memory_tracker;
 
 /// FFI-safe error code returned in every FFIResult.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FFIErrorCode {
-    Success          = 0,
-    PanicCaught      = 1,
-    InvalidInput     = 2,
-    ExecutionFailed  = 3,
+    Success = 0,
+    PanicCaught = 1,
+    InvalidInput = 2,
+    ExecutionFailed = 3,
     #[allow(dead_code)]
-    OutOfGas         = 4,
-    Revert           = 5,
+    OutOfGas = 4,
+    Revert = 5,
     #[allow(dead_code)]
-    MemoryError      = 6,
+    MemoryError = 6,
 }
 
 /// FFI-safe result wrapper.
@@ -44,8 +46,8 @@ pub enum FFIErrorCode {
 ///   do not read from or pass it again.
 #[repr(C)]
 pub struct FFIResult<T> {
-    pub value:         T,
-    pub error_code:    FFIErrorCode,
+    pub value: T,
+    pub error_code: FFIErrorCode,
     pub error_message: *mut c_char,
 }
 
@@ -53,7 +55,7 @@ impl<T: Default> FFIResult<T> {
     pub fn success(value: T) -> Self {
         FFIResult {
             value,
-            error_code:    FFIErrorCode::Success,
+            error_code: FFIErrorCode::Success,
             error_message: std::ptr::null_mut(),
         }
     }
@@ -73,8 +75,8 @@ impl<T: Default> FFIResult<T> {
         get_memory_tracker().track_error_message(ptr);
 
         FFIResult {
-            value:         T::default(),
-            error_code:    code,
+            value: T::default(),
+            error_code: code,
             error_message: ptr,
         }
     }
@@ -105,7 +107,10 @@ where
             } else {
                 "Unknown panic".to_string()
             };
-            eprintln!("🚨 CRITICAL: Rust panic caught at FFI boundary: {}", panic_msg);
+            eprintln!(
+                "🚨 CRITICAL: Rust panic caught at FFI boundary: {}",
+                panic_msg
+            );
             FFIResult::error(FFIErrorCode::PanicCaught, &panic_msg)
         }
     }
@@ -128,6 +133,7 @@ where
 /// # FIND-07 note
 /// Use this wrapper instead of calling `CStr::from_ptr()` directly. It
 /// centralises null-checking and documents the lifetime requirement explicitly.
+#[cfg(test)]
 pub(crate) unsafe fn c_str_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
         return None;
@@ -212,7 +218,8 @@ mod tests {
 
     #[test]
     fn test_double_free_is_prevented() {
-        let result: FFIResult<i32> = FFIResult::error(FFIErrorCode::PanicCaught, "double free test");
+        let result: FFIResult<i32> =
+            FFIResult::error(FFIErrorCode::PanicCaught, "double free test");
         let ptr = result.error_message;
         revm_free_error_message(ptr);
         // Second call must not cause UB — memory tracker blocks it
@@ -226,7 +233,8 @@ mod tests {
 
     #[test]
     fn test_nul_byte_in_error_message_does_not_panic() {
-        let result: FFIResult<i32> = FFIResult::error(FFIErrorCode::ExecutionFailed, "error\0with nul");
+        let result: FFIResult<i32> =
+            FFIResult::error(FFIErrorCode::ExecutionFailed, "error\0with nul");
         assert!(!result.error_message.is_null());
         revm_free_error_message(result.error_message);
     }

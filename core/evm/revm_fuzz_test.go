@@ -208,7 +208,7 @@ func TestAtomicNonce_Final(t *testing.T) {
 		mockState.SetNonce(deployer.Hex(), 0)
 
 		bytecode := []byte{0x60, 0x00, 0x60, 0x00, 0xf3}
-		executor.DeployContract(deployer, bytecode, 1000000, big.NewInt(0))
+		executor.DeployContract(deployer, bytecode, 1000000, big.NewInt(0), 0)
 
 		checks, _, _ := mockState.GetStats()
 		assert.Greater(t, checks, int64(0), "Deployment must use atomic nonce")

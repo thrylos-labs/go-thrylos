@@ -26,7 +26,7 @@ func TestCanonicalBlockHash_GenesisLikeBlock(t *testing.T) {
 		t.Fatalf("CanonicalBlockHash returned error: %v", err)
 	}
 
-	const want = "387949e3ae39e1e631fc4081ad2075eb7775a5b443c91e86bb87d54d77a44f7d"
+	const want = "12ff54feb3cf6b1cee32b04e747866938e74ee4c7263a7b26aa83610194715e9"
 
 	if got != want {
 		t.Fatalf("CanonicalBlockHash mismatch.\n got = %s\nwant = %s", got, want)

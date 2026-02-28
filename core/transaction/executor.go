@@ -77,13 +77,27 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 		Status:  0, // Default to failure
 	}
 
+	// EVM transactions manage nonce atomically inside the EVM execution path.
+	// This avoids double-incrementing nonces between the generic executor and REVM.
+	switch tx.Type {
+	case core.TransactionType_EVM_CONTRACT_CALL:
+		return e.executeEVMCall(tx)
+	case core.TransactionType_EVM_CONTRACT_DEPLOY:
+		if err := e.executeEVMDeploy(tx); err != nil {
+			receipt.Error = err.Error()
+			return receipt, err
+		}
+		receipt.Status = 1
+		return receipt, nil
+	}
+
 	// ============================================================================
 	// CRITICAL: ATOMIC NONCE VALIDATION
 	// This prevents race conditions and double-spending
 	// ============================================================================
 
 	// Get the sender address from the transaction
-	senderAddress := tx.From // Assuming tx.From contains the sender's address as string
+	senderAddress := tx.From
 
 	// Attempt to atomically increment the nonce if it matches the expected value
 	success, currentNonce, err := e.stateStorage.AtomicIncrementNonce(senderAddress, tx.Nonce)
@@ -125,16 +139,6 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 		execErr = e.executeUndelegate(tx, accountManager)
 	case core.TransactionType_CLAIM_REWARDS:
 		execErr = e.executeClaimRewards(tx, accountManager)
-
-	// EVM CASES
-	case core.TransactionType_EVM_CONTRACT_CALL:
-		// executeEVMCall returns (receipt, error), so we return immediately
-		// Note: Nonce is already incremented above, so we're safe
-		return e.executeEVMCall(tx)
-
-	case core.TransactionType_EVM_CONTRACT_DEPLOY:
-		// executeEVMDeploy returns ONLY error. We must assign it to execErr.
-		execErr = e.executeEVMDeploy(tx)
 
 	default:
 		execErr = fmt.Errorf("unknown transaction type: %v", tx.Type)
@@ -284,8 +288,50 @@ func (e *Executor) executeEVMCall(tx *core.Transaction) (*ExecutionReceipt, erro
 }
 
 func (e *Executor) executeEVMDeploy(tx *core.Transaction) error {
+	if tx.ChainId != e.config.Network.ChainID {
+		return fmt.Errorf("CRITICAL: Replay protection failed. Tx ChainID '%s' != Node ChainID '%s'", tx.ChainId, e.config.Network.ChainID)
+	}
+
 	deployer := common.HexToAddress(tx.From)
-	value := math.ParseBigInt(tx.Amount)
+	value := new(big.Int)
+	if _, ok := value.SetString(tx.Amount, 10); !ok {
+		return fmt.Errorf("invalid transaction amount: %s", tx.Amount)
+	}
+	if value.Sign() < 0 {
+		return fmt.Errorf("transaction amount cannot be negative")
+	}
+
+	gasPrice := new(big.Int)
+	if _, ok := gasPrice.SetString(tx.GasPrice, 10); !ok {
+		return fmt.Errorf("invalid gas price: %s", tx.GasPrice)
+	}
+	if gasPrice.Sign() < 0 {
+		return fmt.Errorf("gas price cannot be negative")
+	}
+
+	nonce, err := e.worldState.GetNonce(tx.From)
+	if err != nil {
+		return fmt.Errorf("failed to get nonce for deployment: %v", err)
+	}
+	if tx.Nonce != nonce {
+		return fmt.Errorf("nonce mismatch: expected %d, got %d", nonce, tx.Nonce)
+	}
+
+	maxGasCost := new(big.Int).Mul(new(big.Int).SetUint64(uint64(tx.Gas)), gasPrice)
+	totalReq := new(big.Int).Add(maxGasCost, value)
+
+	balance, err := e.worldState.GetBalance(tx.From)
+	if err != nil {
+		return fmt.Errorf("failed to get balance: %v", err)
+	}
+	if balance.Cmp(totalReq) < 0 {
+		return fmt.Errorf("insufficient funds for gas + value")
+	}
+
+	newBalance := new(big.Int).Sub(balance, totalReq)
+	if err := e.worldState.UpdateBalance(tx.From, newBalance); err != nil {
+		return fmt.Errorf("failed to reserve balance for deployment: %v", err)
+	}
 
 	// Deploy contract
 	contractAddr, gasUsed, err := e.evmExecutor.DeployContract(
@@ -293,30 +339,36 @@ func (e *Executor) executeEVMDeploy(tx *core.Transaction) error {
 		tx.Data,
 		uint64(tx.Gas),
 		value,
+		tx.Nonce,
 	)
 
+	gasUsedBig := new(big.Int).SetUint64(gasUsed)
+	actualGasCost := new(big.Int).Mul(gasUsedBig, gasPrice)
+	gasRefund := new(big.Int).Sub(maxGasCost, actualGasCost)
+
+	if gasRefund.Sign() > 0 {
+		currentBalance, balErr := e.worldState.GetBalance(tx.From)
+		if balErr != nil {
+			log.Printf("⚠️ Warning: failed to get balance for gas refund: %v", balErr)
+		} else {
+			refundedBalance := new(big.Int).Add(currentBalance, gasRefund)
+			if updErr := e.worldState.UpdateBalance(tx.From, refundedBalance); updErr != nil {
+				log.Printf("⚠️ Warning: failed to apply gas refund: %v", updErr)
+			}
+		}
+	}
+
 	if err != nil {
+		currentBalance, balErr := e.worldState.GetBalance(tx.From)
+		if balErr != nil {
+			return fmt.Errorf("contract deployment failed and refund lookup failed: %v", balErr)
+		}
+		refundedBalance := new(big.Int).Add(currentBalance, value)
+		if updErr := e.worldState.UpdateBalance(tx.From, refundedBalance); updErr != nil {
+			return fmt.Errorf("contract deployment failed and value refund failed: %v", updErr)
+		}
 		return fmt.Errorf("contract deployment failed: %v", err)
 	}
-
-	// Deduct gas cost
-	gasUsedBig := new(big.Int).SetUint64(gasUsed)
-	gasPriceBig := math.ParseBigInt(tx.GasPrice)
-	gasCostBig := new(big.Int).Mul(gasUsedBig, gasPriceBig)
-
-	// Fetch Balance
-	balanceBig, err := e.worldState.GetBalance(tx.From)
-	if err != nil {
-		return fmt.Errorf("failed to get balance for gas deduction: %v", err)
-	}
-
-	if balanceBig.Cmp(gasCostBig) < 0 {
-		return fmt.Errorf("insufficient balance for deployment gas")
-	}
-
-	// Update Balance
-	balanceBig.Sub(balanceBig, gasCostBig)
-	e.worldState.UpdateBalance(tx.From, balanceBig)
 
 	log.Printf("✅ Contract deployed at %s, gas used: %d",
 		contractAddr.Hex(), gasUsed)

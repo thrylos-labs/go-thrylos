@@ -28,7 +28,7 @@ type EVMExecutorInterface interface {
 	ExecuteCall(caller, contract common.Address, input []byte, gas uint64, value *big.Int, nonce uint64) ([]byte, uint64, error)
 
 	// ... keep other methods (like DeployContract, EstimateGas) as they were
-	DeployContract(deployer common.Address, bytecode []byte, gas uint64, value *big.Int) (common.Address, uint64, error)
+	DeployContract(deployer common.Address, bytecode []byte, gas uint64, value *big.Int, nonce uint64) (common.Address, uint64, error)
 	EstimateGas(from common.Address, to *common.Address, data []byte, value *big.Int) (uint64, error)
 	GetNonce(address common.Address) uint64
 }

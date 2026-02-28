@@ -142,6 +142,11 @@ func (e *RevmExecutor) CheckAndReserveGas(gasLimit uint64) error {
 	e.gasTrackingMu.Lock()
 	defer e.gasTrackingMu.Unlock()
 
+	if e.blockGasLimit == 0 {
+		e.blockGasUsed += gasLimit
+		return nil
+	}
+
 	if e.blockGasUsed+gasLimit > e.blockGasLimit {
 		return fmt.Errorf("block gas limit exceeded: used %d + requested %d > limit %d",
 			e.blockGasUsed, gasLimit, e.blockGasLimit)
@@ -275,7 +280,7 @@ func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte
 }
 
 // DeployContract deploys a new contract with atomic nonce validation
-func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, gas uint64, value *big.Int) (common.Address, uint64, error) {
+func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, gas uint64, value *big.Int, nonce uint64) (common.Address, uint64, error) {
 	// SECURITY: Validate gas parameter
 	const maxGasLimit = 30000000
 	const minDeploymentGas = 100000
@@ -297,14 +302,7 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 		return common.Address{}, 0, fmt.Errorf("block gas limit check failed: %w", err)
 	}
 
-	// Get current nonce for address calculation
-	nonce, err := e.worldState.GetNonce(deployer.Hex())
-	if err != nil {
-		e.RefundGas(gas) // ✅ FIX: Refund on early error
-		return common.Address{}, 0, fmt.Errorf("failed to get nonce: %w", err)
-	}
-
-	// CRITICAL: ATOMIC NONCE VALIDATION (handled by Go side)
+	// CRITICAL: ATOMIC NONCE VALIDATION
 	success, currentNonce, err := e.worldState.AtomicIncrementNonce(deployer.Hex(), nonce)
 
 	if err != nil {

@@ -321,11 +321,32 @@ func (bc *Blockchain) addBlockFromSyncUnsafe(block *core.Block) error {
 		return fmt.Errorf("block structure validation failed: %v", err)
 	}
 
+	// Sync path still requires full consensus validation. Skipping this lets peers
+	// inject structurally valid but consensus-invalid blocks during catch-up.
+	if bc.consensusEngine != nil {
+		if err := bc.consensusEngine.ValidateBlock(block); err != nil {
+			return fmt.Errorf("sync consensus validation failed: %v", err)
+		}
+	}
+
+	// Consensus validation skips state-root simulation while the node is marked syncing.
+	// Recompute it explicitly here before mutating local state.
+	if block.Header.Index > 0 {
+		simulatedRoot, err := bc.worldState.SimulateStateRoot(block)
+		if err != nil {
+			return fmt.Errorf("sync state root simulation failed: %v", err)
+		}
+		if block.Header.StateRoot != simulatedRoot {
+			return fmt.Errorf("sync state root mismatch: block=%s simulated=%s",
+				block.Header.StateRoot, simulatedRoot)
+		}
+	}
+
 	if existingBlock := bc.worldState.GetCurrentBlock(); existingBlock != nil && existingBlock.Hash == block.Hash {
 		return fmt.Errorf("block %s already exists", block.Hash)
 	}
 
-	if err := bc.worldState.AddBlock(block); err != nil {
+	if err := bc.worldState.AddBlockFromSync(block); err != nil {
 		return fmt.Errorf("world state block addition failed: %v", err)
 	}
 
@@ -605,10 +626,15 @@ func (bc *Blockchain) ReorganizeChain(newBlocks []*core.Block) error {
 		return fmt.Errorf("no blocks to reorganize")
 	}
 
+	maxDepth := bc.maxReorgDepth
+	if maxDepth <= 0 {
+		maxDepth = MaxReorgDepth
+	}
+
 	// 🔒 SAFETY CHECK 1: Enforce maximum reorg depth
-	if len(newBlocks) > MaxReorgDepth {
+	if int64(len(newBlocks)) > maxDepth {
 		return fmt.Errorf("reorg too deep: %d blocks exceeds maximum %d",
-			len(newBlocks), MaxReorgDepth)
+			len(newBlocks), maxDepth)
 	}
 
 	firstNewBlock := newBlocks[0]
@@ -622,8 +648,8 @@ func (bc *Blockchain) ReorganizeChain(newBlocks []*core.Block) error {
 	// 🔒 SAFETY CHECK 2: Calculate actual reorg depth
 	currentHead := bc.worldState.GetCurrentBlock()
 	reorgDepth := currentHead.Header.Index - commonAncestor.Header.Index
-	if reorgDepth > int64(MaxReorgDepth) {
-		return fmt.Errorf("reorg depth %d exceeds maximum %d", reorgDepth, MaxReorgDepth)
+	if reorgDepth > maxDepth {
+		return fmt.Errorf("reorg depth %d exceeds maximum %d", reorgDepth, maxDepth)
 	}
 
 	fmt.Printf("🔀 Executing Reorg: Switching from height %d to fork starting at %d (depth: %d)\n",

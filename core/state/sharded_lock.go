@@ -121,15 +121,9 @@ func (sm *ShardedMutex) LockMultiple(keys []string) {
 		return
 	}
 
-	// Get unique keys (avoid locking same key twice)
-	uniqueKeys := deduplicateKeys(keys)
-
-	// Sort keys to ensure consistent lock ordering (prevents deadlocks)
-	sortedKeys := sortKeysByHash(uniqueKeys)
-
-	// Acquire locks in order
-	for _, key := range sortedKeys {
-		sm.Lock(key)
+	shards := sm.uniqueSortedShardIndexes(keys)
+	for _, idx := range shards {
+		sm.locks[idx].Lock()
 	}
 }
 
@@ -139,15 +133,9 @@ func (sm *ShardedMutex) UnlockMultiple(keys []string) {
 		return
 	}
 
-	// Get unique keys
-	uniqueKeys := deduplicateKeys(keys)
-
-	// Sort keys (same order as lock)
-	sortedKeys := sortKeysByHash(uniqueKeys)
-
-	// Release locks in reverse order (good practice)
-	for i := len(sortedKeys) - 1; i >= 0; i-- {
-		sm.Unlock(sortedKeys[i])
+	shards := sm.uniqueSortedShardIndexes(keys)
+	for i := len(shards) - 1; i >= 0; i-- {
+		sm.locks[shards[i]].Unlock()
 	}
 }
 
@@ -157,11 +145,9 @@ func (sm *ShardedMutex) RLockMultiple(keys []string) {
 		return
 	}
 
-	uniqueKeys := deduplicateKeys(keys)
-	sortedKeys := sortKeysByHash(uniqueKeys)
-
-	for _, key := range sortedKeys {
-		sm.RLock(key)
+	shards := sm.uniqueSortedShardIndexes(keys)
+	for _, idx := range shards {
+		sm.locks[idx].RLock()
 	}
 }
 
@@ -171,11 +157,9 @@ func (sm *ShardedMutex) RUnlockMultiple(keys []string) {
 		return
 	}
 
-	uniqueKeys := deduplicateKeys(keys)
-	sortedKeys := sortKeysByHash(uniqueKeys)
-
-	for i := len(sortedKeys) - 1; i >= 0; i-- {
-		sm.RUnlock(sortedKeys[i])
+	shards := sm.uniqueSortedShardIndexes(keys)
+	for i := len(shards) - 1; i >= 0; i-- {
+		sm.locks[shards[i]].RUnlock()
 	}
 }
 
@@ -225,6 +209,29 @@ func deduplicateKeys(keys []string) []string {
 	}
 
 	return result
+}
+
+func (sm *ShardedMutex) uniqueSortedShardIndexes(keys []string) []uint32 {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	seen := make(map[uint32]struct{}, len(keys))
+	shards := make([]uint32, 0, len(keys))
+	for _, key := range deduplicateKeys(keys) {
+		idx := sm.getShardIndex(key)
+		if _, exists := seen[idx]; exists {
+			continue
+		}
+		seen[idx] = struct{}{}
+		shards = append(shards, idx)
+	}
+
+	sort.Slice(shards, func(i, j int) bool {
+		return shards[i] < shards[j]
+	})
+
+	return shards
 }
 
 // sortKeysByHash sorts keys by their hash value for consistent ordering

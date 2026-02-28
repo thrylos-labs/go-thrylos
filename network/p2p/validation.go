@@ -508,6 +508,7 @@ func (mv *MessageValidator) GetMetrics() map[string]interface{} {
 		"low_rep_peers":       lowRepPeers,
 		"system_load_percent": loadPercent,
 		"max_message_size":    mv.maxMessageSize,
+		"max_block_range":     mv.maxBlockRangeSize,
 		"max_global_pending":  mv.maxGlobalPending,
 	}
 }

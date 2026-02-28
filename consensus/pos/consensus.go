@@ -251,10 +251,13 @@ func (ce *ConsensusEngine) processSlot() {
 	// Prevents nodes from starting consensus prematurely with an incomplete validator list.
 	// Without this, Node A (knowing only itself) would pick itself for Slot 1,
 	// while Node B (knowing only itself) would also pick itself, causing an immediate fork.
-	expectedValidators := 4
-	if ce.validatorSet.Size() < expectedValidators {
+	requiredValidators := 1
+	if ce.config != nil && ce.config.Consensus.MinActiveValidators > 0 {
+		requiredValidators = ce.config.Consensus.MinActiveValidators
+	}
+	if ce.validatorSet.Size() < requiredValidators {
 		log.Printf("⏳ Waiting for validators to join... (Have %d, Need %d)",
-			ce.validatorSet.Size(), expectedValidators)
+			ce.validatorSet.Size(), requiredValidators)
 		ce.mu.Unlock() // Must unlock before returning
 		return
 	}

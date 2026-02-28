@@ -402,7 +402,7 @@ func (v *Validator) ValidateTimestamp(block *core.Block, prevBlock *core.Block, 
 
 		// 4. Drift Check
 		maxDrift := 10 * time.Minute
-		if v.config != nil {
+		if v.config != nil && v.config.Consensus.MaxBlockTimeDrift > 0 {
 			maxDrift = v.config.Consensus.MaxBlockTimeDrift
 		}
 

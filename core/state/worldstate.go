@@ -103,13 +103,28 @@ func (ws *WorldState) calculateBlockHash(b *core.Block) string {
 
 // InitializeFromConfig initializes the world state with config-driven genesis data
 func (ws *WorldState) InitializeFromConfig() error {
+	return ws.initializeFromConfig(true)
+}
 
-	fmt.Printf("🔍 InitializeFromConfig: Setting up genesis state from config...\n")
+// InitializeFromConfigQuiet bootstraps genesis state without writing to stdout.
+// Used by performance tests to keep benchmark output stable and readable.
+func (ws *WorldState) InitializeFromConfigQuiet() error {
+	return ws.initializeFromConfig(false)
+}
+
+func (ws *WorldState) initializeFromConfig(verbose bool) error {
+	logf := func(format string, args ...interface{}) {
+		if verbose {
+			fmt.Printf(format, args...)
+		}
+	}
+
+	logf("🔍 InitializeFromConfig: Setting up genesis state from config...\n")
 
 	// Check if we already have accounts (existing state)
 	accounts := ws.accountManager.GetAllAccounts()
 	if len(accounts) > 0 {
-		fmt.Printf("✅ InitializeFromConfig: Existing state found (%d accounts), skipping genesis\n", len(accounts))
+		logf("✅ InitializeFromConfig: Existing state found (%d accounts), skipping genesis\n", len(accounts))
 		return nil
 	}
 
@@ -128,7 +143,7 @@ func (ws *WorldState) InitializeFromConfig() error {
 		// Calculate readable balance for printing (Balance / BaseUnit)
 		readableBalance := new(big.Int).Div(balanceBig, baseUnit)
 
-		fmt.Printf("🏦 Creating genesis account: %s with %s tokens (%s)\n",
+		logf("🏦 Creating genesis account: %s with %s tokens (%s)\n",
 			genesisAccount.Address, readableBalance.String(), genesisAccount.Purpose)
 
 		account := &core.Account{
@@ -214,11 +229,11 @@ func (ws *WorldState) InitializeFromConfig() error {
 	// Calculate readable total supply for print
 	readableTotal := new(big.Int).Div(totalGenesisBalanceBig, baseUnit)
 
-	fmt.Printf("✅ InitializeFromConfig: Genesis state created successfully\n")
-	fmt.Printf("   - Total accounts: %d\n", len(ws.config.Genesis.Accounts))
-	fmt.Printf("   - Total supply: %s THRYLOS\n", readableTotal.String())
-	fmt.Printf("   - Genesis block: %s\n", genesisBlock.Hash)
-	fmt.Printf("   - State root: %s\n", ws.stateRoot)
+	logf("✅ InitializeFromConfig: Genesis state created successfully\n")
+	logf("   - Total accounts: %d\n", len(ws.config.Genesis.Accounts))
+	logf("   - Total supply: %s THRYLOS\n", readableTotal.String())
+	logf("   - Genesis block: %s\n", genesisBlock.Hash)
+	logf("   - State root: %s\n", ws.stateRoot)
 
 	return nil
 }
@@ -461,12 +476,22 @@ func (ws *WorldState) AddBlockFromSync(block *core.Block) error {
 	ws.lastTimestamp = block.Header.Timestamp
 	ws.totalTransactions += int64(len(block.Transactions))
 
-	// ✅ Trust the synced block's state root instead of recomputing
-	// Node 2 doesn't have genesis accounts so recomputing gives wrong result
-	ws.stateRootMu.Lock()
-	ws.stateRoot = block.Header.StateRoot
-	ws.stateRootMu.Unlock()
-	log.Printf("✅ AddBlockFromSync: set stateRoot to %s for block %d", block.Header.StateRoot, block.Header.Index)
+	if block.Header.Index == 0 {
+		ws.stateRootMu.Lock()
+		ws.stateRoot = block.Header.StateRoot
+		ws.stateRootMu.Unlock()
+		log.Printf("✅ AddBlockFromSync: accepted genesis stateRoot %s", block.Header.StateRoot)
+	} else {
+		if err := ws.updateStateRoot(); err != nil {
+			return fmt.Errorf("failed to update state root during sync: %v", err)
+		}
+		if block.Header.StateRoot != ws.stateRoot {
+			return fmt.Errorf("state root mismatch during sync: block=%s computed=%s",
+				block.Header.StateRoot, ws.stateRoot)
+		}
+		block.Header.StateRoot = ws.stateRoot
+		log.Printf("✅ AddBlockFromSync: verified stateRoot %s for block %d", ws.stateRoot, block.Header.Index)
+	}
 
 	if err := ws.db.SaveBlock(block); err != nil {
 		return fmt.Errorf("failed to save block: %v", err)
