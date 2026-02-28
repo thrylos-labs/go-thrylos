@@ -29,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/crypto"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 	"github.com/thrylos-labs/go-thrylos/config"
@@ -37,6 +37,8 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/evm"
 	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
+	"github.com/thrylos-labs/go-thrylos/core/transaction"
+	thryloscrypto "github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
@@ -111,6 +113,19 @@ type TransactionHistoryResponse struct {
 	Transactions []TransactionResponse `json:"transactions"`
 	Count        int                   `json:"count"`
 	Limit        int                   `json:"limit"`
+}
+
+type governanceTxRequest struct {
+	From          string  `json:"from"`
+	PrivateKey    string  `json:"private_key"`
+	Gas           int64   `json:"gas,omitempty"`
+	GasPrice      string  `json:"gas_price,omitempty"`
+	Nonce         *uint64 `json:"nonce,omitempty"`
+	Broadcast     bool    `json:"broadcast,omitempty"`
+	Parameter     string  `json:"parameter,omitempty"`
+	ProposedValue string  `json:"proposed_value,omitempty"`
+	ProposalID    string  `json:"proposal_id,omitempty"`
+	Approve       *bool   `json:"approve,omitempty"`
 }
 
 // NewServer creates a new API server
@@ -211,7 +226,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Decode just the Method
 	var req struct {
-		Method string `json:"method"`
+		Method string          `json:"method"`
 		ID     json.RawMessage `json:"id"`
 	}
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
@@ -458,6 +473,9 @@ func (s *Server) setupRoutes() {
 	// Staking endpoints (strict rate limiting)
 	strict.HandleFunc("/stake", s.submitStakeTransaction).Methods("POST", "OPTIONS")
 	strict.HandleFunc("/unstake", s.submitUnstakeTransaction).Methods("POST", "OPTIONS")
+	strict.HandleFunc("/governance/propose", s.submitGovernanceProposalTransaction).Methods("POST", "OPTIONS")
+	strict.HandleFunc("/governance/vote", s.submitGovernanceVoteTransaction).Methods("POST", "OPTIONS")
+	strict.HandleFunc("/governance/finalize", s.submitGovernanceFinalizeTransaction).Methods("POST", "OPTIONS")
 
 	// EVM: Send Raw Transaction (Write)
 	strictRoot.HandleFunc("/eth_sendRawTransaction", ethAPI.SendRawTransaction).Methods("POST", "OPTIONS")
@@ -886,6 +904,150 @@ func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request
 	}
 
 	s.writeJSON(w, response)
+}
+
+func (s *Server) submitGovernanceProposalTransaction(w http.ResponseWriter, r *http.Request) {
+	var req governanceTxRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := s.buildGovernanceTransaction(req, func(v *transaction.Validator, nonce uint64, gas int64, gasPrice string, privateKey thryloscrypto.PrivateKey) (*core.Transaction, error) {
+		if strings.TrimSpace(req.Parameter) == "" || strings.TrimSpace(req.ProposedValue) == "" {
+			return nil, fmt.Errorf("parameter and proposed_value are required")
+		}
+		return v.CreateGovernanceProposalTransaction(req.From, req.Parameter, req.ProposedValue, gas, gasPrice, nonce, privateKey)
+	})
+	if err != nil {
+		s.writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.respondWithConstructedGovernanceTransaction(w, tx, req.Broadcast)
+}
+
+func (s *Server) submitGovernanceVoteTransaction(w http.ResponseWriter, r *http.Request) {
+	var req governanceTxRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := s.buildGovernanceTransaction(req, func(v *transaction.Validator, nonce uint64, gas int64, gasPrice string, privateKey thryloscrypto.PrivateKey) (*core.Transaction, error) {
+		if strings.TrimSpace(req.ProposalID) == "" {
+			return nil, fmt.Errorf("proposal_id is required")
+		}
+		if req.Approve == nil {
+			return nil, fmt.Errorf("approve is required")
+		}
+		return v.CreateGovernanceVoteTransaction(req.From, req.ProposalID, *req.Approve, gas, gasPrice, nonce, privateKey)
+	})
+	if err != nil {
+		s.writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.respondWithConstructedGovernanceTransaction(w, tx, req.Broadcast)
+}
+
+func (s *Server) submitGovernanceFinalizeTransaction(w http.ResponseWriter, r *http.Request) {
+	var req governanceTxRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := s.buildGovernanceTransaction(req, func(v *transaction.Validator, nonce uint64, gas int64, gasPrice string, privateKey thryloscrypto.PrivateKey) (*core.Transaction, error) {
+		if strings.TrimSpace(req.ProposalID) == "" {
+			return nil, fmt.Errorf("proposal_id is required")
+		}
+		return v.CreateGovernanceFinalizeTransaction(req.From, req.ProposalID, gas, gasPrice, nonce, privateKey)
+	})
+	if err != nil {
+		s.writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.respondWithConstructedGovernanceTransaction(w, tx, req.Broadcast)
+}
+
+func (s *Server) buildGovernanceTransaction(
+	req governanceTxRequest,
+	builder func(v *transaction.Validator, nonce uint64, gas int64, gasPrice string, privateKey thryloscrypto.PrivateKey) (*core.Transaction, error),
+) (*core.Transaction, error) {
+	if !s.isDevEnvironment() {
+		return nil, fmt.Errorf("governance transaction construction endpoint is disabled outside development")
+	}
+	if strings.TrimSpace(req.From) == "" {
+		return nil, fmt.Errorf("from is required")
+	}
+	if strings.TrimSpace(req.PrivateKey) == "" {
+		return nil, fmt.Errorf("private_key is required")
+	}
+
+	privateKey, err := thryloscrypto.PrivateKeyFromString(req.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid private key: %w", err)
+	}
+
+	if derived := strings.ToLower(privateKey.Address().String()); derived != strings.ToLower(req.From) {
+		return nil, fmt.Errorf("private key does not match from address")
+	}
+
+	cfg := s.config
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+
+	gas := req.Gas
+	if gas <= 0 {
+		gas = 21000
+	}
+
+	gasPrice := strings.TrimSpace(req.GasPrice)
+	if gasPrice == "" {
+		gasPrice = cfg.Economics.BaseGasPrice
+	}
+
+	nonce := uint64(0)
+	if req.Nonce != nil {
+		nonce = *req.Nonce
+	} else {
+		currentNonce, err := s.worldState.GetNonce(req.From)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load account nonce: %w", err)
+		}
+		nonce = currentNonce
+	}
+
+	txValidator := transaction.NewValidator(s.worldState.GetShardID(), s.worldState.GetTotalShards(), cfg)
+	tx, err := builder(txValidator, nonce, gas, gasPrice, privateKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if req.Broadcast {
+		if err := s.worldState.AddTransaction(tx); err != nil {
+			return nil, fmt.Errorf("failed to broadcast governance transaction: %w", err)
+		}
+	}
+
+	return tx, nil
+}
+
+func (s *Server) respondWithConstructedGovernanceTransaction(w http.ResponseWriter, tx *core.Transaction, broadcast bool) {
+	status := "created"
+	if broadcast {
+		status = "accepted"
+	}
+
+	s.writeJSON(w, map[string]interface{}{
+		"status":    status,
+		"broadcast": broadcast,
+		"tx_hash":   tx.Hash,
+		"tx":        tx,
+	})
 }
 
 // UPDATED Account endpoints for account-based system
@@ -2677,7 +2839,7 @@ func verifyStakingSignature(fromAddr, toAddr, amount string, timestamp int64, si
 	// 3. Ethereum personal_sign prefixes the message before hashing
 	// This matches MetaMask's eth_sign / personal_sign behaviour
 	prefixed := fmt.Sprintf("\x19Ethereum Signed Message:\n%d%s", len(payload), payload)
-	hash := crypto.Keccak256([]byte(prefixed))
+	hash := ethcrypto.Keccak256([]byte(prefixed))
 
 	// 4. Normalise recovery ID: Ethereum uses 27/28, go-ethereum expects 0/1
 	if sigBytes[64] >= 27 {
@@ -2685,18 +2847,18 @@ func verifyStakingSignature(fromAddr, toAddr, amount string, timestamp int64, si
 	}
 
 	// 5. Recover the public key from the signature
-	pubKeyBytes, err := crypto.Ecrecover(hash, sigBytes)
+	pubKeyBytes, err := ethcrypto.Ecrecover(hash, sigBytes)
 	if err != nil {
 		return fmt.Errorf("failed to recover public key: %w", err)
 	}
 
-	pubKey, err := crypto.UnmarshalPubkey(pubKeyBytes)
+	pubKey, err := ethcrypto.UnmarshalPubkey(pubKeyBytes)
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal public key: %w", err)
 	}
 
 	// 6. Derive address from recovered key and compare
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey).Hex()
+	recoveredAddr := ethcrypto.PubkeyToAddress(*pubKey).Hex()
 	if !strings.EqualFold(recoveredAddr, fromAddr) {
 		return fmt.Errorf("signature mismatch: signed by %s, claimed %s", recoveredAddr, fromAddr)
 	}

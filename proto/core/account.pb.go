@@ -9,12 +9,11 @@
 package core
 
 import (
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
-
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -35,19 +34,25 @@ const (
 	TransactionType_CLAIM_REWARDS       TransactionType = 5
 	TransactionType_EVM_CONTRACT_CALL   TransactionType = 6
 	TransactionType_EVM_CONTRACT_DEPLOY TransactionType = 7
+	TransactionType_GOVERNANCE_PROPOSE  TransactionType = 8
+	TransactionType_GOVERNANCE_VOTE     TransactionType = 9
+	TransactionType_GOVERNANCE_FINALIZE TransactionType = 10
 )
 
 // Enum value maps for TransactionType.
 var (
 	TransactionType_name = map[int32]string{
-		0: "TRANSFER",
-		1: "STAKE",
-		2: "UNSTAKE",
-		3: "DELEGATE",
-		4: "UNDELEGATE",
-		5: "CLAIM_REWARDS",
-		6: "EVM_CONTRACT_CALL",
-		7: "EVM_CONTRACT_DEPLOY",
+		0:  "TRANSFER",
+		1:  "STAKE",
+		2:  "UNSTAKE",
+		3:  "DELEGATE",
+		4:  "UNDELEGATE",
+		5:  "CLAIM_REWARDS",
+		6:  "EVM_CONTRACT_CALL",
+		7:  "EVM_CONTRACT_DEPLOY",
+		8:  "GOVERNANCE_PROPOSE",
+		9:  "GOVERNANCE_VOTE",
+		10: "GOVERNANCE_FINALIZE",
 	}
 	TransactionType_value = map[string]int32{
 		"TRANSFER":            0,
@@ -58,6 +63,9 @@ var (
 		"CLAIM_REWARDS":       5,
 		"EVM_CONTRACT_CALL":   6,
 		"EVM_CONTRACT_DEPLOY": 7,
+		"GOVERNANCE_PROPOSE":  8,
+		"GOVERNANCE_VOTE":     9,
+		"GOVERNANCE_FINALIZE": 10,
 	}
 )
 
@@ -929,7 +937,7 @@ const file_proto_account_proto_rawDesc = "" +
 	"validators\x18\x01 \x03(\v2\x17.thrylos.core.ValidatorR\n" +
 	"validators\x12,\n" +
 	"\x12total_voting_power\x18\x02 \x01(\x03R\x10totalVotingPower\x12\x16\n" +
-	"\x06height\x18\x03 \x01(\x03R\x06height*\x98\x01\n" +
+	"\x06height\x18\x03 \x01(\x03R\x06height*\xde\x01\n" +
 	"\x0fTransactionType\x12\f\n" +
 	"\bTRANSFER\x10\x00\x12\t\n" +
 	"\x05STAKE\x10\x01\x12\v\n" +
@@ -939,7 +947,11 @@ const file_proto_account_proto_rawDesc = "" +
 	"UNDELEGATE\x10\x04\x12\x11\n" +
 	"\rCLAIM_REWARDS\x10\x05\x12\x15\n" +
 	"\x11EVM_CONTRACT_CALL\x10\x06\x12\x17\n" +
-	"\x13EVM_CONTRACT_DEPLOY\x10\a*Z\n" +
+	"\x13EVM_CONTRACT_DEPLOY\x10\a\x12\x16\n" +
+	"\x12GOVERNANCE_PROPOSE\x10\b\x12\x13\n" +
+	"\x0fGOVERNANCE_VOTE\x10\t\x12\x17\n" +
+	"\x13GOVERNANCE_FINALIZE\x10\n" +
+	"*Z\n" +
 	"\x18ValidatorTransactionType\x12\x14\n" +
 	"\x10CREATE_VALIDATOR\x10\x00\x12\x12\n" +
 	"\x0eEDIT_VALIDATOR\x10\x01\x12\x14\n" +

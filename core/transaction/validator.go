@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"regexp"
@@ -28,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 	"github.com/thrylos-labs/go-thrylos/config"
+	"github.com/thrylos-labs/go-thrylos/consensus/governance"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/security"
@@ -116,6 +118,12 @@ func (v *Validator) CreateTransaction(from, to string, amount string, gas int64,
 		return nil, fmt.Errorf("failed to set replay protection: %v", err)
 	}
 
+	txHash, err := v.CalculateTransactionHash(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate transaction hash: %v", err)
+	}
+	tx.Hash = txHash
+
 	// ✅ Fix: Pass the 'privateKey' argument to SignTransaction
 	if err := v.SignTransaction(tx, privateKey); err != nil {
 		return nil, fmt.Errorf("failed to sign transaction: %v", err)
@@ -168,6 +176,41 @@ func (v *Validator) CreateDelegateTransaction(from, validator string, amount str
 
 	// Pass privateKey down
 	return v.CreateTransaction(from, validator, amount, gas, gasPrice, nonce, core.TransactionType_DELEGATE, nil, privateKey)
+}
+
+func (v *Validator) CreateGovernanceProposalTransaction(from, parameter, proposedValue string, gas int64, gasPrice string, nonce uint64, privateKey crypto.PrivateKey) (*core.Transaction, error) {
+	payload, err := json.Marshal(governance.ProposalPayload{
+		Parameter:     parameter,
+		ProposedValue: proposedValue,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode governance proposal payload: %v", err)
+	}
+
+	return v.CreateTransaction(from, "", "0", gas, gasPrice, nonce, core.TransactionType_GOVERNANCE_PROPOSE, payload, privateKey)
+}
+
+func (v *Validator) CreateGovernanceVoteTransaction(from, proposalID string, approve bool, gas int64, gasPrice string, nonce uint64, privateKey crypto.PrivateKey) (*core.Transaction, error) {
+	payload, err := json.Marshal(governance.VotePayload{
+		ProposalID: proposalID,
+		Approve:    approve,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode governance vote payload: %v", err)
+	}
+
+	return v.CreateTransaction(from, "", "0", gas, gasPrice, nonce, core.TransactionType_GOVERNANCE_VOTE, payload, privateKey)
+}
+
+func (v *Validator) CreateGovernanceFinalizeTransaction(from, proposalID string, gas int64, gasPrice string, nonce uint64, privateKey crypto.PrivateKey) (*core.Transaction, error) {
+	payload, err := json.Marshal(governance.FinalizePayload{
+		ProposalID: proposalID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode governance finalize payload: %v", err)
+	}
+
+	return v.CreateTransaction(from, "", "0", gas, gasPrice, nonce, core.TransactionType_GOVERNANCE_FINALIZE, payload, privateKey)
 }
 
 // CalculateTransactionHash calculates the Blake2b hash of a transaction
@@ -850,6 +893,13 @@ func (v *Validator) validateStructure(tx *core.Transaction) error {
 		if amountBig.Sign() != 0 {
 			return fmt.Errorf("claim rewards transaction should have zero amount, got %s", tx.Amount)
 		}
+	case core.TransactionType_GOVERNANCE_PROPOSE, core.TransactionType_GOVERNANCE_VOTE, core.TransactionType_GOVERNANCE_FINALIZE:
+		if amountBig.Sign() != 0 {
+			return fmt.Errorf("governance transaction should have zero amount, got %s", tx.Amount)
+		}
+		if len(tx.Data) == 0 {
+			return fmt.Errorf("governance transaction payload cannot be empty")
+		}
 	}
 
 	// Gas validation (Gas Limit is typically still int64)
@@ -1025,6 +1075,93 @@ func (v *Validator) validateSufficientBalanceForNonce(tx *core.Transaction, send
 	return nil
 }
 
+func (v *Validator) validateGovernanceProposal(tx *core.Transaction, sender *core.Account, stateReader StateInterface) error {
+	if err := v.validateSufficientBalanceForNonce(tx, sender, stateReader); err != nil {
+		return err
+	}
+
+	payload, err := governance.ParseProposalPayload(tx.Data)
+	if err != nil {
+		return err
+	}
+
+	validator, err := stateReader.GetValidator(tx.From)
+	if err != nil || validator == nil || !validator.Active {
+		return fmt.Errorf("governance proposer must be an active validator")
+	}
+
+	if err := governance.ValidateParameterChange(payload.Parameter, payload.ProposedValue); err != nil {
+		return err
+	}
+
+	manager := governance.NewManager(v.config, stateReader)
+	if _, err := manager.GetProposal(tx.Hash); err == nil {
+		return fmt.Errorf("governance proposal %s already exists", tx.Hash)
+	}
+
+	return nil
+}
+
+func (v *Validator) validateGovernanceVote(tx *core.Transaction, sender *core.Account, stateReader StateInterface) error {
+	if err := v.validateSufficientBalanceForNonce(tx, sender, stateReader); err != nil {
+		return err
+	}
+
+	payload, err := governance.ParseVotePayload(tx.Data)
+	if err != nil {
+		return err
+	}
+
+	validator, err := stateReader.GetValidator(tx.From)
+	if err != nil || validator == nil || !validator.Active {
+		return fmt.Errorf("governance voter must be an active validator")
+	}
+
+	manager := governance.NewManager(v.config, stateReader)
+	proposal, err := manager.GetProposal(payload.ProposalID)
+	if err != nil {
+		return err
+	}
+	if proposal.Status != governance.ProposalStatusActive {
+		return fmt.Errorf("proposal %s is not active", payload.ProposalID)
+	}
+	if time.Now().Unix() > proposal.VotingEndsAt {
+		return fmt.Errorf("proposal %s voting period has ended", payload.ProposalID)
+	}
+
+	return nil
+}
+
+func (v *Validator) validateGovernanceFinalize(tx *core.Transaction, sender *core.Account, stateReader StateInterface) error {
+	if err := v.validateSufficientBalanceForNonce(tx, sender, stateReader); err != nil {
+		return err
+	}
+
+	payload, err := governance.ParseFinalizePayload(tx.Data)
+	if err != nil {
+		return err
+	}
+
+	validator, err := stateReader.GetValidator(tx.From)
+	if err != nil || validator == nil || !validator.Active {
+		return fmt.Errorf("governance finalizer must be an active validator")
+	}
+
+	manager := governance.NewManager(v.config, stateReader)
+	proposal, err := manager.GetProposal(payload.ProposalID)
+	if err != nil {
+		return err
+	}
+	if proposal.Status != governance.ProposalStatusActive {
+		return fmt.Errorf("proposal %s is not active", payload.ProposalID)
+	}
+	if time.Now().Unix() < proposal.VotingEndsAt {
+		return fmt.Errorf("proposal %s is still in the voting period", payload.ProposalID)
+	}
+
+	return nil
+}
+
 // validateBusinessLogic validates transaction business logic
 func (v *Validator) validateBusinessLogic(tx *core.Transaction, stateReader StateInterface) error {
 	// Get sender account via Interface
@@ -1052,6 +1189,12 @@ func (v *Validator) validateBusinessLogic(tx *core.Transaction, stateReader Stat
 		return v.validateUndelegate(tx, sender)
 	case core.TransactionType_CLAIM_REWARDS:
 		return v.validateClaimRewards(tx, sender)
+	case core.TransactionType_GOVERNANCE_PROPOSE:
+		return v.validateGovernanceProposal(tx, sender, stateReader)
+	case core.TransactionType_GOVERNANCE_VOTE:
+		return v.validateGovernanceVote(tx, sender, stateReader)
+	case core.TransactionType_GOVERNANCE_FINALIZE:
+		return v.validateGovernanceFinalize(tx, sender, stateReader)
 	case core.TransactionType_EVM_CONTRACT_CALL, core.TransactionType_EVM_CONTRACT_DEPLOY:
 		// EVM txs can have 0-value payload calls; enforce nonce and balance only.
 		return v.validateSufficientBalanceForNonce(tx, sender, stateReader)
@@ -1507,6 +1650,13 @@ func (v *Validator) updateTempAccountState(tx *core.Transaction, account *core.A
 
 		// Reset Rewards
 		account.Rewards = "0"
+	case core.TransactionType_GOVERNANCE_PROPOSE, core.TransactionType_GOVERNANCE_VOTE, core.TransactionType_GOVERNANCE_FINALIZE:
+		if balanceBig.Cmp(gasCostBig) < 0 {
+			return fmt.Errorf("balance underflow: balance %s < gas cost %s",
+				account.Balance, gasCostBig.String())
+		}
+		balanceBig.Sub(balanceBig, gasCostBig)
+		account.Balance = balanceBig.String()
 	}
 
 	return nil

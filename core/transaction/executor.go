@@ -17,6 +17,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/thrylos-labs/go-thrylos/config"
+	"github.com/thrylos-labs/go-thrylos/consensus/governance"
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
@@ -139,6 +140,12 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 		execErr = e.executeUndelegate(tx, accountManager)
 	case core.TransactionType_CLAIM_REWARDS:
 		execErr = e.executeClaimRewards(tx, accountManager)
+	case core.TransactionType_GOVERNANCE_PROPOSE:
+		execErr = e.executeGovernanceProposal(tx, accountManager)
+	case core.TransactionType_GOVERNANCE_VOTE:
+		execErr = e.executeGovernanceVote(tx, accountManager)
+	case core.TransactionType_GOVERNANCE_FINALIZE:
+		execErr = e.executeGovernanceFinalize(tx, accountManager)
 
 	default:
 		execErr = fmt.Errorf("unknown transaction type: %v", tx.Type)
@@ -155,6 +162,67 @@ func (e *Executor) ExecuteTransaction(tx *core.Transaction, accountManager *acco
 	// Mark as successful if no error
 	receipt.Status = 1
 	return receipt, nil
+}
+
+func (e *Executor) executeGovernanceProposal(tx *core.Transaction, accountManager *account.AccountManager) error {
+	payload, err := governance.ParseProposalPayload(tx.Data)
+	if err != nil {
+		return err
+	}
+
+	manager := governance.NewManager(e.config, e.worldState)
+	if _, err := manager.SubmitProposal(tx.Hash, tx.From, payload.Parameter, payload.ProposedValue); err != nil {
+		return err
+	}
+
+	return e.applyGovernanceGasAndNonce(tx, accountManager)
+}
+
+func (e *Executor) executeGovernanceVote(tx *core.Transaction, accountManager *account.AccountManager) error {
+	payload, err := governance.ParseVotePayload(tx.Data)
+	if err != nil {
+		return err
+	}
+
+	manager := governance.NewManager(e.config, e.worldState)
+	if err := manager.CastVote(payload.ProposalID, tx.From, payload.Approve); err != nil {
+		return err
+	}
+
+	return e.applyGovernanceGasAndNonce(tx, accountManager)
+}
+
+func (e *Executor) executeGovernanceFinalize(tx *core.Transaction, accountManager *account.AccountManager) error {
+	payload, err := governance.ParseFinalizePayload(tx.Data)
+	if err != nil {
+		return err
+	}
+
+	manager := governance.NewManager(e.config, e.worldState)
+	if _, err := manager.FinalizeProposal(payload.ProposalID); err != nil {
+		return err
+	}
+
+	return e.applyGovernanceGasAndNonce(tx, accountManager)
+}
+
+func (e *Executor) applyGovernanceGasAndNonce(tx *core.Transaction, accountManager *account.AccountManager) error {
+	account, err := accountManager.GetAccount(tx.From)
+	if err != nil {
+		return fmt.Errorf("failed to get governance sender account: %v", err)
+	}
+
+	gasCost := new(big.Int).Mul(big.NewInt(tx.Gas), math.ParseBigInt(tx.GasPrice))
+	balance := math.ParseBigInt(account.Balance)
+	if balance.Cmp(gasCost) < 0 {
+		return fmt.Errorf("insufficient balance for governance gas: have %s, need %s", account.Balance, gasCost.String())
+	}
+
+	balance.Sub(balance, gasCost)
+	account.Balance = balance.String()
+	account.Nonce++
+
+	return accountManager.UpdateAccount(account)
 }
 
 // ✅ FIXED: Reentrancy-protected executeEVMCall function
@@ -1219,6 +1287,10 @@ func (e *Executor) ValidateExecution(tx *core.Transaction, accountManager *accou
 		}
 		if rewardsBig.Sign() <= 0 {
 			return fmt.Errorf("no rewards to claim")
+		}
+	case core.TransactionType_GOVERNANCE_PROPOSE, core.TransactionType_GOVERNANCE_VOTE, core.TransactionType_GOVERNANCE_FINALIZE:
+		if senderBalanceBig.Cmp(gasCostBig) < 0 {
+			return fmt.Errorf("insufficient balance for gas: have %s, need %s", sender.Balance, gasCostBig.String())
 		}
 	}
 

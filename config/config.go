@@ -108,6 +108,9 @@ type Config struct {
 	// Economics configuration with dynamic inflation
 	Economics EconomicsConfig `json:"economics"`
 
+	// Governance configuration for parameter changes and ownership-linked stake domains
+	Governance GovernanceConfig `json:"governance"`
+
 	// Points config
 	Points PointsConfig `json:"points"`
 
@@ -241,6 +244,14 @@ type EconomicsConfig struct {
 	ValidatorRewardPool string `json:"validator_reward_pool"` // ⚠️ CHANGE THIS
 	LiquidityPool       string `json:"liquidity_pool"`        // ⚠️ CHANGE THIS
 	DevelopmentPool     string `json:"development_pool"`      // ⚠️ CHANGE THIS
+}
+
+type GovernanceConfig struct {
+	Enabled                 bool          `json:"enabled"`
+	VotingPeriod            time.Duration `json:"voting_period"`
+	Quorum                  float64       `json:"quorum"`
+	ApprovalThreshold       float64       `json:"approval_threshold"`
+	OwnershipDomainsEnabled bool          `json:"ownership_domains_enabled"`
 }
 
 type ShardingConfig struct {
@@ -383,6 +394,14 @@ func DefaultConfig() *Config {
 			ValidatorRewardPool: math.BigIntToString(new(big.Int).Div(new(big.Int).Mul(TotalSupply, big.NewInt(60)), big.NewInt(100))),
 			LiquidityPool:       math.BigIntToString(new(big.Int).Div(new(big.Int).Mul(TotalSupply, big.NewInt(15)), big.NewInt(100))),
 			DevelopmentPool:     math.BigIntToString(new(big.Int).Div(new(big.Int).Mul(TotalSupply, big.NewInt(10)), big.NewInt(100))),
+		},
+
+		Governance: GovernanceConfig{
+			Enabled:                 true,
+			VotingPeriod:            72 * time.Hour,
+			Quorum:                  0.33,
+			ApprovalThreshold:       0.67,
+			OwnershipDomainsEnabled: true,
 		},
 
 		Sharding: ShardingConfig{
@@ -737,6 +756,15 @@ func (c *Config) ValidateConfig() error {
 
 	if c.Staking.MaxCommission < 0 || c.Staking.MaxCommission > 1 {
 		return fmt.Errorf("max commission must be between 0 and 1")
+	}
+	if c.Governance.Quorum < 0 || c.Governance.Quorum > 1 {
+		return fmt.Errorf("governance quorum must be between 0 and 1")
+	}
+	if c.Governance.ApprovalThreshold < 0 || c.Governance.ApprovalThreshold > 1 {
+		return fmt.Errorf("governance approval threshold must be between 0 and 1")
+	}
+	if c.Governance.VotingPeriod < 0 {
+		return fmt.Errorf("governance voting period cannot be negative")
 	}
 
 	// 2. Validate BigInt comparisons (MinDelegation vs MinValidatorStake)

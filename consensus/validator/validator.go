@@ -277,6 +277,17 @@ func (vm *Manager) RegisterValidator(
 	stake string,
 	commission float64,
 ) error {
+	return vm.RegisterValidatorWithDomain(address, pubkey, stake, commission, "")
+}
+
+// RegisterValidatorWithDomain registers a validator and links it to an ownership domain.
+func (vm *Manager) RegisterValidatorWithDomain(
+	address string,
+	pubkey []byte,
+	stake string,
+	commission float64,
+	stakeDomain string,
+) error {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
@@ -315,6 +326,32 @@ func (vm *Manager) RegisterValidator(
 		}
 	}
 
+	if vm.config.Governance.OwnershipDomainsEnabled &&
+		vm.config.Staking.MaxStakePercentage > 0 &&
+		totalNetworkStake != nil &&
+		totalNetworkStake.Sign() > 0 {
+		domainID := address
+		if stakeDomain != "" {
+			domainID = stakeDomain
+		}
+
+		currentDomainStake, err := vm.worldState.GetStakeDomainTotalStake(domainID)
+		if err != nil {
+			return fmt.Errorf("failed to load stake domain %s: %w", domainID, err)
+		}
+
+		postRegistrationStake := math.Add(totalNetworkStake, stakeBig)
+		postDomainStake := math.Add(currentDomainStake, stakeBig)
+		if postRegistrationStake.Sign() > 0 {
+			stakeFraction := new(big.Float).Quo(new(big.Float).SetInt(postDomainStake), new(big.Float).SetInt(postRegistrationStake))
+			stakePercentage, _ := stakeFraction.Float64()
+			if stakePercentage > vm.config.Staking.MaxStakePercentage {
+				return fmt.Errorf("stake domain would exceed concentration limit: %.2f%% > %.2f%%",
+					stakePercentage*100, vm.config.Staking.MaxStakePercentage*100)
+			}
+		}
+	}
+
 	if commission < 0 || commission > vm.config.Staking.MaxCommission {
 		return fmt.Errorf("commission %.4f outside valid range [0, %.4f]",
 			commission, vm.config.Staking.MaxCommission)
@@ -350,7 +387,7 @@ func (vm *Manager) RegisterValidator(
 	}
 
 	// Add to world state
-	if err := vm.worldState.AddValidator(validator); err != nil {
+	if err := vm.worldState.AddValidatorWithStakeDomain(validator, stakeDomain); err != nil {
 		return fmt.Errorf("failed to add validator to world state: %v", err)
 	}
 
@@ -362,6 +399,18 @@ func (vm *Manager) RegisterValidator(
 	}
 
 	return nil
+}
+
+// LinkValidatorToStakeDomain updates the ownership domain used for concentration checks and governance.
+func (vm *Manager) LinkValidatorToStakeDomain(address, stakeDomain string) error {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+
+	if _, err := vm.worldState.GetValidator(address); err != nil {
+		return fmt.Errorf("validator not found: %w", err)
+	}
+
+	return vm.worldState.SetValidatorStakeDomain(address, stakeDomain)
 }
 
 // validateAddress validates a validator address
@@ -1012,6 +1061,27 @@ func (vm *Manager) AddDelegation(validatorAddr, delegatorAddr string, amount str
 		if percentage > vm.config.Staking.MaxStakePercentage {
 			return fmt.Errorf("delegation would exceed concentration limit: %.2f%% > %.2f%%",
 				percentage*100, vm.config.Staking.MaxStakePercentage*100)
+		}
+	}
+
+	if vm.config.Governance.OwnershipDomainsEnabled && vm.config.Staking.MaxStakePercentage > 0 {
+		domainID, err := vm.worldState.GetValidatorStakeDomain(validatorAddr)
+		if err != nil {
+			return fmt.Errorf("failed to load validator stake domain: %w", err)
+		}
+
+		domainStakeBig, err := vm.worldState.GetStakeDomainTotalStake(domainID)
+		if err != nil {
+			return fmt.Errorf("failed to load stake domain %s: %w", domainID, err)
+		}
+
+		postDomainStake := math.Add(domainStakeBig, amountBig)
+		postTotalStake := math.Add(totalNetworkStake, amountBig)
+		stakeFraction := new(big.Float).Quo(new(big.Float).SetInt(postDomainStake), new(big.Float).SetInt(postTotalStake))
+		stakePercentage, _ := stakeFraction.Float64()
+		if stakePercentage > vm.config.Staking.MaxStakePercentage {
+			return fmt.Errorf("stake domain would exceed concentration limit: %.2f%% > %.2f%%",
+				stakePercentage*100, vm.config.Staking.MaxStakePercentage*100)
 		}
 	}
 

@@ -29,6 +29,11 @@ import (
 	"github.com/thrylos-labs/go-thrylos/types"
 )
 
+const (
+	slotsPerEpoch          = 32
+	proposerCooldownWindow = 1
+)
+
 // NewConsensusEngine creates a new PoS consensus engine
 func NewConsensusEngine(
 	cfg *config.Config,
@@ -295,7 +300,7 @@ func (ce *ConsensusEngine) processSlot() {
 	}
 
 	ce.currentSlot++
-	ce.currentEpoch = ce.currentSlot / 32
+	ce.currentEpoch = ce.currentSlot / slotsPerEpoch
 
 	// Get the proposer for this slot
 	proposer, err := ce.getSlotProposer(ce.currentSlot)
@@ -315,14 +320,14 @@ func (ce *ConsensusEngine) processSlot() {
 		if len(fallbackProposers) == 0 {
 			log.Printf("🚨 EMERGENCY: Proposer %s is INACTIVE, but proceeding (Recovery Mode)", proposer)
 		} else {
-			fallback, err := ce.selectValidatorWithVRF(fallbackProposers, ce.currentSlot)
+			fallback, err := ce.getSlotProposer(ce.currentSlot)
 			if err != nil {
 				log.Printf("⚠️ Proposer %s is not active and fallback selection failed: %v", proposer, err)
 				ce.mu.Unlock()
 				return
 			}
-			log.Printf("⚠️ Proposer %s became inactive; reassigning slot %d to %s", proposer, ce.currentSlot, fallback.Address)
-			proposer = fallback.Address
+			log.Printf("⚠️ Proposer %s became inactive; reassigning slot %d to %s", proposer, ce.currentSlot, fallback)
+			proposer = fallback
 			isActive = true
 		}
 	}
@@ -659,14 +664,24 @@ func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 	// 🔍 DEBUG LOG
 	fmt.Printf("🔍 DEBUG getSlotProposer: slot=%d, candidates=%d\n", slot, len(activeValidators))
 
-	// 3. VRF Selection
-	selectedValidator, err := ce.selectValidatorWithVRF(activeValidators, slot)
+	schedule, err := ce.validatorSet.BuildEpochSchedule(
+		activeValidators,
+		slot/slotsPerEpoch,
+		slotsPerEpoch,
+		proposerCooldownWindow,
+	)
 	if err != nil {
-		return "", fmt.Errorf("failed to select validator: %v", err)
+		return "", fmt.Errorf("failed to build epoch schedule: %v", err)
+	}
+	slotIndex := int(slot % slotsPerEpoch)
+	if slotIndex >= len(schedule) {
+		return "", fmt.Errorf("epoch schedule missing slot %d (schedule length %d)", slotIndex, len(schedule))
 	}
 
-	fmt.Printf("✅ DEBUG: Selected proposer %s for slot %d\n", selectedValidator.Address, slot)
-	return selectedValidator.Address, nil
+	selectedAddress := schedule[slotIndex]
+
+	fmt.Printf("✅ DEBUG: Selected proposer %s for slot %d\n", selectedAddress, slot)
+	return selectedAddress, nil
 }
 
 func (ce *ConsensusEngine) enqueueAttestation(attestation *types.Attestation) bool {

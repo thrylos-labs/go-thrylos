@@ -281,3 +281,32 @@ func TestRegisterValidator_EnforcesRegistrationStakeLimits(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "concentration limit")
 }
+
+func TestRegisterValidatorWithDomain_EnforcesAggregateDomainConcentration(t *testing.T) {
+	const (
+		validatorOne = "0x8888888888888888888888888888888888888888"
+		validatorTwo = "0x9999999999999999999999999999999999999999"
+		domainID     = "operator-a"
+	)
+
+	cfg := config.DefaultConfig()
+	cfg.Staking.MinValidatorStake = "1"
+	cfg.Staking.MaxValidatorStake = "1000"
+	cfg.Staking.MaxStakePercentage = 0.60
+	cfg.Governance.OwnershipDomainsEnabled = true
+
+	vm, ws := newTestValidatorManager(t, cfg)
+
+	err := vm.RegisterValidatorWithDomain(validatorOne, []byte{1}, "60", 0.05, domainID)
+	require.NoError(t, err)
+
+	ws.UpdateTotalStaked()
+
+	err = vm.RegisterValidatorWithDomain(validatorTwo, []byte{2}, "20", 0.05, domainID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "stake domain would exceed concentration limit")
+
+	registeredDomain, err := ws.GetValidatorStakeDomain(validatorOne)
+	require.NoError(t, err)
+	require.Equal(t, domainID, registeredDomain)
+}

@@ -43,6 +43,9 @@ enum TransactionType {
   CLAIM_REWARDS = 5;
   EVM_CONTRACT_CALL = 6;
   EVM_CONTRACT_DEPLOY = 7;
+  GOVERNANCE_PROPOSE = 8;
+  GOVERNANCE_VOTE = 9;
+  GOVERNANCE_FINALIZE = 10;
 }
 
 message Block {

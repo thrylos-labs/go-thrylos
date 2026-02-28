@@ -36,6 +36,11 @@ type ProposerHistoryReader interface {
 	GetHeight() int64
 }
 
+// StakeDomainReader exposes ownership-domain assignments for domain-aware scheduling.
+type StakeDomainReader interface {
+	GetValidatorStakeDomain(validatorAddr string) (string, error)
+}
+
 // Set represents a set of validators with selection capabilities
 type Set struct {
 	validators    map[string]*core.Validator
@@ -79,6 +84,17 @@ type Committee struct {
 	SelectionSeed []byte            `json:"selection_seed"`
 	CreatedAt     int64             `json:"created_at"`
 	Purpose       string            `json:"purpose"`
+}
+
+type quotaAllocation struct {
+	address   string
+	quota     int
+	remainder *big.Int
+}
+
+type domainScheduleState struct {
+	order []string
+	index int
 }
 
 // NewSet creates a new validator set
@@ -238,6 +254,92 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 	}, nil
 }
 
+// BuildEpochSchedule allocates stake-proportional proposer slots for an epoch and then
+// deterministically shuffles them while respecting a best-effort cooldown window.
+func (vs *Set) BuildEpochSchedule(
+	candidates []*core.Validator,
+	epoch uint64,
+	slotsPerEpoch int,
+	cooldownWindow int,
+) ([]string, error) {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no validator candidates")
+	}
+	if slotsPerEpoch <= 0 {
+		return nil, fmt.Errorf("slots per epoch must be positive")
+	}
+	if cooldownWindow < 0 {
+		cooldownWindow = 0
+	}
+
+	snapshot := make([]*core.Validator, 0, len(candidates))
+	totalStakeBig := big.NewInt(0)
+	for _, validator := range candidates {
+		if validator == nil {
+			continue
+		}
+		stakeBig := math.ParseBigInt(validator.Stake)
+		if stakeBig.Sign() <= 0 {
+			continue
+		}
+		snapshot = append(snapshot, validator)
+		totalStakeBig.Add(totalStakeBig, stakeBig)
+	}
+
+	if len(snapshot) == 0 || totalStakeBig.Sign() <= 0 {
+		return nil, fmt.Errorf("total stake is zero")
+	}
+
+	seed := vs.buildEpochSeed(epoch)
+	domainGroups, err := vs.groupValidatorsByDomain(snapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	domainAllocations := allocateStakeQuotas(domainGroups, slotsPerEpoch)
+	domainSchedule := expandQuotaSchedule(domainAllocations, slotsPerEpoch)
+	vs.shuffleSchedule(domainSchedule, seed)
+	vs.applyCooldown(domainSchedule, cooldownWindow)
+
+	domainStates := make(map[string]*domainScheduleState, len(domainAllocations))
+	for _, allocation := range domainAllocations {
+		if allocation.quota == 0 {
+			continue
+		}
+		members := domainGroups[allocation.address]
+		memberAllocations := allocateValidatorQuotas(members, allocation.quota)
+		memberSchedule := expandQuotaSchedule(memberAllocations, allocation.quota)
+		domainSeedInput := make([]byte, 0, len(seed)+len(allocation.address))
+		domainSeedInput = append(domainSeedInput, seed...)
+		domainSeedInput = append(domainSeedInput, allocation.address...)
+		domainSeed := hash.Keccak256(domainSeedInput)
+		vs.shuffleSchedule(memberSchedule, domainSeed)
+		domainStates[allocation.address] = &domainScheduleState{order: memberSchedule}
+	}
+
+	schedule := make([]string, 0, slotsPerEpoch)
+	for _, domainID := range domainSchedule {
+		state := domainStates[domainID]
+		if state == nil || len(state.order) == 0 {
+			continue
+		}
+		if state.index >= len(state.order) {
+			state.index = 0
+		}
+		schedule = append(schedule, state.order[state.index])
+		state.index++
+	}
+
+	if len(schedule) != slotsPerEpoch {
+		return nil, fmt.Errorf("failed to build complete epoch schedule")
+	}
+
+	return schedule, nil
+}
+
 // SelectCommittee selects a committee of validators for attestations or voting
 // SelectCommittee selects a committee of validators based on a seed
 func (vs *Set) SelectCommittee(seed []byte, committeeSize int, purpose string) (*Committee, error) {
@@ -309,6 +411,198 @@ func (vs *Set) shuffleValidators(validators []*core.Validator, seed []byte) []*c
 	}
 
 	return shuffled
+}
+
+func (vs *Set) buildEpochSeed(epoch uint64) []byte {
+	if vs.historyReader == nil {
+		return GenerateSeedFromBlocks(nil, epoch)
+	}
+
+	height := vs.historyReader.GetHeight()
+	if height < 0 {
+		return GenerateSeedFromBlocks(nil, epoch)
+	}
+
+	window := recentProposerWindow
+	if int(height+1) < window {
+		window = int(height + 1)
+	}
+
+	blockHashes := make([][]byte, 0, window)
+	for i := 0; i < window; i++ {
+		block, err := vs.historyReader.GetBlock(height - int64(i))
+		if err != nil || block == nil {
+			continue
+		}
+		if block.Hash != "" {
+			blockHashes = append(blockHashes, []byte(block.Hash))
+		}
+	}
+
+	return GenerateSeedFromBlocks(blockHashes, epoch)
+}
+
+func (vs *Set) shuffleSchedule(schedule []string, seed []byte) {
+	if len(schedule) < 2 {
+		return
+	}
+
+	baseSeed := hash.Keccak256(seed)
+	for i := len(schedule) - 1; i > 0; i-- {
+		indexBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(indexBytes, uint64(i))
+		positionHash := hash.Keccak256(append(baseSeed, indexBytes...))
+		randomInt := new(big.Int).SetBytes(positionHash[:8])
+		j := new(big.Int).Mod(randomInt, big.NewInt(int64(i+1))).Int64()
+		schedule[i], schedule[j] = schedule[j], schedule[i]
+	}
+}
+
+func (vs *Set) applyCooldown(schedule []string, cooldownWindow int) {
+	if cooldownWindow <= 0 || len(schedule) < 2 {
+		return
+	}
+
+	for i := 1; i < len(schedule); i++ {
+		if !violatesCooldown(schedule, i, cooldownWindow) {
+			continue
+		}
+
+		for j := i + 1; j < len(schedule); j++ {
+			candidate := schedule[j]
+			if hasRecentMatch(schedule, i, cooldownWindow, candidate) {
+				continue
+			}
+
+			original := schedule[i]
+			schedule[i] = candidate
+			schedule[j] = original
+			if !violatesCooldown(schedule, i, cooldownWindow) {
+				break
+			}
+			schedule[j] = candidate
+			schedule[i] = original
+		}
+	}
+}
+
+func violatesCooldown(schedule []string, index, cooldownWindow int) bool {
+	return hasRecentMatch(schedule, index, cooldownWindow, schedule[index])
+}
+
+func hasRecentMatch(schedule []string, index, cooldownWindow int, candidate string) bool {
+	start := index - cooldownWindow
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < index; i++ {
+		if schedule[i] == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func (vs *Set) groupValidatorsByDomain(candidates []*core.Validator) (map[string][]*core.Validator, error) {
+	domainReader, _ := vs.historyReader.(StakeDomainReader)
+	domainGroups := make(map[string][]*core.Validator)
+
+	for _, validator := range candidates {
+		domainID := validator.Address
+		if domainReader != nil {
+			assignedDomain, err := domainReader.GetValidatorStakeDomain(validator.Address)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load stake domain for %s: %w", validator.Address, err)
+			}
+			if assignedDomain != "" {
+				domainID = assignedDomain
+			}
+		}
+		domainGroups[domainID] = append(domainGroups[domainID], validator)
+	}
+
+	return domainGroups, nil
+}
+
+func allocateStakeQuotas(domainGroups map[string][]*core.Validator, slots int) []quotaAllocation {
+	weights := make(map[string]*big.Int, len(domainGroups))
+	for domainID, validators := range domainGroups {
+		total := big.NewInt(0)
+		for _, validator := range validators {
+			total.Add(total, math.ParseBigInt(validator.Stake))
+		}
+		weights[domainID] = total
+	}
+
+	return allocateQuotas(weights, slots)
+}
+
+func allocateValidatorQuotas(validators []*core.Validator, slots int) []quotaAllocation {
+	weights := make(map[string]*big.Int, len(validators))
+	for _, validator := range validators {
+		weights[validator.Address] = math.ParseBigInt(validator.Stake)
+	}
+	return allocateQuotas(weights, slots)
+}
+
+func allocateQuotas(weights map[string]*big.Int, slots int) []quotaAllocation {
+	totalWeight := big.NewInt(0)
+	for _, weight := range weights {
+		if weight != nil && weight.Sign() > 0 {
+			totalWeight.Add(totalWeight, weight)
+		}
+	}
+
+	allocations := make([]quotaAllocation, 0, len(weights))
+	if slots <= 0 || totalWeight.Sign() <= 0 {
+		return allocations
+	}
+
+	allocatedSlots := 0
+	for address, weight := range weights {
+		safeWeight := weight
+		if safeWeight == nil || safeWeight.Sign() < 0 {
+			safeWeight = big.NewInt(0)
+		}
+
+		numerator := new(big.Int).Mul(safeWeight, big.NewInt(int64(slots)))
+		quotaBig := new(big.Int).Div(numerator, totalWeight)
+		remainderBig := new(big.Int).Mod(numerator, totalWeight)
+		quota := int(quotaBig.Int64())
+		allocatedSlots += quota
+
+		allocations = append(allocations, quotaAllocation{
+			address:   address,
+			quota:     quota,
+			remainder: remainderBig,
+		})
+	}
+
+	remaining := slots - allocatedSlots
+	sort.Slice(allocations, func(i, j int) bool {
+		if cmp := allocations[i].remainder.Cmp(allocations[j].remainder); cmp != 0 {
+			return cmp > 0
+		}
+		return allocations[i].address < allocations[j].address
+	})
+	for i := 0; i < remaining && i < len(allocations); i++ {
+		allocations[i].quota++
+	}
+	sort.Slice(allocations, func(i, j int) bool {
+		return allocations[i].address < allocations[j].address
+	})
+
+	return allocations
+}
+
+func expandQuotaSchedule(allocations []quotaAllocation, expectedLength int) []string {
+	schedule := make([]string, 0, expectedLength)
+	for _, allocation := range allocations {
+		for i := 0; i < allocation.quota; i++ {
+			schedule = append(schedule, allocation.address)
+		}
+	}
+	return schedule
 }
 
 // calculateAdjustedStakes calculates stake weights with anti-concentration adjustments

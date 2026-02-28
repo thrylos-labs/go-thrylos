@@ -13,6 +13,12 @@ type StateInterface interface {
 	GetAccount(address string) (*core.Account, error)
 	GetBalance(address string) (*big.Int, error) // Changed int64 -> *big.Int
 	GetNonce(address string) (uint64, error)
+	GetValidator(address string) (*core.Validator, error)
+	GetActiveValidators() []*core.Validator
+	GetValidatorStakeDomain(validatorAddr string) (string, error)
+	GetStakeDomainTotalStake(domainID string) (*big.Int, error)
+	SetMetadata(key, value string) error
+	GetMetadata(key string) (string, error)
 
 	UpdateBalance(address string, amount *big.Int) error // Changed int64 -> *big.Int
 	SetNonce(address string, nonce uint64) error
