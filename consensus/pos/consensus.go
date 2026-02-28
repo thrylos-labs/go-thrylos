@@ -6,8 +6,6 @@ package pos
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/sha256"
 	"crypto/sha3"
 	"encoding/binary"
 	"fmt"
@@ -835,7 +833,6 @@ func (ce *ConsensusEngine) verifyVRFProof(validatorPubKey crypto.PublicKey, inpu
 		return false, fmt.Errorf("validator public key is nil")
 	}
 
-	// FIX: Convert the interface to bytes using .Bytes()
 	valid, output, err := VerifyVRFProof(validatorPubKey.Bytes(), input, proof)
 	if err != nil {
 		return false, fmt.Errorf("VRF verification failed: %w", err)
@@ -1495,10 +1492,6 @@ func (bv *BlockValidator) validateVRFProof(block *core.Block) error {
 		return fmt.Errorf("validator not found: %v", err)
 	}
 
-	// For now, derive Ed25519 public key from secp256k1 public key
-	// TODO: Add VRFPublicKey field to validator struct for proper Ed25519 keys
-	vrfPubKey := deriveVRFPublicKeyFromSecp256k1(validator.Pubkey)
-
 	// Create VRF input from slot and epoch
 	input := make([]byte, 16)
 	binary.BigEndian.PutUint64(input[0:8], block.Header.Slot)
@@ -1511,7 +1504,7 @@ func (bv *BlockValidator) validateVRFProof(block *core.Block) error {
 	}
 
 	// Verify VRF proof
-	valid, _, err := VerifyVRFProof(vrfPubKey, input, vrfProof)
+	valid, _, err := VerifyVRFProof(validator.Pubkey, input, vrfProof)
 	if err != nil {
 		return fmt.Errorf("VRF verification failed: %v", err)
 	}
@@ -1527,16 +1520,6 @@ func (ce *ConsensusEngine) ReinitializeValidatorSet() error {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
 	return ce.initializeValidatorSet()
-}
-
-// deriveVRFPublicKeyFromSecp256k1 creates a deterministic Ed25519 public key from secp256k1
-// This is a bridge function until validators register proper Ed25519 VRF keys
-func deriveVRFPublicKeyFromSecp256k1(secp256k1PubKey []byte) []byte {
-	// Must match GenerateVRFProof derivation!
-	hash := sha256.Sum256(secp256k1PubKey)
-	ed25519PrivKey := ed25519.NewKeyFromSeed(hash[:])
-	ed25519PubKey := ed25519PrivKey.Public().(ed25519.PublicKey)
-	return ed25519PubKey
 }
 
 // validateBlockStructure validates the basic structure of a block

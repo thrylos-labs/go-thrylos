@@ -400,23 +400,16 @@ func TestEIP155ChainID(t *testing.T) {
 		t.Fatalf("SignHash failed: %v", err)
 	}
 
-	// Apply chain ID
+	// The 65-byte signature format used here does not embed chain IDs.
 	chainID := uint64(1) // Ethereum mainnet
 	sigWithChainID := sig.WithChainID(chainID)
 
-	// Extract chain ID
-	extractedChainID, hasChainID := sigWithChainID.ExtractChainID()
-	if !hasChainID {
-		t.Error("Signature should have chain ID")
-	}
-	if extractedChainID != chainID {
-		t.Errorf("Expected chain ID %d, got %d", chainID, extractedChainID)
+	if !sig.Equal(sigWithChainID) {
+		t.Error("WithChainID should preserve the 65-byte signature bytes")
 	}
 
-	// Original signature should not have chain ID
-	_, originalHasChainID := sig.ExtractChainID()
-	if originalHasChainID {
-		t.Log("Note: Original signature has chain ID (go-ethereum might add it)")
+	if extractedChainID, hasChainID := sigWithChainID.ExtractChainID(); hasChainID || extractedChainID != 0 {
+		t.Error("ExtractChainID should report no embedded chain ID")
 	}
 }
 

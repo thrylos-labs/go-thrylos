@@ -298,8 +298,7 @@ func (v *Validator) SignTransactionWithReplayProtection(tx *core.Transaction, pr
 		return fmt.Errorf("failed to calculate signable hash with replay protection: %v", err)
 	}
 
-	// Sign - Sign now returns (Signature, error)
-	signature, err := privateKey.Sign(hashToSign)
+	signature, err := privateKey.SignHash(hashToSign)
 	if err != nil {
 		return fmt.Errorf("failed to sign transaction: %w", err)
 	}
@@ -690,7 +689,7 @@ func (v *Validator) VerifyTransactionSignatureWithReplayProtection(tx *core.Tran
 	}
 
 	// 4. Verify the signature against the calculated hash
-	err = publicKey.Verify(hashToVerify, signature)
+	err = publicKey.VerifyHash(hashToVerify, signature)
 	if err != nil {
 		// This could be a replay attempt - record it
 		v.metrics.RecordReplayAttempt()

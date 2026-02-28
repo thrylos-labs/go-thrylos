@@ -174,6 +174,8 @@ func (p *PublicKeyImpl) VerifyHash(hash []byte, sig Signature) error {
 	if len(sigBytes) != 65 {
 		return fmt.Errorf("signature must be 65 bytes, got %d", len(sigBytes))
 	}
+	sigBytes = append([]byte(nil), sigBytes...)
+	sigBytes[64] = sig.RecoveryID()
 
 	// Recover the public key from the signature
 	recoveredPubKey, err := ethcrypto.SigToPub(hash, sigBytes)
@@ -188,6 +190,9 @@ func (p *PublicKeyImpl) VerifyHash(hash []byte, sig Signature) error {
 
 	// Additional verification using go-ethereum's VerifySignature
 	pubKeyBytes := p.BytesUncompressed()
+	if len(pubKeyBytes) != 65 {
+		return fmt.Errorf("public key must be 65 bytes, got %d", len(pubKeyBytes))
+	}
 	// VerifySignature expects signature without the recovery byte
 	sigWithoutRecovery := sigBytes[:64]
 
@@ -266,6 +271,8 @@ func RecoverPublicKey(hash []byte, sig Signature) (PublicKey, error) {
 	if len(sigBytes) != 65 {
 		return nil, fmt.Errorf("signature must be 65 bytes, got %d", len(sigBytes))
 	}
+	sigBytes = append([]byte(nil), sigBytes...)
+	sigBytes[64] = sig.RecoveryID()
 
 	// Recover public key using go-ethereum
 	pubKey, err := ethcrypto.SigToPub(hash, sigBytes)

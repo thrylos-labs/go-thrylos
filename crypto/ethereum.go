@@ -231,8 +231,8 @@ func ValidateTypedData(typedData *apitypes.TypedData) error {
 // Transaction Signing Helpers (EIP-155)
 // ============================================================================
 
-// SignTransaction signs a transaction hash with EIP-155 replay protection
-// This ensures the transaction can only be valid on one chain
+// SignTransaction signs a transaction hash.
+// Replay protection must already be encoded into txHash by the caller.
 func SignTransaction(privateKey PrivateKey, txHash []byte, chainID uint64) (Signature, error) {
 	if privateKey == nil {
 		return nil, fmt.Errorf("private key cannot be nil")
@@ -252,9 +252,7 @@ func SignTransaction(privateKey PrivateKey, txHash []byte, chainID uint64) (Sign
 		return nil, fmt.Errorf("failed to sign transaction: %w", err)
 	}
 
-	// Apply EIP-155 chain ID to the signature
-	sigWithChainID := sig.WithChainID(chainID)
-	return sigWithChainID, nil
+	return sig.Normalize(), nil
 }
 
 // RecoverTransactionSender recovers the sender address from a signed transaction
@@ -275,13 +273,6 @@ func RecoverTransactionSender(txHash []byte, signature []byte, chainID uint64) (
 	sig, err := NewSignatureFromBytes(signature)
 	if err != nil {
 		return nil, fmt.Errorf("invalid signature: %w", err)
-	}
-
-	// Verify chain ID if present
-	if extractedChainID, hasChainID := sig.ExtractChainID(); hasChainID {
-		if extractedChainID != chainID {
-			return nil, fmt.Errorf("chain ID mismatch: expected %d, got %d", chainID, extractedChainID)
-		}
 	}
 
 	// Recover public key
@@ -313,20 +304,13 @@ func VerifyTransactionSignature(expectedAddr *address.Address, txHash []byte, si
 // EIP-155 Utilities
 // ============================================================================
 
-// CreateEIP155Hash creates a transaction hash with EIP-155 replay protection
-// Includes chain ID in the hash to prevent replay attacks across chains
+// CreateEIP155Hash hashes an already-encoded EIP-155 signing payload.
+// Callers must supply the correctly serialized transaction fields.
 func CreateEIP155Hash(rlpEncodedTx []byte, chainID uint64) []byte {
 	if err := ValidateChainID(chainID); err != nil {
-		// Return regular hash if chain ID is invalid
 		return hash.Keccak256(rlpEncodedTx)
 	}
-
-	// Append chain ID, 0, 0 for EIP-155
-	chainIDBig := big.NewInt(int64(chainID))
-	combined := append(rlpEncodedTx, chainIDBig.Bytes()...)
-	combined = append(combined, 0, 0)
-
-	return hash.Keccak256(combined)
+	return hash.Keccak256(rlpEncodedTx)
 }
 
 // ValidateChainID checks if a chain ID is valid

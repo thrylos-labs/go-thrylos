@@ -123,12 +123,12 @@ type Signature interface {
 	// IsValid performs basic validation on the signature
 	IsValid() bool
 
-	// WithChainID applies EIP-155 chain ID encoding to the recovery ID
-	// v = chainID * 2 + 35 + {0, 1}
+	// WithChainID is a compatibility no-op for the 65-byte [R || S || V] format.
+	// Replay protection must be encoded into the signed payload itself.
 	WithChainID(chainID uint64) Signature
 
-	// ExtractChainID extracts the chain ID from an EIP-155 signature
-	// Returns (chainID, hasChainID)
+	// ExtractChainID reports whether a chain ID is embedded in the signature.
+	// The 65-byte signature format used here does not embed one.
 	ExtractChainID() (uint64, bool)
 
 	// RecoveryID returns the normalized recovery ID (0 or 1)

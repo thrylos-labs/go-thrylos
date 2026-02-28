@@ -51,8 +51,8 @@ func NewSignatureFromBytes(sigBytes []byte) (Signature, error) {
 	s := new(big.Int).SetBytes(sigBytes[32:64])
 	v := sigBytes[64]
 
-	// Validate V (recovery ID)
-	if v != 0 && v != 1 && v != 27 && v != 28 && v < 35 {
+	// 65-byte Ethereum signatures only carry the recovery ID, not the chain ID.
+	if v != 0 && v != 1 && v != 27 && v != 28 {
 		return nil, fmt.Errorf("invalid recovery ID (V): %d", v)
 	}
 
@@ -200,19 +200,8 @@ func (s *SignatureImpl) IsValid() bool {
 	}
 
 	// Check recovery ID is valid
-	recoveryID := s.RecoveryID()
-	if recoveryID > 1 {
-		// For EIP-155 signatures, extract and validate
-		if s.v >= 35 {
-			chainID, _ := s.ExtractChainID()
-			// Recalculate V to check validity
-			expectedV := chainID*2 + 35 + uint64(recoveryID)
-			if uint64(s.v) != expectedV && uint64(s.v) != expectedV+1 {
-				return false
-			}
-		} else if s.v != 27 && s.v != 28 && s.v != 0 && s.v != 1 {
-			return false
-		}
+	if s.v != 27 && s.v != 28 && s.v != 0 && s.v != 1 {
+		return false
 	}
 
 	return true
@@ -232,30 +221,15 @@ func (s *SignatureImpl) RecoveryID() byte {
 	return s.v
 }
 
-// WithChainID applies EIP-155 chain ID encoding to the recovery ID
-// Formula: v = chainID * 2 + 35 + {0, 1}
+// WithChainID is a compatibility no-op for the 65-byte signature format.
+// EIP-155 replay protection must be bound into the signed payload, not stored in V.
 func (s *SignatureImpl) WithChainID(chainID uint64) Signature {
-	recoveryID := s.RecoveryID()
-	newV := byte(chainID*2 + 35 + uint64(recoveryID))
-
-	return &SignatureImpl{
-		r: new(big.Int).Set(s.r),
-		s: new(big.Int).Set(s.s),
-		v: newV,
-	}
+	return s.Clone()
 }
 
-// ExtractChainID extracts the chain ID from an EIP-155 encoded signature
-// Returns (chainID, hasChainID)
+// ExtractChainID always returns false for the 65-byte [R||S||V] signature format.
 func (s *SignatureImpl) ExtractChainID() (uint64, bool) {
-	if s.v < 35 {
-		// Not an EIP-155 signature
-		return 0, false
-	}
-
-	// EIP-155: chainID = (v - 35) / 2
-	chainID := (uint64(s.v) - 35) / 2
-	return chainID, true
+	return 0, false
 }
 
 // Marshal serializes the signature to 65 bytes

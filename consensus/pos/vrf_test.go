@@ -1,7 +1,6 @@
 package pos
 
 import (
-	"crypto/ed25519"
 	"encoding/binary"
 	"testing"
 
@@ -10,8 +9,8 @@ import (
 	"github.com/thrylos-labs/go-thrylos/crypto"
 )
 
-func deriveTestVRFPubKey(privKey crypto.PrivateKey) ed25519.PublicKey {
-	return deriveVRFPublicKeyFromSecp256k1(privKey.PublicKey().Bytes())
+func deriveTestVRFPubKey(privKey crypto.PrivateKey) []byte {
+	return privKey.PublicKey().Bytes()
 }
 
 // TestVRFBasicFunctionality tests basic VRF proof generation and verification
@@ -33,7 +32,7 @@ func TestVRFBasicFunctionality(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, proof)
 	require.Equal(t, 32, len(proof.Output), "VRF output should be 32 bytes")
-	require.Equal(t, 64, len(proof.Proof), "Ed25519 VRF proof should be 64 bytes")
+	require.Equal(t, crypto.SignatureSize, len(proof.Proof), "VRF proof should be a secp256k1 signature")
 
 	// Derive public key using the same path as production consensus validation.
 	vrfPubKey := deriveTestVRFPubKey(privKey)
@@ -178,7 +177,7 @@ func TestVRFKeyDerivation(t *testing.T) {
 	vrfPubKey2 := deriveTestVRFPubKey(privKey)
 
 	// Check sizes
-	assert.Equal(t, 32, len(vrfPubKey1), "Ed25519 public key should be 32 bytes")
+	assert.Equal(t, 33, len(vrfPubKey1), "Compressed secp256k1 public key should be 33 bytes")
 	assert.Equal(t, vrfPubKey1, vrfPubKey2, "Public key derivation should be deterministic")
 }
 
@@ -219,7 +218,7 @@ func TestVRFOutputDistribution(t *testing.T) {
 
 // TestVRFProofSizes tests that proof sizes are correct
 func TestVRFProofSizes(t *testing.T) {
-	assert.Equal(t, 64, VRFProofSize(), "VRF proof should be 64 bytes (Ed25519 signature)")
+	assert.Equal(t, crypto.SignatureSize, VRFProofSize(), "VRF proof should be 65 bytes (secp256k1 signature)")
 	assert.Equal(t, 32, VRFOutputSize(), "VRF output should be 32 bytes")
 }
 
