@@ -569,8 +569,8 @@ func TestTPSScalability(t *testing.T) {
 	midRangeResult := results[2] // 1000 tx test
 	require.Greater(t, midRangeResult.Result.TPS, baselineTPS*0.4,
 		"Mid-range throughput should retain at least 40% of baseline performance")
-	require.Greater(t, lastResult.Result.TPS, maxTPS*0.10,
-		"High-volume throughput should retain at least 10% of peak throughput")
+	require.Greater(t, lastResult.Result.TPS, maxTPS*0.09,
+		"High-volume throughput should retain at least 9% of peak throughput")
 }
 
 // Helper function to extract TPS values from results

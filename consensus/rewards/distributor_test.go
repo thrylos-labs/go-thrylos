@@ -106,3 +106,16 @@ func TestWithdrawFromCommunityPool_UsesBigIntRewards(t *testing.T) {
 	require.Equal(t, "10000000000000000000", account.Rewards)
 	require.Equal(t, "90000000000000000000", rd.communityPool)
 }
+
+func TestDistributor_RuntimeEconomicUpdatesRestrictedOutsideDevelopment(t *testing.T) {
+	rd := NewDistributor(&config.Config{}, nil)
+
+	err := rd.UpdateInflationRate(0.05)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "disabled outside development")
+
+	devDistributor := NewDistributor(&config.Config{Environment: "development"}, nil)
+	require.NoError(t, devDistributor.UpdateInflationRate(0.05))
+	require.NoError(t, devDistributor.UpdateCommunityTaxRate(0.02))
+	require.NoError(t, devDistributor.UpdateInflationParameters(0.05, 0.60, 0.02, 0.08))
+}

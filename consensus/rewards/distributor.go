@@ -872,6 +872,10 @@ func (rd *Distributor) UpdateInflationParameters(targetInflation, targetStakingR
 	rd.mu.Lock()
 	defer rd.mu.Unlock()
 
+	if err := rd.ensureRuntimeEconomicUpdatesAllowed(); err != nil {
+		return err
+	}
+
 	if targetInflation < 0.01 || targetInflation > 0.15 {
 		return fmt.Errorf("target inflation must be between 1%% and 15%%")
 	}
@@ -975,6 +979,9 @@ func (rd *Distributor) GetDistributorStats() map[string]interface{} {
 func (rd *Distributor) UpdateInflationRate(newRate float64) error {
 	rd.mu.Lock()
 	defer rd.mu.Unlock()
+	if err := rd.ensureRuntimeEconomicUpdatesAllowed(); err != nil {
+		return err
+	}
 	if newRate < 0 || newRate > 1 {
 		return fmt.Errorf("inflation rate must be between 0 and 1")
 	}
@@ -985,6 +992,9 @@ func (rd *Distributor) UpdateInflationRate(newRate float64) error {
 func (rd *Distributor) UpdateCommunityTaxRate(newRate float64) error {
 	rd.mu.Lock()
 	defer rd.mu.Unlock()
+	if err := rd.ensureRuntimeEconomicUpdatesAllowed(); err != nil {
+		return err
+	}
 	if newRate < 0 || newRate > 0.2 {
 		return fmt.Errorf("community tax rate must be between 0 and 0.2")
 	}
@@ -1058,6 +1068,13 @@ func clampDistributorFloat(value, min, max float64) float64 {
 		return max
 	}
 	return value
+}
+
+func (rd *Distributor) ensureRuntimeEconomicUpdatesAllowed() error {
+	if rd.config != nil && rd.config.Environment == "development" {
+		return nil
+	}
+	return fmt.Errorf("runtime economic parameter updates are disabled outside development")
 }
 
 func (rd *Distributor) CleanupOldRewardData(maxEpochsToKeep int) {

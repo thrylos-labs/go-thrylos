@@ -3,12 +3,26 @@ package validator
 
 import (
 	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/thrylos-labs/go-thrylos/crypto/hash"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
+
+type mockProposerHistory struct {
+	blocks map[int64]*core.Block
+	height int64
+}
+
+func (m *mockProposerHistory) GetBlock(index int64) (*core.Block, error) {
+	return m.blocks[index], nil
+}
+
+func (m *mockProposerHistory) GetHeight() int64 {
+	return m.height
+}
 
 // TestGenerateSeedFromBlocks tests the block hash accumulator
 func TestGenerateSeedFromBlocks(t *testing.T) {
@@ -161,6 +175,37 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 		t.Logf("First selection: %s", result.SelectedValidator.Address)
 		t.Logf("Second selection: %s", result2.SelectedValidator.Address)
 	})
+
+	t.Run("ValidatorSelection_UsesCanonicalHistoryPenalty", func(t *testing.T) {
+		set := NewSet(10)
+		assert.NoError(t, set.AddValidator(&core.Validator{
+			Address: "A",
+			Stake:   "800",
+			Active:  true,
+		}))
+		assert.NoError(t, set.AddValidator(&core.Validator{
+			Address: "B",
+			Stake:   "200",
+			Active:  true,
+		}))
+
+		blocks := make(map[int64]*core.Block)
+		for i := int64(0); i < recentProposerWindow; i++ {
+			blocks[i] = &core.Block{
+				Header: &core.BlockHeader{
+					Index:     i,
+					Validator: "A",
+				},
+			}
+		}
+		set.SetHistoryReader(&mockProposerHistory{
+			blocks: blocks,
+			height: recentProposerWindow - 1,
+		})
+
+		adjusted := set.calculateAdjustedStakes()
+		assert.Less(t, adjusted["A"], adjusted["B"], "recent proposer should receive a deterministic chain-history penalty")
+	})
 }
 
 // Benchmark to ensure performance is acceptable
@@ -178,4 +223,111 @@ func BenchmarkGenerateSeedFromBlocks(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = GenerateSeedFromBlocks(blocks, slot)
 	}
+}
+
+func TestSelectionSimulation_CartelStakeSplitting(t *testing.T) {
+	type simulationScenario struct {
+		name         string
+		cartelStakes []string
+		honestCount  int
+		honestStake  string
+	}
+
+	type simulationResult struct {
+		cartelShare   float64
+		maxRun        int
+		uniqueWinners int
+	}
+
+	runScenario := func(t *testing.T, scenario simulationScenario, slots int) simulationResult {
+		t.Helper()
+
+		set := NewSet(100)
+		history := &mockProposerHistory{
+			blocks: make(map[int64]*core.Block),
+			height: -1,
+		}
+		set.SetHistoryReader(history)
+
+		cartelMembers := make(map[string]bool)
+		for i, stake := range scenario.cartelStakes {
+			addr := fmt.Sprintf("cartel_%d", i)
+			cartelMembers[addr] = true
+			assert.NoError(t, set.AddValidator(&core.Validator{
+				Address: addr,
+				Stake:   stake,
+				Active:  true,
+			}))
+		}
+
+		for i := 0; i < scenario.honestCount; i++ {
+			assert.NoError(t, set.AddValidator(&core.Validator{
+				Address: fmt.Sprintf("honest_%d", i),
+				Stake:   scenario.honestStake,
+				Active:  true,
+			}))
+		}
+
+		cartelWins := 0
+		currentRun := 0
+		maxRun := 0
+		winnerCounts := make(map[string]int)
+
+		for slot := 0; slot < slots; slot++ {
+			seed := GenerateSeedFromBlocks([][]byte{[]byte(fmt.Sprintf("slot-%d", slot))}, uint64(slot))
+			result, err := set.SelectProposer(seed, uint64(slot))
+			assert.NoError(t, err)
+			assert.NotNil(t, result)
+
+			winner := result.SelectedValidator.Address
+			winnerCounts[winner]++
+			if cartelMembers[winner] {
+				cartelWins++
+				currentRun++
+				if currentRun > maxRun {
+					maxRun = currentRun
+				}
+			} else {
+				currentRun = 0
+			}
+
+			history.height = int64(slot)
+			history.blocks[int64(slot)] = &core.Block{
+				Header: &core.BlockHeader{
+					Index:     int64(slot),
+					Validator: winner,
+				},
+			}
+		}
+
+		return simulationResult{
+			cartelShare:   float64(cartelWins) / float64(slots),
+			maxRun:        maxRun,
+			uniqueWinners: len(winnerCounts),
+		}
+	}
+
+	slots := 5000
+	monolithic := runScenario(t, simulationScenario{
+		name:         "monolithic",
+		cartelStakes: []string{"400"},
+		honestCount:  6,
+		honestStake:  "100",
+	}, slots)
+	split := runScenario(t, simulationScenario{
+		name:         "split",
+		cartelStakes: []string{"100", "100", "100", "100"},
+		honestCount:  6,
+		honestStake:  "100",
+	}, slots)
+
+	t.Logf("monolithic cartel: share=%.2f%% max_run=%d unique_winners=%d",
+		monolithic.cartelShare*100, monolithic.maxRun, monolithic.uniqueWinners)
+	t.Logf("split cartel:      share=%.2f%% max_run=%d unique_winners=%d",
+		split.cartelShare*100, split.maxRun, split.uniqueWinners)
+
+	// Splitting stake should not materially improve aggregate cartel capture under the
+	// chain-history penalty model.
+	assert.LessOrEqual(t, split.cartelShare, monolithic.cartelShare+0.03)
+	assert.LessOrEqual(t, split.maxRun, monolithic.maxRun+2)
 }

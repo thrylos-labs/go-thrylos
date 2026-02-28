@@ -88,6 +88,13 @@ func NewBlockProposer(config *config.Config, worldState *state.WorldState, nodeA
 
 // SetSelectionStrategy sets the transaction selection strategy
 func (bp *BlockProposer) SetSelectionStrategy(strategy TransactionSelectionStrategy) {
+	if bp.config != nil && bp.config.Environment != "development" {
+		if strategy == StrategyHighestGasPrice || strategy == StrategyOptimalPacking {
+			log.Printf("⚠️ Unsafe selection strategy %q disabled outside development; using balanced", strategy)
+			bp.selectionStrategy = StrategyBalanced
+			return
+		}
+	}
 	bp.selectionStrategy = strategy
 }
 

@@ -62,6 +62,7 @@ func NewConsensusEngine(
 	// Initialize validator management
 	engine.validatorManager = validator.NewManager(cfg, worldState)
 	engine.validatorSet = validator.NewSet(cfg.Consensus.MaxValidators)
+	engine.validatorSet.SetHistoryReader(worldState)
 
 	// Initialize block production and validation
 	engine.blockProposer = NewBlockProposer(cfg, worldState, nodeAddress)
@@ -305,15 +306,24 @@ func (ce *ConsensusEngine) processSlot() {
 	}
 
 	// Check if the proposer is active
-	isActive := ce.slashingManager.IsValidatorActive(proposer)
+	isActive := true
+	if ce.slashingManager != nil {
+		isActive = ce.slashingManager.IsValidatorActive(proposer)
+	}
 	if !isActive {
-		activeCount := len(ce.validatorSet.GetActiveValidators())
-		if activeCount == 0 {
+		fallbackProposers := ce.getEligibleProposers(false)
+		if len(fallbackProposers) == 0 {
 			log.Printf("🚨 EMERGENCY: Proposer %s is INACTIVE, but proceeding (Recovery Mode)", proposer)
 		} else {
-			log.Printf("⚠️ Proposer %s is not active, skipping slot", proposer)
-			ce.mu.Unlock()
-			return
+			fallback, err := ce.selectValidatorWithVRF(fallbackProposers, ce.currentSlot)
+			if err != nil {
+				log.Printf("⚠️ Proposer %s is not active and fallback selection failed: %v", proposer, err)
+				ce.mu.Unlock()
+				return
+			}
+			log.Printf("⚠️ Proposer %s became inactive; reassigning slot %d to %s", proposer, ce.currentSlot, fallback.Address)
+			proposer = fallback.Address
+			isActive = true
 		}
 	}
 
@@ -629,70 +639,64 @@ func (ce *ConsensusEngine) createAttestation() error {
 	attestationKey := fmt.Sprintf("%s-%d", ce.nodeAddress, ce.currentSlot)
 	ce.attestations[attestationKey] = attestation
 
-	// ✅ FIX: Broadcast attestation (non-blocking)
-	select {
-	case ce.broadcastChan <- attestation:
-		fmt.Printf("✅ Attestation broadcast queued for Slot %d\n", ce.currentSlot)
-		// ONLY update tracker if we actually sent it
-		ce.lastAttestedEpoch = ce.currentEpoch
-	default:
-		fmt.Printf("⚠️ Attestation broadcast channel full, dropping\n")
-		// We don't update lastAttestedEpoch here, allowing a retry on the next tick
+	if !ce.enqueueAttestation(attestation) {
+		return fmt.Errorf("attestation broadcast channel full")
 	}
-
-	// After successfully signing/broadcasting:
-	ce.lastAttestedEpoch = ce.currentEpoch
 	return nil
 }
 
 func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
-	// 1. Try to get standard active validators
-	activeValidators := ce.validatorSet.GetActiveValidators()
-
-	// ✅ FIX: Emergency Deadlock Recovery
-	// If NO active validators exist (all jailed/slashed), the chain halts.
-	// Fallback: Use ALL validators (including jailed ones) to allow a "recovery block"
-	// to be proposed, which can contain transactions to unjail nodes.
+	activeValidators := ce.getEligibleProposers(false)
 	if len(activeValidators) == 0 {
-		fmt.Println("🚨 EMERGENCY: No active validators found (all jailed?). Entering Recovery Mode.")
-
-		// Retrieve ALL validators from WorldState (requires the new method added above)
-		allValidators := ce.worldState.GetAllValidators()
-
-		if len(allValidators) == 0 {
+		fmt.Println("🚨 EMERGENCY: No slash-eligible active validators found. Entering Recovery Mode.")
+		activeValidators = ce.getEligibleProposers(true)
+		if len(activeValidators) == 0 {
 			return "", fmt.Errorf("CRITICAL: No validators exist in world state (bootstrap required)")
 		}
-
-		fmt.Printf("⚠️ Recovery Mode: Using %d total validators (active+inactive) for consensus\n", len(allValidators))
-
-		// Overwrite activeValidators with the full set for this slot selection only
-		activeValidators = allValidators
+		fmt.Printf("⚠️ Recovery Mode: Using %d total validators (active+inactive) for consensus\n", len(activeValidators))
 	}
 
 	// 🔍 DEBUG LOG
 	fmt.Printf("🔍 DEBUG getSlotProposer: slot=%d, candidates=%d\n", slot, len(activeValidators))
 
-	// 2. Filter for eligibility (Slashing Check)
-	eligibleValidators := make([]*core.Validator, 0)
-	for _, validator := range activeValidators {
-		// In Recovery Mode, we might want to skip the "IsValidatorActive" check
-		// or check purely for slashing status, not "Active" status.
-		// For now, we trust the set passed in.
-		eligibleValidators = append(eligibleValidators, validator)
-	}
-
-	if len(eligibleValidators) == 0 {
-		return "", fmt.Errorf("no eligible validators found even after recovery attempt")
-	}
-
 	// 3. VRF Selection
-	selectedValidator, err := ce.selectValidatorWithVRF(eligibleValidators, slot)
+	selectedValidator, err := ce.selectValidatorWithVRF(activeValidators, slot)
 	if err != nil {
 		return "", fmt.Errorf("failed to select validator: %v", err)
 	}
 
 	fmt.Printf("✅ DEBUG: Selected proposer %s for slot %d\n", selectedValidator.Address, slot)
 	return selectedValidator.Address, nil
+}
+
+func (ce *ConsensusEngine) enqueueAttestation(attestation *types.Attestation) bool {
+	select {
+	case ce.broadcastChan <- attestation:
+		fmt.Printf("✅ Attestation broadcast queued for Slot %d\n", ce.currentSlot)
+		ce.lastAttestedEpoch = ce.currentEpoch
+		return true
+	default:
+		fmt.Printf("⚠️ Attestation broadcast channel full, retry deferred\n")
+		return false
+	}
+}
+
+func (ce *ConsensusEngine) getEligibleProposers(includeRecovery bool) []*core.Validator {
+	var candidates []*core.Validator
+	if includeRecovery {
+		candidates = ce.worldState.GetAllValidators()
+	} else {
+		candidates = ce.validatorSet.GetActiveValidators()
+	}
+
+	eligible := make([]*core.Validator, 0, len(candidates))
+	for _, validator := range candidates {
+		if includeRecovery || ce.slashingManager == nil || ce.slashingManager.IsValidatorActive(validator.Address) {
+			eligible = append(eligible, validator)
+		}
+	}
+
+	return eligible
 }
 
 // selectValidatorWithVRF selects a validator using VRF-based deterministic randomness

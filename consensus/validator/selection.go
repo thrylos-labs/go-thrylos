@@ -25,6 +25,17 @@ import (
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
+const (
+	recentProposerWindow = 16
+	maxConsecutiveShift  = 8
+)
+
+// ProposerHistoryReader provides canonical block history for deterministic anti-concentration.
+type ProposerHistoryReader interface {
+	GetBlock(index int64) (*core.Block, error)
+	GetHeight() int64
+}
+
 // Set represents a set of validators with selection capabilities
 type Set struct {
 	validators    map[string]*core.Validator
@@ -32,8 +43,9 @@ type Set struct {
 	totalStake    string
 	maxValidators int
 	mu            sync.RWMutex
+	historyReader ProposerHistoryReader
 
-	// Selection history for anti-concentration
+	// Selection history for analytics only.
 	selectionHistory map[string]*SelectionStats
 
 	// Performance adjustments
@@ -78,6 +90,13 @@ func NewSet(maxValidators int) *Set {
 		selectionHistory:       make(map[string]*SelectionStats),
 		performanceMultipliers: make(map[string]float64),
 	}
+}
+
+// SetHistoryReader configures a canonical block-history reader for deterministic proposer penalties.
+func (vs *Set) SetHistoryReader(reader ProposerHistoryReader) {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	vs.historyReader = reader
 }
 
 // AddValidator adds a validator to the set
@@ -172,7 +191,7 @@ func (vs *Set) SelectProposer(seed []byte, slot uint64) (*SelectionResult, error
 	// Convert hash to big integer for modular arithmetic
 	hashInt := new(big.Int).SetBytes(hashBytes)
 
-	// Apply anti-concentration adjustment
+	// Apply anti-concentration adjustment using canonical block history.
 	adjustedStakes := vs.calculateAdjustedStakes()
 	totalAdjustedStake := int64(0)
 	for _, stake := range adjustedStakes {
@@ -295,7 +314,11 @@ func (vs *Set) shuffleValidators(validators []*core.Validator, seed []byte) []*c
 // calculateAdjustedStakes calculates stake weights with anti-concentration adjustments
 func (vs *Set) calculateAdjustedStakes() map[string]int64 {
 	adjustedStakes := make(map[string]int64)
-	currentTime := time.Now().Unix()
+	recentSelections, consecutiveSelections := vs.getRecentProposerPenalties()
+	expectedRecentShare := 0.0
+	if len(vs.activeList) > 0 {
+		expectedRecentShare = float64(recentProposerWindow) / float64(len(vs.activeList))
+	}
 
 	for _, validator := range vs.activeList {
 		// ✅ Fix: Parse string stake to BigFloat for multiplication
@@ -311,20 +334,20 @@ func (vs *Set) calculateAdjustedStakes() map[string]int64 {
 		performanceMultiplier := vs.performanceMultipliers[validator.Address]
 		adjustedStakeFloat.Mul(adjustedStakeFloat, big.NewFloat(performanceMultiplier))
 
-		// Apply anti-concentration penalty for recently selected validators
-		if stats, exists := vs.selectionHistory[validator.Address]; exists {
-			timeSinceLastSelection := currentTime - stats.LastSelected
-
-			if timeSinceLastSelection < 300 { // 5 minutes
-				recentSelectionPenalty := 0.5 // 50% penalty
-				adjustedStakeFloat.Mul(adjustedStakeFloat, big.NewFloat(recentSelectionPenalty))
+		if expectedRecentShare > 0 {
+			if recentCount := recentSelections[validator.Address]; float64(recentCount) > expectedRecentShare {
+				overSelectionPenalty := expectedRecentShare / float64(recentCount)
+				adjustedStakeFloat.Mul(adjustedStakeFloat, big.NewFloat(overSelectionPenalty))
 			}
+		}
 
-			// Reduce stake weight for consecutive selections
-			if stats.ConsecutiveSelections > 2 {
-				consecutivePenalty := 1.0 / float64(stats.ConsecutiveSelections)
-				adjustedStakeFloat.Mul(adjustedStakeFloat, big.NewFloat(consecutivePenalty))
+		if consecutiveCount := consecutiveSelections[validator.Address]; consecutiveCount > 0 {
+			shift := consecutiveCount
+			if shift > maxConsecutiveShift {
+				shift = maxConsecutiveShift
 			}
+			consecutivePenalty := 1.0 / float64(uint64(1)<<shift)
+			adjustedStakeFloat.Mul(adjustedStakeFloat, big.NewFloat(consecutivePenalty))
 		}
 
 		// Convert back to int64 for the weight map
@@ -341,6 +364,47 @@ func (vs *Set) calculateAdjustedStakes() map[string]int64 {
 	}
 
 	return adjustedStakes
+}
+
+func (vs *Set) getRecentProposerPenalties() (map[string]int, map[string]int) {
+	recentSelections := make(map[string]int)
+	consecutiveSelections := make(map[string]int)
+
+	if vs.historyReader == nil {
+		return recentSelections, consecutiveSelections
+	}
+
+	height := vs.historyReader.GetHeight()
+	if height < 0 {
+		return recentSelections, consecutiveSelections
+	}
+
+	window := recentProposerWindow
+	if int(height+1) < window {
+		window = int(height + 1)
+	}
+
+	lastProposer := ""
+	for i := 0; i < window; i++ {
+		block, err := vs.historyReader.GetBlock(height - int64(i))
+		if err != nil || block == nil || block.Header == nil || block.Header.Validator == "" {
+			continue
+		}
+
+		proposer := block.Header.Validator
+		recentSelections[proposer]++
+
+		if i == 0 {
+			lastProposer = proposer
+		}
+		if proposer == lastProposer {
+			consecutiveSelections[proposer]++
+		} else if lastProposer != "" {
+			break
+		}
+	}
+
+	return recentSelections, consecutiveSelections
 }
 
 // updateSelectionStatsUnsafe updates selection statistics (caller must hold lock)
