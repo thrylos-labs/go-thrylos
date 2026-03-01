@@ -6,7 +6,11 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
@@ -18,12 +22,45 @@ import (
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
-// Deterministically derive a private key per-node for dev networks only.
+const devValidatorKeyDirEnv = "THRYLOS_DEV_KEY_DIR"
+
 func getNodeSpecificPrivateKey(nodeID int) (crypto.PrivateKey, error) {
-	seedStr := fmt.Sprintf("thrylos-development-node-key-%d-2024", nodeID)
-	hash := sha256.Sum256([]byte(seedStr))
-	// Use internal wrapper
-	return crypto.NewPrivateKeyFromBytes(hash[:])
+	keyPath := devValidatorKeyPath(nodeID)
+	raw, err := os.ReadFile(keyPath)
+	if err == nil {
+		trimmed := strings.TrimSpace(string(raw))
+		decoded, decodeErr := hex.DecodeString(trimmed)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode dev validator key %s: %w", keyPath, decodeErr)
+		}
+		return crypto.NewPrivateKeyFromBytes(decoded)
+	}
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read dev validator key %s: %w", keyPath, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		return nil, fmt.Errorf("create dev validator key dir: %w", err)
+	}
+
+	priv, err := crypto.NewPrivateKey()
+	if err != nil {
+		return nil, fmt.Errorf("generate dev validator key: %w", err)
+	}
+
+	if err := os.WriteFile(keyPath, []byte(hex.EncodeToString(priv.Bytes())), 0o600); err != nil {
+		return nil, fmt.Errorf("persist dev validator key %s: %w", keyPath, err)
+	}
+
+	return priv, nil
+}
+
+func devValidatorKeyPath(nodeID int) string {
+	if dir := strings.TrimSpace(os.Getenv(devValidatorKeyDirEnv)); dir != "" {
+		return filepath.Join(dir, fmt.Sprintf("node%d-validator.key", nodeID))
+	}
+
+	return filepath.Join(".thrylos-dev", "validator-keys", fmt.Sprintf("node%d-validator.key", nodeID))
 }
 
 func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.PrivateKey, []string, error) {
