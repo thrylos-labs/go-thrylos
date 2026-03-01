@@ -24,7 +24,6 @@ import (
 	"math/big"
 	"net/http"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -343,30 +342,37 @@ func extractPortFromConfig(addr string) int {
 	}
 }
 
-func parseChainID(chainIDStr string) int64 {
-	log.Printf("🔍 DEBUG parseChainID: input='%s'", chainIDStr)
-
-	// Try parsing the entire string first
-	id, err := strconv.ParseInt(chainIDStr, 10, 64)
-	if err == nil {
-		log.Printf("✅ Parsed as integer: %d", id)
-		return id
+func parseChainID(chainIDStr string) (int64, error) {
+	if chainIDStr == "" {
+		return 0, fmt.Errorf("chain ID cannot be empty")
 	}
 
-	// Extract numbers from strings like "thrylos-local-1337"
-	re := regexp.MustCompile(`\d+`)
-	matches := re.FindAllString(chainIDStr, -1)
-	if len(matches) > 0 {
-		// Use the last number found (1337 in "thrylos-local-1337")
-		lastNum := matches[len(matches)-1]
-		if parsedID, err := strconv.ParseInt(lastNum, 10, 64); err == nil {
-			log.Printf("✅ Extracted chain ID %d from string '%s'", parsedID, chainIDStr)
-			return parsedID
+	if id, err := strconv.ParseInt(chainIDStr, 10, 64); err == nil {
+		return id, nil
+	}
+
+	parts := strings.Split(chainIDStr, "-")
+	if len(parts) < 2 || parts[0] != "thrylos" {
+		return 0, fmt.Errorf("invalid chain ID format: %q", chainIDStr)
+	}
+
+	for _, part := range parts[1 : len(parts)-1] {
+		if part == "" {
+			return 0, fmt.Errorf("invalid chain ID format: %q", chainIDStr)
+		}
+		for _, r := range part {
+			if r < 'a' || r > 'z' {
+				return 0, fmt.Errorf("invalid chain ID format: %q", chainIDStr)
+			}
 		}
 	}
 
-	log.Printf("⚠️ Could not parse chain ID from '%s', using default: 1", chainIDStr)
-	return 1 // Default to 1 (Mainnet) if parsing fails
+	id, err := strconv.ParseInt(parts[len(parts)-1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid chain ID suffix: %q", chainIDStr)
+	}
+
+	return id, nil
 }
 
 // NewServerWithConfig creates a new API server with full configuration
@@ -396,9 +402,14 @@ func (s *Server) setupRoutes() {
 	// ---------------------------------------------------------
 	// 1. Initialize EVM RPC Handler
 	// ---------------------------------------------------------
-	// Try to parse ChainID from config, default to 1 (Mainnet) if fails
-	// Try to parse ChainID from config, default to 1 (Mainnet) if fails
-	chainID := parseChainID(s.config.Network.ChainID)
+	chainID := int64(1)
+	if s.config != nil {
+		parsedChainID, err := parseChainID(s.config.Network.ChainID)
+		if err != nil {
+			panic(fmt.Sprintf("invalid configured chain ID %q: %v", s.config.Network.ChainID, err))
+		}
+		chainID = parsedChainID
+	}
 
 	// ✅ FIX: Assign to struct field so the Dispatcher can use it
 	s.ethHandler = NewEthereumRPCHandler(s.blockchain, s.evmExecutor, chainID)

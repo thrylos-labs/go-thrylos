@@ -453,3 +453,26 @@ func TestRegisterValidatorWithDomain_EnforcesAggregateDomainConcentration(t *tes
 	require.NoError(t, err)
 	require.Equal(t, domainID, registeredDomain)
 }
+
+func TestGetAllValidators_ReturnsActiveAndInactiveValidators(t *testing.T) {
+	cfg := config.DefaultConfig()
+	vm, ws := newTestValidatorManager(t, cfg)
+
+	activeAddr := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	inactiveAddr := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	err := ws.SetValidator(activeAddr, &core.Validator{
+		Address: activeAddr,
+		Active:  true,
+	})
+	require.NoError(t, err)
+
+	err = ws.SetValidator(inactiveAddr, &core.Validator{
+		Address: inactiveAddr,
+		Active:  false,
+	})
+	require.NoError(t, err)
+
+	validators := vm.GetAllValidators()
+	require.Len(t, validators, 2)
+}

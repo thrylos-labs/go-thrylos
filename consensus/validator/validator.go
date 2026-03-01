@@ -1370,9 +1370,7 @@ func (vm *Manager) GetActiveValidators() []*core.Validator {
 
 // GetAllValidators returns all validators (active and inactive)
 func (vm *Manager) GetAllValidators() []*core.Validator {
-	// This would need to be implemented in worldState
-	// For now, return active validators
-	return vm.worldState.GetActiveValidators()
+	return vm.worldState.GetAllValidators()
 }
 
 // IsActive checks if a validator is active

@@ -23,6 +23,37 @@ func TestHandleJSONRPC_RejectsOversizedBody(t *testing.T) {
 	}
 }
 
+func TestParseChainID_StrictFormatsOnly(t *testing.T) {
+	validCases := map[string]int64{
+		"1":                   1,
+		"thrylos-1":           1,
+		"thrylos-testnet-1":   1,
+		"thrylos-devnet-1337": 1337,
+	}
+	for input, expected := range validCases {
+		got, err := parseChainID(input)
+		if err != nil {
+			t.Fatalf("expected %q to parse, got error: %v", input, err)
+		}
+		if got != expected {
+			t.Fatalf("expected %q -> %d, got %d", input, expected, got)
+		}
+	}
+
+	invalidCases := []string{
+		"",
+		"chain2-id5",
+		"thrylos-testnet-a",
+		"thrylos-testnet-1-extra",
+		"thrylos-testnet-1a",
+	}
+	for _, input := range invalidCases {
+		if _, err := parseChainID(input); err == nil {
+			t.Fatalf("expected %q to be rejected", input)
+		}
+	}
+}
+
 func TestAwardFaucet_PersistsCooldownBeforeSuccess(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "thrylos-points-*")
 	if err != nil {

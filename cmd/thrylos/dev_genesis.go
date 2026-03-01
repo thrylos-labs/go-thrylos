@@ -97,10 +97,6 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 			return nil, nil, nil, fmt.Errorf("failed to derive address for node %d: %w", nodeID, err)
 		}
 
-		// ✅ DEBUG: Verify alignment
-		// Note: len(pubBytes) should be 33
-		fmt.Printf("🔑 Node %d | PubKeyLen: %d | Address: %s\n", nodeID, len(pubBytes), addr)
-
 		meta := metadata[nodeID]
 		validator := &core.Validator{
 			Address:        addr,

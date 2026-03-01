@@ -60,7 +60,11 @@ func (et *EvidenceTracker) MarkProcessed(evidence *SlashingEvidence) {
 // Note: Changed receiver to ConsensusEngine to match your provided code snippet's intent
 func (ce *ConsensusEngine) HandleSlashingEvidence(evidence *SlashingEvidence) error {
 	// 1. Check if already processed (prevent duplicates) - FAIL FAST
-	if ce.evidenceTracker.IsProcessed(evidence.ID) {
+	processed, err := ce.isEvidenceProcessed(evidence.ID)
+	if err != nil {
+		return fmt.Errorf("failed to check processed evidence: %v", err)
+	}
+	if processed {
 		log.Printf("📝 Evidence %s already processed, skipping", evidence.ID)
 		return nil
 	}
@@ -80,19 +84,15 @@ func (ce *ConsensusEngine) HandleSlashingEvidence(evidence *SlashingEvidence) er
 		return fmt.Errorf("failed to apply slashing: %v", err)
 	}
 
-	// 5. Mark as processed
-	ce.evidenceTracker.MarkProcessed(evidence)
+	// 5. Persist and cache processed state
+	if err := ce.markEvidenceProcessed(evidence); err != nil {
+		return fmt.Errorf("failed to record processed evidence: %v", err)
+	}
 
 	// 6. Broadcast to network
 	if err := ce.broadcastSlashingEvidence(evidence); err != nil {
 		log.Printf("⚠️  Failed to broadcast slashing evidence: %v", err)
 		// Don't return error - local slashing succeeded
-	}
-
-	// 7. Store evidence for auditing (if storage available)
-	if err := ce.persistSlashingEvidence(evidence); err != nil {
-		log.Printf("⚠️  Failed to persist slashing evidence: %v", err)
-		// Don't return error - slashing succeeded
 	}
 
 	log.Printf("✅ Slashing evidence %s processed successfully for validator %s",
@@ -249,11 +249,11 @@ func (ce *ConsensusEngine) persistSlashingEvidence(evidence *SlashingEvidence) e
 		return nil // No storage available, skip
 	}
 
-	// Store via slashing manager's storage
-	// For now, we log it
-	log.Printf("💾 Persisting slashing evidence %s (storage method TBD)", evidence.ID)
-
-	return nil
+	return ce.slashingManager.storage.SaveProcessedEvidenceWithMetadata(
+		evidence.ID,
+		evidence.Type.String(),
+		evidence.ValidatorAddress,
+	)
 }
 
 // processReceivedSlashingEvidence handles evidence received from peers
@@ -265,7 +265,11 @@ func (ce *ConsensusEngine) processReceivedSlashingEvidence(evidence *SlashingEvi
 		evidence.ID, evidence.ValidatorAddress, evidence.ReporterAddress)
 
 	// Check if already processed (Fail Fast)
-	if ce.evidenceTracker.IsProcessed(evidence.ID) {
+	processed, err := ce.isEvidenceProcessed(evidence.ID)
+	if err != nil {
+		return fmt.Errorf("failed to check processed evidence: %v", err)
+	}
+	if processed {
 		log.Printf("⚠️  Evidence %s already processed, skipping", evidence.ID)
 		return nil
 	}
@@ -285,7 +289,9 @@ func (ce *ConsensusEngine) processReceivedSlashingEvidence(evidence *SlashingEvi
 	}
 
 	// Mark as processed BEFORE applying
-	ce.evidenceTracker.MarkProcessed(evidence)
+	if err := ce.markEvidenceProcessed(evidence); err != nil {
+		return fmt.Errorf("failed to record processed evidence: %v", err)
+	}
 
 	// Apply slashing locally
 	if err := ce.applySlashing(evidence); err != nil {
@@ -295,6 +301,35 @@ func (ce *ConsensusEngine) processReceivedSlashingEvidence(evidence *SlashingEvi
 
 	log.Printf("✅ Slashing evidence processed successfully")
 	return nil
+}
+
+func (ce *ConsensusEngine) isEvidenceProcessed(evidenceID string) (bool, error) {
+	if ce.evidenceTracker != nil && ce.evidenceTracker.IsProcessed(evidenceID) {
+		return true, nil
+	}
+
+	if ce.slashingManager == nil || ce.slashingManager.storage == nil {
+		return false, nil
+	}
+
+	processed, err := ce.slashingManager.storage.IsEvidenceProcessed(evidenceID)
+	if err != nil {
+		return false, err
+	}
+	if processed && ce.evidenceTracker != nil {
+		ce.evidenceTracker.MarkProcessed(&SlashingEvidence{ID: evidenceID})
+	}
+	return processed, nil
+}
+
+func (ce *ConsensusEngine) markEvidenceProcessed(evidence *SlashingEvidence) error {
+	if evidence == nil {
+		return fmt.Errorf("evidence is nil")
+	}
+	if ce.evidenceTracker != nil {
+		ce.evidenceTracker.MarkProcessed(evidence)
+	}
+	return ce.persistSlashingEvidence(evidence)
 }
 
 // signEvidence signs evidence with the node's private key
