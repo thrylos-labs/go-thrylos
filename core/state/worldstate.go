@@ -421,6 +421,12 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply str
 		}
 	}
 
+	totalStaked := big.NewInt(0)
+	for _, validator := range genesisValidators {
+		totalStaked.Add(totalStaked, math.ParseBigInt(validator.Stake))
+	}
+	ws.totalStaked = totalStaked.String()
+
 	// ✅ ADD THIS: Fund all validator addresses
 	fmt.Printf("💰 Funding %d validators...\n", len(genesisValidators))
 	for _, validator := range genesisValidators {
@@ -1847,9 +1853,11 @@ func (sm *StakingManager) Delegate(delegatorAddr, validatorAddr string, amount *
 	// ✅ NEW CHECK 3: Maximum stake percentage (concentration limit)
 	totalNetworkStakeBig, _ := new(big.Int).SetString(ws.totalStaked, 10)
 	if totalNetworkStakeBig != nil && totalNetworkStakeBig.Sign() > 0 {
-		// Calculate: (newValidatorStake / totalNetworkStake)
+		postDelegationTotalStake := new(big.Int).Add(totalNetworkStakeBig, amount)
+
+		// Calculate: (newValidatorStake / postDelegationTotalStake)
 		newStakeFloat := new(big.Float).SetInt(newStakeBig)
-		totalStakeFloat := new(big.Float).SetInt(totalNetworkStakeBig)
+		totalStakeFloat := new(big.Float).SetInt(postDelegationTotalStake)
 		percentageFloat := new(big.Float).Quo(newStakeFloat, totalStakeFloat)
 		percentage, _ := percentageFloat.Float64()
 

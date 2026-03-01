@@ -1020,9 +1020,11 @@ func (vm *Manager) AddDelegation(validatorAddr, delegatorAddr string, amount str
 	// ✅ NEW CHECK 3: Stake concentration
 	totalNetworkStake := vm.worldState.GetTotalStaked()
 	if totalNetworkStake != nil && totalNetworkStake.Sign() > 0 {
-		// Calculate: (newValidatorStake / totalNetworkStake)
+		postTotalStake := math.Add(totalNetworkStake, amountBig)
+
+		// Calculate: (newValidatorStake / postTotalStake)
 		newStakeF := new(big.Float).SetInt(newStakeBig)
-		totalStakeF := new(big.Float).SetInt(totalNetworkStake)
+		totalStakeF := new(big.Float).SetInt(postTotalStake)
 		percentageF := new(big.Float).Quo(newStakeF, totalStakeF)
 		percentage, _ := percentageF.Float64()
 
