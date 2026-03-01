@@ -158,9 +158,9 @@ func (ws *WorldState) initializeFromConfig(verbose bool) error {
 			genesisAccount.Address, readableBalance.String(), genesisAccount.Purpose)
 
 		account := &core.Account{
-			Address: genesisAccount.Address,
-			Balance: balanceBig.Bytes(),
-			Nonce:   0,
+			Address:      genesisAccount.Address,
+			Balance:      balanceBig.Bytes(),
+			Nonce:        0,
 			StakedAmount: nil,
 			DelegatedTo:  make(map[string][]byte),
 			Rewards:      nil,
@@ -366,8 +366,6 @@ func (ws *WorldState) InitializeGenesis(genesisAccount string, initialSupply str
 	defer ws.chainMu.Unlock()
 	ws.validatorMu.Lock()
 	defer ws.validatorMu.Unlock()
-	ws.stateRootMu.Lock()
-	defer ws.stateRootMu.Unlock()
 
 	// Validate genesis account address format
 	if err := account.ValidateAddress(genesisAccount); err != nil {
@@ -2631,7 +2629,7 @@ func (ws *WorldState) SetStake(delegatorAddr, validatorAddr string, amount strin
 		delegator = &core.Account{
 			Address:      delegatorAddr,
 			Balance:      nil,
-			Nonce:        0,   // Nonce remains integer (uint64)
+			Nonce:        0, // Nonce remains integer (uint64)
 			StakedAmount: nil,
 			DelegatedTo:  make(map[string][]byte),
 			Rewards:      nil,
