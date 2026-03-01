@@ -40,8 +40,8 @@ func (m *mockProposerHistory) GetValidatorStakeDomain(validatorAddr string) (str
 	return validatorAddr, nil
 }
 
-// TestGenerateSeedFromBlocks tests the block hash accumulator
-func TestGenerateSeedFromBlocks(t *testing.T) {
+// TestGenerateSeedFromInputs tests the seed accumulator
+func TestGenerateSeedFromInputs(t *testing.T) {
 	t.Run("DifferentBlocks_DifferentSeeds", func(t *testing.T) {
 		// Create two different sets of block hashes
 		blocks1 := [][]byte{
@@ -58,8 +58,8 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 
 		slot := uint64(100)
 
-		seed1 := GenerateSeedFromBlocks(blocks1, slot)
-		seed2 := GenerateSeedFromBlocks(blocks2, slot)
+		seed1 := GenerateSeedFromInputs(blocks1, nil, slot)
+		seed2 := GenerateSeedFromInputs(blocks2, nil, slot)
 
 		// Seeds should be different
 		assert.NotEqual(t, seed1, seed2, "Different block hashes should produce different seeds")
@@ -76,8 +76,8 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 
 		slot := uint64(100)
 
-		seed1 := GenerateSeedFromBlocks(blocks, slot)
-		seed2 := GenerateSeedFromBlocks(blocks, slot)
+		seed1 := GenerateSeedFromInputs(blocks, nil, slot)
+		seed2 := GenerateSeedFromInputs(blocks, nil, slot)
 
 		// Seeds should be identical
 		assert.Equal(t, seed1, seed2, "Same blocks should produce same seed")
@@ -89,8 +89,8 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 			[]byte("block2hash"),
 		}
 
-		seed1 := GenerateSeedFromBlocks(blocks, 100)
-		seed2 := GenerateSeedFromBlocks(blocks, 101)
+		seed1 := GenerateSeedFromInputs(blocks, nil, 100)
+		seed2 := GenerateSeedFromInputs(blocks, nil, 101)
 
 		// Different slots should produce different seeds
 		assert.NotEqual(t, seed1, seed2, "Different slots should produce different seeds")
@@ -112,7 +112,7 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 		emptyBlocks := [][]byte{}
 		slot := uint64(100)
 
-		seed := GenerateSeedFromBlocks(emptyBlocks, slot)
+		seed := GenerateSeedFromInputs(emptyBlocks, nil, slot)
 
 		// Should still produce valid 32-byte seed
 		assert.Len(t, seed, 32, "Should produce valid seed even with no blocks")
@@ -147,7 +147,7 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 			binary.BigEndian.PutUint64(lastBlock, uint64(i))
 			blocks[len(blocks)-1] = lastBlock
 
-			seed := GenerateSeedFromBlocks(blocks, slot)
+			seed := GenerateSeedFromInputs(blocks, nil, slot)
 			seedStr := string(seed)
 
 			// Each seed should be unique
@@ -179,7 +179,7 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 			[]byte("block3"),
 		}
 
-		seed := GenerateSeedFromBlocks(blocks, 100)
+		seed := GenerateSeedFromInputs(blocks, nil, 100)
 
 		// Select proposer
 		result, err := set.SelectProposer(seed, 100)
@@ -194,7 +194,7 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 			[]byte("block4"), // Different
 		}
 
-		seed2 := GenerateSeedFromBlocks(blocks2, 100)
+		seed2 := GenerateSeedFromInputs(blocks2, nil, 100)
 		result2, err := set.SelectProposer(seed2, 100)
 		assert.NoError(t, err)
 
@@ -368,7 +368,7 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 }
 
 // Benchmark to ensure performance is acceptable
-func BenchmarkGenerateSeedFromBlocks(b *testing.B) {
+func BenchmarkGenerateSeedFromInputs(b *testing.B) {
 	blocks := make([][]byte, 10)
 	for i := 0; i < 10; i++ {
 		blocks[i] = make([]byte, 32)
@@ -380,7 +380,7 @@ func BenchmarkGenerateSeedFromBlocks(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = GenerateSeedFromBlocks(blocks, slot)
+		_ = GenerateSeedFromInputs(blocks, nil, slot)
 	}
 }
 
@@ -433,7 +433,7 @@ func TestSelectionSimulation_CartelStakeSplitting(t *testing.T) {
 		winnerCounts := make(map[string]int)
 
 		for slot := 0; slot < slots; slot++ {
-			seed := GenerateSeedFromBlocks([][]byte{[]byte(fmt.Sprintf("slot-%d", slot))}, uint64(slot))
+			seed := GenerateSeedFromInputs([][]byte{[]byte(fmt.Sprintf("slot-%d", slot))}, nil, uint64(slot))
 			result, err := set.SelectProposer(seed, uint64(slot))
 			assert.NoError(t, err)
 			assert.NotNil(t, result)

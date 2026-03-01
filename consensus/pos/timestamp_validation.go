@@ -32,7 +32,6 @@ func NewTimestampValidator(maxDriftSeconds, slotDurationSeconds, genesisTimestam
 		slotDurationSeconds = 6 // Default: 6 seconds per slot
 	}
 
-	// ADD DEBUG LOG
 	log.Printf("🔍 Creating TimestampValidator: maxDrift=%d, slotDuration=%d",
 		maxDriftSeconds, slotDurationSeconds)
 
@@ -78,9 +77,6 @@ func (tv *TimestampValidator) ValidateBlockTimestamp(
 	// Rule 3: Block timestamp should align with expected slot time
 	expectedTimestamp := tv.CalculateSlotTimestamp(blockSlot)
 	timestampDiff := abs64(blockTimestamp - expectedTimestamp)
-
-	log.Printf("🔍 Timestamp validation: block=%d, expected=%d, diff=%d, maxDrift=%d",
-		blockTimestamp, expectedTimestamp, timestampDiff, tv.maxDriftSeconds)
 
 	if timestampDiff > tv.maxDriftSeconds {
 		return fmt.Errorf(

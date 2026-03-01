@@ -1219,10 +1219,6 @@ func (vs *Set) CleanupInactiveValidators(maxInactiveTime time.Duration) []string
 // At the end of the file, add:
 
 // GenerateSeedFromBlocks creates randomness seed from recent block hashes
-func GenerateSeedFromBlocks(blockHashes [][]byte, slot uint64) []byte {
-	return GenerateSeedFromInputs(blockHashes, nil, slot)
-}
-
 func GenerateSeedFromInputs(blockHashes [][]byte, vrfOutputs [][]byte, slot uint64) []byte {
 	if len(blockHashes) == 0 && len(vrfOutputs) == 0 {
 		slotBytes := make([]byte, 8)
