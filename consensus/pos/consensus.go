@@ -203,24 +203,14 @@ func (ce *ConsensusEngine) Stop() error {
 	return nil
 }
 
-// In consensusLoop (around line 94-112)
 func (ce *ConsensusEngine) consensusLoop() {
 	slotTicker := time.NewTicker(ce.proposalTimeout)
 	defer slotTicker.Stop()
 
-	// 🔍 ADD THIS
-	log.Printf("🔍 consensusLoop started, timeout=%v\n", ce.proposalTimeout)
-
 	for {
 		select {
 		case <-slotTicker.C:
-			// 🔍 ADD THIS
-			log.Printf("\n⏰ TICK - calling processSlot\n")
-
 			ce.processSlot()
-
-			// 🔍 ADD THIS
-			log.Printf("✅ processSlot returned\n")
 		}
 	}
 }
@@ -490,8 +480,7 @@ func (ce *ConsensusEngine) updateForkChoice() {
 }
 
 func (ce *ConsensusEngine) updateValidatorActivity(validatorAddr string, wasBlockProduced bool) {
-	// ✅ ADD THIS: Skip activity tracking during startup (first 100 blocks)
-	// This prevents "withholding" jailing before the network is stable.
+	// Skip activity tracking during startup to avoid jailing before the network is stable.
 	if ce.worldState.GetHeight() < 100 {
 		return
 	}
@@ -653,16 +642,13 @@ func (ce *ConsensusEngine) createAttestation() error {
 func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 	activeValidators := ce.getEligibleProposers(false)
 	if len(activeValidators) == 0 {
-		fmt.Println("🚨 EMERGENCY: No slash-eligible active validators found. Entering Recovery Mode.")
+		log.Printf("🚨 EMERGENCY: No slash-eligible active validators found. Entering recovery mode.")
 		activeValidators = ce.getEligibleProposers(true)
 		if len(activeValidators) == 0 {
 			return "", fmt.Errorf("CRITICAL: No validators exist in world state (bootstrap required)")
 		}
 		log.Printf("⚠️ Recovery Mode: Using %d total validators (active+inactive) for consensus\n", len(activeValidators))
 	}
-
-	// 🔍 DEBUG LOG
-	log.Printf("🔍 DEBUG getSlotProposer: slot=%d, candidates=%d\n", slot, len(activeValidators))
 
 	schedule, err := ce.validatorSet.BuildEpochSchedule(
 		activeValidators,
@@ -679,8 +665,6 @@ func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 	}
 
 	selectedAddress := schedule[slotIndex]
-
-	log.Printf("✅ DEBUG: Selected proposer %s for slot %d\n", selectedAddress, slot)
 	return selectedAddress, nil
 }
 
@@ -1062,8 +1046,6 @@ func (ce *ConsensusEngine) signBlock(block *core.Block) error {
 		return fmt.Errorf("failed to sign block: %w", err)
 	}
 
-	log.Printf("🔍 Signing block with pubkey=%x", ce.nodePrivateKey.PublicKey().Bytes())
-
 	// Assumes core.Block has `Signature []byte`
 	block.Signature = sig.Bytes()
 	return nil
@@ -1097,7 +1079,6 @@ func (ce *ConsensusEngine) messageHandler() {
 			ce.handleAttestation(m)
 		case *Vote:
 			ce.handleVote(m)
-		// ADD THIS:
 		case *SlashingEvidence:
 			ce.processReceivedSlashingEvidence(m)
 		}
@@ -1157,7 +1138,7 @@ func (ce *ConsensusEngine) handleAttestation(attestation *types.Attestation) {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
 
-	// ADD THIS: Verify signature
+	// Verify signature before processing the attestation.
 	if err := ce.verifyAttestationSignature(attestation); err != nil {
 		log.Printf("❌ Invalid signature: %v\n", err)
 		return

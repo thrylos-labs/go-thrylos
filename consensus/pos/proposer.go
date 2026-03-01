@@ -434,9 +434,10 @@ func (bp *BlockProposer) constructBlock(transactions []*core.Transaction, slot u
 		now = prevTimestamp + 1
 	}
 
-	// ✅ DEBUG LOG: This will prove the logic is working in your terminal
 	if now == prevTimestamp+1 && time.Now().Unix() <= prevTimestamp {
-		log.Printf("⏰ TIMESTAMP GUARD TRIGGERED: Parent=%d, New=%d", prevTimestamp, now)
+		if bp.config != nil && bp.config.Environment == "development" {
+			log.Printf("⏰ TIMESTAMP GUARD TRIGGERED: Parent=%d, New=%d", prevTimestamp, now)
+		}
 	}
 
 	header := &core.BlockHeader{
