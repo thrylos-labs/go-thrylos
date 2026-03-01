@@ -37,8 +37,6 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/evm"
 	"github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
-	"github.com/thrylos-labs/go-thrylos/core/transaction"
-	thryloscrypto "github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
@@ -116,16 +114,8 @@ type TransactionHistoryResponse struct {
 }
 
 type governanceTxRequest struct {
-	From          string  `json:"from"`
-	PrivateKey    string  `json:"private_key"`
-	Gas           int64   `json:"gas,omitempty"`
-	GasPrice      string  `json:"gas_price,omitempty"`
-	Nonce         *uint64 `json:"nonce,omitempty"`
-	Broadcast     bool    `json:"broadcast,omitempty"`
-	Parameter     string  `json:"parameter,omitempty"`
-	ProposedValue string  `json:"proposed_value,omitempty"`
-	ProposalID    string  `json:"proposal_id,omitempty"`
-	Approve       *bool   `json:"approve,omitempty"`
+	Tx        *core.Transaction `json:"tx"`
+	Broadcast bool              `json:"broadcast,omitempty"`
 }
 
 // NewServer creates a new API server
@@ -904,144 +894,97 @@ func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) submitGovernanceProposalTransaction(w http.ResponseWriter, r *http.Request) {
-	var req governanceTxRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, "Invalid request format", http.StatusBadRequest)
-		return
-	}
-
-	tx, err := s.buildGovernanceTransaction(req, func(v *transaction.Validator, nonce uint64, gas int64, gasPrice string, privateKey thryloscrypto.PrivateKey) (*core.Transaction, error) {
-		if strings.TrimSpace(req.Parameter) == "" || strings.TrimSpace(req.ProposedValue) == "" {
-			return nil, fmt.Errorf("parameter and proposed_value are required")
-		}
-		return v.CreateGovernanceProposalTransaction(req.From, req.Parameter, req.ProposedValue, gas, gasPrice, nonce, privateKey)
-	})
+	req, err := decodeGovernanceSubmissionRequest(r)
 	if err != nil {
 		s.writeError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	s.respondWithConstructedGovernanceTransaction(w, tx, req.Broadcast)
+	s.submitGovernanceTransaction(w, req, core.TransactionType_GOVERNANCE_PROPOSE)
 }
 
 func (s *Server) submitGovernanceVoteTransaction(w http.ResponseWriter, r *http.Request) {
-	var req governanceTxRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, "Invalid request format", http.StatusBadRequest)
-		return
-	}
-
-	tx, err := s.buildGovernanceTransaction(req, func(v *transaction.Validator, nonce uint64, gas int64, gasPrice string, privateKey thryloscrypto.PrivateKey) (*core.Transaction, error) {
-		if strings.TrimSpace(req.ProposalID) == "" {
-			return nil, fmt.Errorf("proposal_id is required")
-		}
-		if req.Approve == nil {
-			return nil, fmt.Errorf("approve is required")
-		}
-		return v.CreateGovernanceVoteTransaction(req.From, req.ProposalID, *req.Approve, gas, gasPrice, nonce, privateKey)
-	})
+	req, err := decodeGovernanceSubmissionRequest(r)
 	if err != nil {
 		s.writeError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	s.respondWithConstructedGovernanceTransaction(w, tx, req.Broadcast)
+	s.submitGovernanceTransaction(w, req, core.TransactionType_GOVERNANCE_VOTE)
 }
 
 func (s *Server) submitGovernanceFinalizeTransaction(w http.ResponseWriter, r *http.Request) {
-	var req governanceTxRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, "Invalid request format", http.StatusBadRequest)
-		return
-	}
-
-	tx, err := s.buildGovernanceTransaction(req, func(v *transaction.Validator, nonce uint64, gas int64, gasPrice string, privateKey thryloscrypto.PrivateKey) (*core.Transaction, error) {
-		if strings.TrimSpace(req.ProposalID) == "" {
-			return nil, fmt.Errorf("proposal_id is required")
-		}
-		return v.CreateGovernanceFinalizeTransaction(req.From, req.ProposalID, gas, gasPrice, nonce, privateKey)
-	})
+	req, err := decodeGovernanceSubmissionRequest(r)
 	if err != nil {
 		s.writeError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	s.respondWithConstructedGovernanceTransaction(w, tx, req.Broadcast)
+	s.submitGovernanceTransaction(w, req, core.TransactionType_GOVERNANCE_FINALIZE)
 }
 
-func (s *Server) buildGovernanceTransaction(
-	req governanceTxRequest,
-	builder func(v *transaction.Validator, nonce uint64, gas int64, gasPrice string, privateKey thryloscrypto.PrivateKey) (*core.Transaction, error),
-) (*core.Transaction, error) {
-	if !s.isDevEnvironment() {
-		return nil, fmt.Errorf("governance transaction construction endpoint is disabled outside development")
-	}
-	if strings.TrimSpace(req.From) == "" {
-		return nil, fmt.Errorf("from is required")
-	}
-	if strings.TrimSpace(req.PrivateKey) == "" {
-		return nil, fmt.Errorf("private_key is required")
-	}
-
-	privateKey, err := thryloscrypto.PrivateKeyFromString(req.PrivateKey)
+func decodeGovernanceSubmissionRequest(r *http.Request) (*governanceTxRequest, error) {
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, fmt.Errorf("invalid private key: %w", err)
+		return nil, fmt.Errorf("invalid request format")
 	}
 
-	if derived := strings.ToLower(privateKey.Address().String()); derived != strings.ToLower(req.From) {
-		return nil, fmt.Errorf("private key does not match from address")
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("invalid request format")
+	}
+	if _, exists := raw["private_key"]; exists {
+		return nil, fmt.Errorf("private_key is not accepted; sign governance transactions client-side and submit a pre-signed tx")
 	}
 
-	cfg := s.config
-	if cfg == nil {
-		cfg = config.DefaultConfig()
+	var req governanceTxRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("invalid request format")
 	}
-
-	gas := req.Gas
-	if gas <= 0 {
-		gas = 21000
+	if req.Tx == nil {
+		return nil, fmt.Errorf("tx is required")
 	}
+	return &req, nil
+}
 
-	gasPrice := strings.TrimSpace(req.GasPrice)
-	if gasPrice == "" {
-		gasPrice = cfg.Economics.BaseGasPrice
+func (s *Server) submitGovernanceTransaction(w http.ResponseWriter, req *governanceTxRequest, expectedType core.TransactionType) {
+	tx := req.Tx
+	if tx.Id == "" {
+		s.writeError(w, "Transaction ID required", http.StatusBadRequest)
+		return
 	}
-
-	nonce := uint64(0)
-	if req.Nonce != nil {
-		nonce = *req.Nonce
-	} else {
-		currentNonce, err := s.worldState.GetNonce(req.From)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load account nonce: %w", err)
-		}
-		nonce = currentNonce
+	if tx.Hash == "" {
+		s.writeError(w, "Transaction hash required", http.StatusBadRequest)
+		return
 	}
-
-	txValidator := transaction.NewValidator(s.worldState.GetShardID(), s.worldState.GetTotalShards(), cfg)
-	tx, err := builder(txValidator, nonce, gas, gasPrice, privateKey)
-	if err != nil {
-		return nil, err
+	if len(tx.Signature) == 0 {
+		s.writeError(w, "Transaction signature required", http.StatusBadRequest)
+		return
+	}
+	if tx.Type != expectedType {
+		s.writeError(w, "Invalid governance transaction type", http.StatusBadRequest)
+		return
+	}
+	if len(tx.Data) == 0 {
+		s.writeError(w, "Governance transaction payload required", http.StatusBadRequest)
+		return
 	}
 
 	if req.Broadcast {
 		if err := s.worldState.AddTransaction(tx); err != nil {
-			return nil, fmt.Errorf("failed to broadcast governance transaction: %w", err)
+			s.writeError(w, fmt.Sprintf("Invalid transaction: %v", err), http.StatusBadRequest)
+			return
 		}
 	}
 
-	return tx, nil
-}
-
-func (s *Server) respondWithConstructedGovernanceTransaction(w http.ResponseWriter, tx *core.Transaction, broadcast bool) {
-	status := "created"
-	if broadcast {
+	status := "validated"
+	if req.Broadcast {
 		status = "accepted"
 	}
 
 	s.writeJSON(w, map[string]interface{}{
 		"status":    status,
-		"broadcast": broadcast,
+		"broadcast": req.Broadcast,
 		"tx_hash":   tx.Hash,
 		"tx":        tx,
 	})
@@ -1902,7 +1845,7 @@ func (s *Server) formatValidator(validator *core.Validator) map[string]interface
 		"blocksMissed":   validator.BlocksMissed,
 		"createdAt":      validator.CreatedAt,
 		"updatedAt":      validator.UpdatedAt,
-		"delegations":    func() map[string]string {
+		"delegations": func() map[string]string {
 			out := make(map[string]string, len(validator.Delegators))
 			for addr, amount := range validator.Delegators {
 				out[addr] = math.BigIntToString(math.ParseBigInt(amount))
