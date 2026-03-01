@@ -1,13 +1,13 @@
-version: "3.8"
-
 # -----------------------------------------------------------------------
-# Thrylos Testnet — docker-compose
+# Thrylos Testnet — local development docker-compose
 #
-# FIND-05: TLS is now enabled by default for the API server.
-# Each node expects a cert and key mounted into /app/certs/ at runtime.
-# Generate per-node certs with the script in certs/README.md.
+# Local default:
+# - HTTP only (ENABLE_TLS=false)
+# - no certificate requirement
+# - simple local healthchecks/bootstrap resolution
 #
-# FIND-04: Bootstrap peer IDs are resolved dynamically (no hardcoding).
+# For server deployments, layer docker-compose-server.override.yml on top
+# to enable TLS and HTTPS healthchecks.
 # -----------------------------------------------------------------------
 
 services:
@@ -22,8 +22,8 @@ services:
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
       - POINTS_FILE_PATH=/app/data/points.json
-      # FIND-05: Enable TLS on the API server
-      - ENABLE_TLS=true
+      # Local testnet does not require mounted certs; use HTTP.
+      - ENABLE_TLS=false
       - CERT_FILE=/app/certs/server.crt
       - KEY_FILE=/app/certs/server.key
     ports:
@@ -33,13 +33,13 @@ services:
       - node1-data-v3:/app/data
       - node1-keys-v3:/app/keys
       - shared-config-v3:/app/config
-      # FIND-05: Mount TLS cert/key (generated locally, gitignored)
+      # Optional cert mount retained; unused when ENABLE_TLS=false.
       - ./certs/node1:/app/certs:ro
     networks:
       thrylos-net:
         ipv4_address: 172.25.0.10
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://localhost:8080/api/v1/health >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/v1/health >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -59,7 +59,7 @@ services:
     command: >
       sh -c "
         apk add --no-cache curl &&
-        PEER_ID=$(curl -sk https://172.25.0.10:8080/api/v1/peer-id) &&
+        PEER_ID=$(curl -s http://172.25.0.10:8080/api/v1/peer-id) &&
         echo \"/ip4/172.25.0.10/tcp/9000/p2p/$${PEER_ID}\" > /app/config/bootstrap_peers.txt &&
         echo \"Bootstrap peer resolved: $${PEER_ID}\"
       "
@@ -76,7 +76,7 @@ services:
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
       - BOOTSTRAP_PEERS_FILE=/app/config/bootstrap_peers.txt
-      - ENABLE_TLS=true
+      - ENABLE_TLS=false
       - CERT_FILE=/app/certs/server.crt
       - KEY_FILE=/app/certs/server.key
     ports:
@@ -94,7 +94,7 @@ services:
       peer-id-resolver:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://localhost:8080/api/v1/health >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/v1/health >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -112,7 +112,7 @@ services:
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
       - BOOTSTRAP_PEERS_FILE=/app/config/bootstrap_peers.txt
-      - ENABLE_TLS=true
+      - ENABLE_TLS=false
       - CERT_FILE=/app/certs/server.crt
       - KEY_FILE=/app/certs/server.key
     ports:
@@ -130,7 +130,7 @@ services:
       peer-id-resolver:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://localhost:8080/api/v1/health >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/v1/health >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -149,7 +149,7 @@ services:
       - DATA_DIR=/app/data
       - THRYLOS_ENVIRONMENT=development
       - BOOTSTRAP_PEERS_FILE=/app/config/bootstrap_peers.txt
-      - ENABLE_TLS=true
+      - ENABLE_TLS=false
       - CERT_FILE=/app/certs/server.crt
       - KEY_FILE=/app/certs/server.key
     ports:
@@ -167,7 +167,7 @@ services:
       peer-id-resolver:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://localhost:8080/api/v1/health >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/v1/health >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
