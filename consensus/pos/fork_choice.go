@@ -12,6 +12,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/config"
 	coremath "github.com/thrylos-labs/go-thrylos/core/math" // Safe BigInt math
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/storage"
 	"github.com/thrylos-labs/go-thrylos/types"
 )
 
@@ -128,6 +129,12 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 	if fc.slashingManager != nil {
 		if err := fc.slashingManager.ProcessAttestation(attestation); err != nil {
 			fmt.Printf("⚠️ Slashing violation detected for validator %s: %v\n", validatorAddr, err)
+			if dvErr, ok := err.(*DoubleSigningError); ok && dvErr.ConflictingRecord != nil {
+				prevAttestation := attestationFromRecord(dvErr.ConflictingRecord)
+				if slashErr := fc.slashingManager.ApplyDoubleVoteSlashing(prevAttestation, attestation); slashErr != nil {
+					fmt.Printf("⚠️ Failed to apply double-vote slashing for %s: %v\n", validatorAddr, slashErr)
+				}
+			}
 			return
 		}
 
@@ -162,11 +169,19 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 			fmt.Printf("⚠️ EQUIVOCATION DETECTED: validator %s voted for both %s and %s in epoch %d\n",
 				validatorAddr, prevVote[:8], blockHash[:8], epoch)
 
-			// Handle equivocation slashing
+			// Apply slashing immediately if we can reconstruct the prior conflicting attestation
+			// from fork-choice history. This covers the case where the slashing manager's
+			// startup grace path skipped recording/slashing on first observation.
 			if fc.slashingManager != nil {
-				// Equivocation is a slashable offense - validator voting for multiple blocks
-				// You may want to add a specific slashing method for this
-				fmt.Printf("⚠️ Validator %s will be slashed for equivocation\n", validatorAddr)
+				if prevAttestation := fc.findValidatorAttestation(prevVote, validatorAddr, epoch); prevAttestation != nil {
+					if err := fc.slashingManager.ApplyDoubleVoteSlashing(prevAttestation, attestation); err != nil {
+						fmt.Printf("⚠️ Failed to slash validator %s for equivocation: %v\n", validatorAddr, err)
+					} else {
+						fmt.Printf("⚠️ Validator %s slashed for equivocation\n", validatorAddr)
+					}
+				} else {
+					fmt.Printf("⚠️ Equivocation detected for %s but prior attestation was not retained\n", validatorAddr)
+				}
 			}
 			return
 		}
@@ -248,6 +263,31 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 
 		// Check justification (passing strings)
 		fc.checkJustification(epoch, blockHash, attestingStakeBig.String(), totalStakeBig.String())
+	}
+}
+
+func (fc *ForkChoice) findValidatorAttestation(blockHash, validatorAddr string, epoch uint64) *types.Attestation {
+	attestations := fc.attestationsByBlock[blockHash]
+	for _, att := range attestations {
+		if att != nil && att.ValidatorAddress == validatorAddr && att.Epoch == epoch {
+			return att
+		}
+	}
+	return nil
+}
+
+func attestationFromRecord(record *storage.AttestationRecord) *types.Attestation {
+	if record == nil {
+		return nil
+	}
+	return &types.Attestation{
+		ValidatorAddress: record.ValidatorAddress,
+		BlockHash:        record.BlockHash,
+		BlockHeight:      int64(record.Epoch * 32),
+		Epoch:            record.Epoch,
+		Slot:             record.Slot,
+		Signature:        append([]byte(nil), record.Signature...),
+		Timestamp:        record.Timestamp.Unix(),
 	}
 }
 
