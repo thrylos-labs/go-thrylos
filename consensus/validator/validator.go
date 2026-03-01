@@ -12,6 +12,7 @@
 package validator
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
@@ -34,6 +35,7 @@ const (
 	DefaultAutoRemoveDoubleSign = true
 	defaultUnbondingBlockTime   = 3 * time.Second
 	commissionUpdateInterval    = 24 * time.Hour
+	unbondingQueueMetadataKey   = "validator/unbonding_queue"
 )
 
 // Manager handles validator operations
@@ -102,7 +104,7 @@ type JailEvent struct {
 
 // NewManager creates a new validator manager
 func NewManager(config *config.Config, worldState *state.WorldState) *Manager {
-	return &Manager{
+	vm := &Manager{
 		config:           config,
 		worldState:       worldState,
 		validatorMetrics: make(map[string]*ValidatorMetrics),
@@ -113,6 +115,12 @@ func NewManager(config *config.Config, worldState *state.WorldState) *Manager {
 
 		performanceWindow: config.Staking.SignedBlocksWindow,
 	}
+
+	if err := vm.loadUnbondingQueue(); err != nil {
+		log.Printf("⚠️ Failed to load persisted unbonding queue: %v", err)
+	}
+
+	return vm
 }
 
 // RemoveValidator permanently removes a validator from the active set
@@ -220,6 +228,10 @@ func (vm *Manager) ProcessUnbondings() error {
 		} else {
 			vm.unbondingQueue[delegatorAddr] = entries
 		}
+	}
+
+	if err := vm.persistUnbondingQueueLocked(); err != nil {
+		return fmt.Errorf("failed to persist unbonding queue: %w", err)
 	}
 
 	return nil
@@ -1119,7 +1131,45 @@ func (vm *Manager) queueUnbondingLocked(validatorAddr, delegatorAddr string, amo
 	}
 	vm.unbondingQueue[delegatorAddr] = append(vm.unbondingQueue[delegatorAddr], entry)
 
+	if err := vm.persistUnbondingQueueLocked(); err != nil {
+		return fmt.Errorf("failed to persist unbonding queue: %w", err)
+	}
+
 	return nil
+}
+
+func (vm *Manager) loadUnbondingQueue() error {
+	raw, err := vm.worldState.GetMetadata(unbondingQueueMetadataKey)
+	if err != nil {
+		return err
+	}
+	if raw == "" {
+		return nil
+	}
+
+	var persisted map[string][]*UnbondingEntry
+	if err := json.Unmarshal([]byte(raw), &persisted); err != nil {
+		return fmt.Errorf("decode unbonding queue: %w", err)
+	}
+	if persisted == nil {
+		persisted = make(map[string][]*UnbondingEntry)
+	}
+
+	vm.unbondingQueue = persisted
+	return nil
+}
+
+func (vm *Manager) persistUnbondingQueueLocked() error {
+	if vm.unbondingQueue == nil {
+		vm.unbondingQueue = make(map[string][]*UnbondingEntry)
+	}
+
+	data, err := json.Marshal(vm.unbondingQueue)
+	if err != nil {
+		return fmt.Errorf("encode unbonding queue: %w", err)
+	}
+
+	return vm.worldState.SetMetadata(unbondingQueueMetadataKey, string(data))
 }
 
 // GetValidatorMetrics returns metrics for a validator

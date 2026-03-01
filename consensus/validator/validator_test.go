@@ -179,6 +179,101 @@ func TestProcessUnbondings_ReturnsPrincipalToBalance(t *testing.T) {
 	require.NotContains(t, vm.unbondingQueue, delegatorAddr)
 }
 
+func TestBeginUnbonding_PersistsQueueAcrossManagerRestart(t *testing.T) {
+	const (
+		validatorAddr = "0xabababababababababababababababababababab"
+		delegatorAddr = "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+	)
+
+	cfg := &config.Config{
+		Consensus: config.ConsensusConfig{
+			BlockTime: 3 * time.Second,
+		},
+		Staking: config.StakingConfig{
+			UnbondingPeriod: 12 * time.Second,
+		},
+	}
+
+	vm, ws := newTestValidatorManager(t, cfg)
+	err := ws.SetValidator(validatorAddr, &core.Validator{
+		Address:        validatorAddr,
+		Active:         true,
+		Stake:          ub("1000"),
+		DelegatedStake: ub("500"),
+		Delegators: map[string][]byte{
+			delegatorAddr: ub("500"),
+		},
+	})
+	require.NoError(t, err)
+
+	err = vm.BeginUnbonding(validatorAddr, delegatorAddr, "100")
+	require.NoError(t, err)
+
+	raw, err := ws.GetMetadata(unbondingQueueMetadataKey)
+	require.NoError(t, err)
+	require.NotEmpty(t, raw)
+
+	restarted := NewManager(cfg, ws)
+	entries := restarted.unbondingQueue[delegatorAddr]
+	require.Len(t, entries, 1)
+	require.Equal(t, validatorAddr, entries[0].ValidatorAddress)
+	require.Equal(t, "100", entries[0].Amount)
+	require.Equal(t, int64(4), entries[0].CompletionBlock)
+}
+
+func TestProcessUnbondings_ClearsPersistedQueue(t *testing.T) {
+	const (
+		validatorAddr = "0xefefefefefefefefefefefefefefefefefefefef"
+		delegatorAddr = "0x1212123412121234121212341212123412121234"
+	)
+
+	cfg := &config.Config{
+		Consensus: config.ConsensusConfig{
+			BlockTime: 3 * time.Second,
+		},
+		Staking: config.StakingConfig{
+			UnbondingPeriod:   12 * time.Second,
+			MinValidatorStake: "1",
+		},
+	}
+
+	vm, ws := newTestValidatorManager(t, cfg)
+	err := ws.SetValidator(validatorAddr, &core.Validator{
+		Address:        validatorAddr,
+		Active:         true,
+		Stake:          ub("1000"),
+		DelegatedStake: ub("500"),
+		Delegators: map[string][]byte{
+			delegatorAddr: ub("500"),
+		},
+	})
+	require.NoError(t, err)
+
+	err = ws.GetAccountManager().UpdateAccount(&core.Account{
+		Address: delegatorAddr,
+		Balance: nil,
+		Rewards: nil,
+	})
+	require.NoError(t, err)
+
+	err = vm.BeginUnbonding(validatorAddr, delegatorAddr, "100")
+	require.NoError(t, err)
+
+	vm.unbondingQueue[delegatorAddr][0].CompletionBlock = 0
+	err = vm.persistUnbondingQueueLocked()
+	require.NoError(t, err)
+
+	err = vm.ProcessUnbondings()
+	require.NoError(t, err)
+
+	raw, err := ws.GetMetadata(unbondingQueueMetadataKey)
+	require.NoError(t, err)
+	require.Equal(t, "{}", raw)
+
+	restarted := NewManager(cfg, ws)
+	require.Empty(t, restarted.unbondingQueue)
+}
+
 func TestSlashValidator_ApportionsLossAcrossDelegationAndPendingUnbonding(t *testing.T) {
 	const (
 		validatorAddr = "0x6666666666666666666666666666666666666666"
