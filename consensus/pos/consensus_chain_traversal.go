@@ -6,6 +6,7 @@ package pos
 
 import (
 	"fmt"
+	"log"
 	"sync"
 )
 
@@ -123,7 +124,7 @@ func (ce *ConsensusEngine) computeIsDescendant(blockHash, ancestorHash string) b
 
 	// Exceeded max depth - assume not a descendant (safety fallback)
 	// This should rarely happen in practice
-	fmt.Printf("⚠️  WARNING: Chain traversal exceeded max depth (%d) checking if %s is descendant of %s\n",
+	log.Printf("⚠️  WARNING: Chain traversal exceeded max depth (%d) checking if %s is descendant of %s\n",
 		maxDepth, blockHash[:8], ancestorHash[:8])
 	return false
 }

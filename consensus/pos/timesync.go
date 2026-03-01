@@ -6,6 +6,7 @@ package pos
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"sync"
 	"time"
@@ -191,7 +192,7 @@ func (tv *TimeValidator) StartDriftMonitoring(stopChan <-chan struct{}) {
 		case <-ticker.C:
 			drift, err := tv.CheckSystemTimeDrift()
 			if err != nil {
-				fmt.Printf("⚠️  Time drift warning: %v (drift: %s)\n", err, drift)
+				log.Printf("⚠️  Time drift warning: %v (drift: %s)\n", err, drift)
 				// We do NOT reset driftChecksFailed here; manual intervention or successful checks required
 			} else {
 				tv.mu.Lock()
@@ -223,7 +224,7 @@ func (tv *TimeValidator) ValidateBlockTimestamp(
 
 	if previousBlockTimestamp == 0 {
 		if !tv.IsTimeSyncHealthy() {
-			fmt.Printf("⚠️  WARNING: Validating first block without previous timestamp and unhealthy time sync status\n")
+			log.Printf("⚠️  WARNING: Validating first block without previous timestamp and unhealthy time sync status\n")
 		}
 		return nil
 	}
@@ -259,8 +260,8 @@ func (tv *TimeValidator) ValidateBlockTimestamp(
 	// by looking at the magnitude - genesis recovery is one-time exception
 	if increment > maxReasonableIncrement && increment <= maxGenesisRecoveryPeriod {
 		// Log the exception for monitoring
-		fmt.Printf("⚠️  Large timestamp increment detected: %d seconds. ", increment)
-		fmt.Printf("Allowing for potential genesis recovery (max: %d seconds)\n", maxGenesisRecoveryPeriod)
+		log.Printf("⚠️  Large timestamp increment detected: %d seconds. ", increment)
+		log.Printf("Allowing for potential genesis recovery (max: %d seconds)\n", maxGenesisRecoveryPeriod)
 		// Allow this increment but don't change maxReasonableIncrement for error message
 	} else if increment > maxGenesisRecoveryPeriod {
 		return fmt.Errorf(
@@ -271,7 +272,7 @@ func (tv *TimeValidator) ValidateBlockTimestamp(
 
 	// 5. Warn if system time drift is unhealthy
 	if !tv.IsTimeSyncHealthy() {
-		fmt.Printf("⚠️  WARNING: Validating block with unhealthy time sync status\n")
+		log.Printf("⚠️  WARNING: Validating block with unhealthy time sync status\n")
 	}
 
 	return nil

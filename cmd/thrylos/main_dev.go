@@ -55,11 +55,11 @@ func main() {
 		bootstrapPeers = append(bootstrapPeers, cfg.P2P.BootstrapPeers...)
 	}
 
-	_, err = startDevNode(*nodeID, *dataDir, *p2pPort, bootstrapPeers, *validator, cfg)
+	devNode, err := startDevNode(*nodeID, *dataDir, *p2pPort, bootstrapPeers, *validator, cfg)
 	if err != nil {
 		log.Fatalf("dev node failed: %v", err)
 	}
 
 	log.Println("✅ Node running")
-	select {}
+	waitForShutdown(devNode.Stop)
 }

@@ -116,9 +116,9 @@ func (tv *TimestampValidator) ValidateBlockTimestamp(
 		// This is the first block after genesis with a large gap
 		if actualDiff <= maxGenesisRecoveryPeriod {
 			// Allow it as genesis recovery
-			fmt.Printf("⚠️  Genesis recovery (block 1): Extended time between blocks detected: %d seconds (%.1f hours)\n",
+			log.Printf("⚠️  Genesis recovery (block 1): Extended time between blocks detected: %d seconds (%.1f hours)\n",
 				actualDiff, float64(actualDiff)/3600.0)
-			fmt.Printf("✅ Allowing for genesis recovery (max: %d seconds / %.1f days)\n",
+			log.Printf("✅ Allowing for genesis recovery (max: %d seconds / %.1f days)\n",
 				maxGenesisRecoveryPeriod, float64(maxGenesisRecoveryPeriod)/86400.0)
 
 			// Skip the normal range validation for this special case

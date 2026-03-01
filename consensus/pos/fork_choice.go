@@ -6,6 +6,7 @@ package pos
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"time"
 
@@ -129,18 +130,18 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 	// 1. Check for slashing violations
 	if fc.slashingManager != nil {
 		if err := fc.slashingManager.ProcessAttestation(attestation); err != nil {
-			fmt.Printf("⚠️ Slashing violation detected for validator %s: %v\n", validatorAddr, err)
+			log.Printf("⚠️ Slashing violation detected for validator %s: %v\n", validatorAddr, err)
 			if dvErr, ok := err.(*DoubleSigningError); ok && dvErr.ConflictingRecord != nil {
 				prevAttestation := attestationFromRecord(dvErr.ConflictingRecord)
 				if slashErr := fc.slashingManager.ApplyDoubleVoteSlashing(prevAttestation, attestation); slashErr != nil {
-					fmt.Printf("⚠️ Failed to apply double-vote slashing for %s: %v\n", validatorAddr, slashErr)
+					log.Printf("⚠️ Failed to apply double-vote slashing for %s: %v\n", validatorAddr, slashErr)
 				}
 			}
 			return
 		}
 
 		if !fc.slashingManager.IsValidatorActive(validatorAddr) {
-			fmt.Printf("⚠️ Inactive/jailed validator %s attempted to attest\n", validatorAddr)
+			log.Printf("⚠️ Inactive/jailed validator %s attempted to attest\n", validatorAddr)
 			return
 		}
 	}
@@ -148,12 +149,12 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 	// Get validator info early
 	validator, err := fc.worldState.GetValidator(validatorAddr)
 	if err != nil || validator == nil {
-		fmt.Printf("⚠️ Failed to get validator %s for attestation: %v\n", validatorAddr, err)
+		log.Printf("⚠️ Failed to get validator %s for attestation: %v\n", validatorAddr, err)
 		return
 	}
 
 	if !validator.Active {
-		fmt.Printf("⚠️ Inactive validator %s attempted to attest\n", validatorAddr)
+		log.Printf("⚠️ Inactive validator %s attempted to attest\n", validatorAddr)
 		return
 	}
 
@@ -167,7 +168,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 	// Check for equivocation (validator voting for different blocks in same epoch)
 	if prevVote, exists := fc.latestMessages[epoch][validatorAddr]; exists {
 		if prevVote != blockHash {
-			fmt.Printf("⚠️ EQUIVOCATION DETECTED: validator %s voted for both %s and %s in epoch %d\n",
+			log.Printf("⚠️ EQUIVOCATION DETECTED: validator %s voted for both %s and %s in epoch %d\n",
 				validatorAddr, prevVote[:8], blockHash[:8], epoch)
 
 			// Apply slashing immediately if we can reconstruct the prior conflicting attestation
@@ -176,12 +177,12 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 			if fc.slashingManager != nil {
 				if prevAttestation := fc.findValidatorAttestation(prevVote, validatorAddr, epoch); prevAttestation != nil {
 					if err := fc.slashingManager.ApplyDoubleVoteSlashing(prevAttestation, attestation); err != nil {
-						fmt.Printf("⚠️ Failed to slash validator %s for equivocation: %v\n", validatorAddr, err)
+						log.Printf("⚠️ Failed to slash validator %s for equivocation: %v\n", validatorAddr, err)
 					} else {
-						fmt.Printf("⚠️ Validator %s slashed for equivocation\n", validatorAddr)
+						log.Printf("⚠️ Validator %s slashed for equivocation\n", validatorAddr)
 					}
 				} else {
-					fmt.Printf("⚠️ Equivocation detected for %s but prior attestation was not retained\n", validatorAddr)
+					log.Printf("⚠️ Equivocation detected for %s but prior attestation was not retained\n", validatorAddr)
 				}
 			}
 			return
@@ -213,7 +214,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 		fc.attestationsByBlock[blockHash] = append(fc.attestationsByBlock[blockHash], attestation)
 		fc.metrics.TotalAttestations++
 	} else {
-		fmt.Printf("⚠️ Block %s reached max attestations (%d), counting stake but not storing\n",
+		log.Printf("⚠️ Block %s reached max attestations (%d), counting stake but not storing\n",
 			blockHashShort, fc.fcConfig.MaxAttestationsPerBlock)
 	}
 
@@ -268,7 +269,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 		// Log percentage
 		percentage := calculatePercentage(attestingStakeBig, totalStakeBig)
 
-		fmt.Printf("✅ Block %s reached 2/3 quorum: %s/%s stake (%.1f%%)\n",
+		log.Printf("✅ Block %s reached 2/3 quorum: %s/%s stake (%.1f%%)\n",
 			blockHashShort, attestingStakeBig.String(), totalStakeBig.String(), percentage)
 
 		// ✅ CREATE CHECKPOINT (NEW - ADD THIS!)
@@ -732,7 +733,7 @@ func (fc *ForkChoice) LoadFinalizedCheckpoint() error {
 	}
 
 	fc.finalizedCheckpoint = &checkpoint
-	fmt.Printf("📂 Loaded finalized checkpoint: epoch %d, block %s\n",
+	log.Printf("📂 Loaded finalized checkpoint: epoch %d, block %s\n",
 		checkpoint.Epoch, checkpoint.BlockHash[:8])
 
 	return nil

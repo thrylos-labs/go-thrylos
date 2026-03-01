@@ -5,7 +5,7 @@ package pos
 
 import (
 	"encoding/json"
-	"fmt"
+	"log"
 	"math/big"
 	"time"
 
@@ -54,7 +54,7 @@ func (fc *ForkChoice) checkJustification(epoch uint64, blockHash string, attesti
 	// Calculate percentage for logging
 	percentage := calculatePercentage(attestingBig, totalBig)
 
-	fmt.Printf("🎯 Block %s JUSTIFIED at epoch %d with %s/%s stake (%.1f%%)\n",
+	log.Printf("🎯 Block %s JUSTIFIED at epoch %d with %s/%s stake (%.1f%%)\n",
 		blockHashShort, epoch, attestingStake, totalStake, percentage)
 
 	// Check for finalization
@@ -122,7 +122,7 @@ func (fc *ForkChoice) checkFinalization() {
 
 			percentage := calculatePercentage(bestStakeBig, totalStakeBig)
 
-			fmt.Printf("🔒 Block %s FINALIZED at epoch %d with %s/%s stake (%.1f%%)\n",
+			log.Printf("🔒 Block %s FINALIZED at epoch %d with %s/%s stake (%.1f%%)\n",
 				finalizedHashShort,
 				epochToFinalize,
 				bestStakeBig.String(),
@@ -158,7 +158,7 @@ func (fc *ForkChoice) UpdateJustifiedCheckpoint(epoch uint64, blockHash string) 
 	totalBig := coremath.ParseBigInt(totalStake)
 	percentage := calculatePercentage(attestingBig, totalBig)
 
-	fmt.Printf("🎯 Justified checkpoint updated: epoch %d, block %s, stake %s/%s (%.1f%%)\n",
+	log.Printf("🎯 Justified checkpoint updated: epoch %d, block %s, stake %s/%s (%.1f%%)\n",
 		epoch, blockHashShort, attestingStake, totalStake, percentage)
 }
 
@@ -188,7 +188,7 @@ func (fc *ForkChoice) UpdateFinalizedCheckpoint(epoch uint64, blockHash string) 
 	totalBig := coremath.ParseBigInt(totalStake)
 	percentage := calculatePercentage(attestingBig, totalBig)
 
-	fmt.Printf("🔒 Finalized checkpoint updated: epoch %d, block %s, stake %s/%s (%.1f%%)\n",
+	log.Printf("🔒 Finalized checkpoint updated: epoch %d, block %s, stake %s/%s (%.1f%%)\n",
 		epoch, blockHashShort, attestingStake, totalStake, percentage)
 
 	// ============================================================
@@ -199,9 +199,9 @@ func (fc *ForkChoice) UpdateFinalizedCheckpoint(epoch uint64, blockHash string) 
 		if err == nil {
 			err = fc.database.Put([]byte("finalized_checkpoint"), data)
 			if err != nil {
-				fmt.Printf("⚠️ Failed to save checkpoint: %v\n", err)
+				log.Printf("⚠️ Failed to save checkpoint: %v\n", err)
 			} else {
-				fmt.Printf("💾 Checkpoint saved to disk\n")
+				log.Printf("💾 Checkpoint saved to disk\n")
 			}
 		}
 	}
@@ -323,7 +323,7 @@ func (fc *ForkChoice) cleanupOldEpochsLocked(startTime time.Time) {
 	// If the calculated cutoff (based on finality) is too old (stalled chain),
 	// force the cutoff to the safety limit.
 	if cutoffEpoch < minSafeCutoff {
-		fmt.Printf("⚠️ Finality stalled or lagging; forcing cleanup at safety cutoff %d (current: %d)\n",
+		log.Printf("⚠️ Finality stalled or lagging; forcing cleanup at safety cutoff %d (current: %d)\n",
 			minSafeCutoff, currentEpoch)
 		cutoffEpoch = minSafeCutoff
 	}
@@ -383,7 +383,7 @@ func (fc *ForkChoice) cleanupOldEpochsLocked(startTime time.Time) {
 	fc.updateMemoryEstimate()
 
 	if epochsRemoved > 0 || blocksRemoved > 0 {
-		fmt.Printf("🧹 Cleanup completed in %dms: removed %d epochs, %d blocks, %d attestations (current: %d blocks, %d epochs, ~%d MB)\n",
+		log.Printf("🧹 Cleanup completed in %dms: removed %d epochs, %d blocks, %d attestations (current: %d blocks, %d epochs, ~%d MB)\n",
 			fc.metrics.LastCleanupDurationMs,
 			epochsRemoved,
 			blocksRemoved,

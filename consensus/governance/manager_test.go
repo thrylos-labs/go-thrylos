@@ -105,3 +105,60 @@ func TestGovernanceProposal_UsesOneVotePerOwnershipDomain(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, governance.ProposalStatusApproved, reloaded.Status)
 }
+
+func TestGovernanceRejectsInvalidParameterChange(t *testing.T) {
+	const validatorAddr = "0x4545454545454545454545454545454545454545"
+
+	cfg := config.DefaultConfig()
+	gm, ws := newTestGovernanceManager(t, cfg)
+
+	err := ws.SetValidator(validatorAddr, &core.Validator{
+		Address:        validatorAddr,
+		Pubkey:         []byte{5},
+		Stake:          u("50"),
+		SelfStake:      u("50"),
+		DelegatedStake: nil,
+		Delegators:     map[string][]byte{},
+		Active:         true,
+		CreatedAt:      time.Now().Unix(),
+		UpdatedAt:      time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	ws.UpdateTotalStaked()
+
+	err = governance.ValidateParameterChange("economics.unknown", "0.1")
+	require.Error(t, err)
+
+	_, err = gm.SubmitProposal("proposal-1", validatorAddr, "economics.unknown", "0.1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not governance-managed")
+}
+
+func TestGovernanceFinalizeRejectsBeforeVotingEnds(t *testing.T) {
+	const validatorAddr = "0x4444444444444444444444444444444444444444"
+
+	cfg := config.DefaultConfig()
+	cfg.Governance.VotingPeriod = 10 * time.Second
+
+	gm, ws := newTestGovernanceManager(t, cfg)
+	err := ws.SetValidator(validatorAddr, &core.Validator{
+		Address:        validatorAddr,
+		Pubkey:         []byte{4},
+		Stake:          u("50"),
+		SelfStake:      u("50"),
+		DelegatedStake: nil,
+		Delegators:     map[string][]byte{},
+		Active:         true,
+		CreatedAt:      time.Now().Unix(),
+		UpdatedAt:      time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	ws.UpdateTotalStaked()
+
+	proposal, err := gm.SubmitProposal("proposal-2", validatorAddr, "economics.community_tax", "0.04")
+	require.NoError(t, err)
+
+	_, err = gm.FinalizeProposal(proposal.ID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "still in the voting period")
+}

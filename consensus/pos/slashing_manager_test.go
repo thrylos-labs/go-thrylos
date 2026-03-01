@@ -3,8 +3,10 @@ package pos
 import (
 	"math/big"
 	"testing"
+	"time"
 
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
+	"github.com/thrylos-labs/go-thrylos/types"
 )
 
 type slashingTestWorldState struct {
@@ -64,5 +66,47 @@ func TestSlashingManager_ProcessVoteDetectsSurroundVoting(t *testing.T) {
 	}
 	if svErr.OuterVote.TargetEpoch != outer.TargetEpoch {
 		t.Fatalf("expected outer vote target epoch %d, got %d", outer.TargetEpoch, svErr.OuterVote.TargetEpoch)
+	}
+}
+
+func TestSlashingManager_ProcessSurroundVoteEvidence_PreservesCondition(t *testing.T) {
+	worldState := &slashingTestWorldState{height: 100}
+	manager := NewSlashingManager(nil, worldState, nil, nil)
+
+	evidence := NewSlashingEvidence(
+		EvidenceSurroundVoting,
+		"validator-1",
+		&SurroundVoteEvidence{
+			InnerAttestation: &types.Attestation{
+				ValidatorAddress: "validator-1",
+				BlockHash:        "inner",
+				BlockHeight:      10,
+				Epoch:            2,
+				Slot:             2,
+				Timestamp:        time.Now().Unix(),
+			},
+			OuterAttestation: &types.Attestation{
+				ValidatorAddress: "validator-1",
+				BlockHash:        "outer",
+				BlockHeight:      20,
+				Epoch:            5,
+				Slot:             5,
+				Timestamp:        time.Now().Unix(),
+			},
+		},
+		"reporter-1",
+	)
+
+	err := manager.processSurroundVoteEvidence(evidence)
+	if err != nil {
+		t.Fatalf("unexpected error processing surround-vote evidence: %v", err)
+	}
+
+	records := manager.slashingRecords["validator-1"]
+	if len(records) != 1 {
+		t.Fatalf("expected one slashing record, got %d", len(records))
+	}
+	if records[0].Condition != types.SurroundVoting {
+		t.Fatalf("expected surround-voting condition, got %v", records[0].Condition)
 	}
 }

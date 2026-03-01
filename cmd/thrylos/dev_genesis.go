@@ -12,6 +12,7 @@ import (
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/node"
 	"github.com/thrylos-labs/go-thrylos/proto/core"
@@ -67,12 +68,12 @@ func createAllValidators(cfg *config.Config) ([]*core.Validator, []crypto.Privat
 		validator := &core.Validator{
 			Address:        addr,
 			Pubkey:         pubBytes, // Consistently storing 33 bytes now
-			Stake:          "3000000000000000000000",
-			SelfStake:      "3000000000000000000000",
-			DelegatedStake: "0",
+			Stake:          coremath.ParseBigInt("3000000000000000000000").Bytes(),
+			SelfStake:      coremath.ParseBigInt("3000000000000000000000").Bytes(),
+			DelegatedStake: nil,
 			Commission:     meta.Commission,
 			Active:         true,
-			Delegators:     make(map[string]string),
+			Delegators:     make(map[string][]byte),
 			Name:           meta.Name,
 			Description:    meta.Description,
 			Website:        meta.Website,

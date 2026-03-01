@@ -137,7 +137,7 @@ func NewConsensusEngine(
 		engine.forkChoice.SetDatabase(dbWrapper)
 
 		if err := engine.forkChoice.LoadFinalizedCheckpoint(); err != nil {
-			fmt.Printf("⚠️ Failed to load checkpoint: %v\n", err)
+			log.Printf("⚠️ Failed to load checkpoint: %v\n", err)
 		} else {
 			log.Println("✅ Checkpoint persistence enabled")
 		}
@@ -209,18 +209,18 @@ func (ce *ConsensusEngine) consensusLoop() {
 	defer slotTicker.Stop()
 
 	// 🔍 ADD THIS
-	fmt.Printf("🔍 consensusLoop started, timeout=%v\n", ce.proposalTimeout)
+	log.Printf("🔍 consensusLoop started, timeout=%v\n", ce.proposalTimeout)
 
 	for {
 		select {
 		case <-slotTicker.C:
 			// 🔍 ADD THIS
-			fmt.Printf("\n⏰ TICK - calling processSlot\n")
+			log.Printf("\n⏰ TICK - calling processSlot\n")
 
 			ce.processSlot()
 
 			// 🔍 ADD THIS
-			fmt.Printf("✅ processSlot returned\n")
+			log.Printf("✅ processSlot returned\n")
 		}
 	}
 }
@@ -343,33 +343,33 @@ func (ce *ConsensusEngine) processSlot() {
 	ce.mu.Unlock()
 
 	if isMyTurn {
-		fmt.Printf("🔨 I AM proposer for slot %d! (Current Height: %d)\n", currentSlot, currentHeight)
+		log.Printf("🔨 I AM proposer for slot %d! (Current Height: %d)\n", currentSlot, currentHeight)
 
 		if err := ce.proposeBlock(); err != nil {
-			fmt.Printf("❌ BLOCK PROPOSAL FAILED: %v\n", err)
+			log.Printf("❌ BLOCK PROPOSAL FAILED: %v\n", err)
 
 			if currentHeight >= 100 {
 				ce.mu.Lock()
 				ce.blocksMissed++
 				ce.mu.Unlock()
 			} else {
-				fmt.Printf("ℹ️  Miss ignored due to startup grace period\n")
+				log.Printf("ℹ️  Miss ignored due to startup grace period\n")
 			}
 		} else {
-			fmt.Printf("✅ SUCCESS: Block %d proposed and broadcasted!\n", currentHeight+1)
+			log.Printf("✅ SUCCESS: Block %d proposed and broadcasted!\n", currentHeight+1)
 			ce.mu.Lock()
 			ce.blocksProposed++
 			ce.mu.Unlock()
 		}
 	} else {
-		fmt.Printf("ℹ️  Not my turn (proposer: %s..., me: %s...)\n", proposer[:8], ce.nodeAddress[:8])
+		log.Printf("ℹ️  Not my turn (proposer: %s..., me: %s...)\n", proposer[:8], ce.nodeAddress[:8])
 	}
 
 	// Re-acquire lock for Attestation and state copying
 	ce.mu.Lock()
 	if ce.isCurrentNodeValidator() {
 		if err := ce.createAttestation(); err != nil {
-			fmt.Printf("❌ Failed to create attestation: %v\n", err)
+			log.Printf("❌ Failed to create attestation: %v\n", err)
 		} else {
 			ce.attestationsMade++
 		}
@@ -411,7 +411,7 @@ func (ce *ConsensusEngine) updateForkChoice() {
 
 	// 1. Safety Check: Is this new head viable? (Descends from finalized checkpoint)
 	if !ce.forkChoice.IsViableChain(head) {
-		fmt.Printf("⚠️ Fork choice rejected head %s: violates finality\n", head[:8])
+		log.Printf("⚠️ Fork choice rejected head %s: violates finality\n", head[:8])
 		return
 	}
 
@@ -419,7 +419,7 @@ func (ce *ConsensusEngine) updateForkChoice() {
 
 	// 2. If we have no current head (genesis), accept it
 	if currentHead == nil {
-		fmt.Printf("📍 Setting initial head: %s\n", head[:8])
+		log.Printf("📍 Setting initial head: %s\n", head[:8])
 		return
 	}
 
@@ -429,7 +429,7 @@ func (ce *ConsensusEngine) updateForkChoice() {
 		quorumPercentage := ce.forkChoice.GetQuorumPercentage(head)
 
 		if hasQuorum {
-			fmt.Printf("🔀 Fork choice suggests new head: %s (HAS QUORUM). Triggering Reorg Logic.\n", head[:8])
+			log.Printf("🔀 Fork choice suggests new head: %s (HAS QUORUM). Triggering Reorg Logic.\n", head[:8])
 
 			// --- REAL IMPLEMENTATION START ---
 
@@ -483,7 +483,7 @@ func (ce *ConsensusEngine) updateForkChoice() {
 			// --- REAL IMPLEMENTATION END ---
 
 		} else {
-			fmt.Printf("⏳ Fork choice suggests %s but waiting for quorum (%.1f%% < 66.7%%)\n",
+			log.Printf("⏳ Fork choice suggests %s but waiting for quorum (%.1f%% < 66.7%%)\n",
 				head[:8], quorumPercentage)
 		}
 	}
@@ -512,7 +512,7 @@ func (ce *ConsensusEngine) updateValidatorActivity(validatorAddr string, wasBloc
 	} else {
 		// ❌ FAILURE: Increment missed count
 		activity.MissedProposals++
-		fmt.Printf("⚠️ Validator %s missed proposal (Consecutive: %d)\n",
+		log.Printf("⚠️ Validator %s missed proposal (Consecutive: %d)\n",
 			validatorAddr, activity.MissedProposals)
 
 		// Trigger Slashing if Threshold Exceeded (10 misses)
@@ -520,7 +520,7 @@ func (ce *ConsensusEngine) updateValidatorActivity(validatorAddr string, wasBloc
 			// Apply Penalty
 			err := ce.slashingManager.ReportBlockWithholding(validatorAddr)
 			if err != nil {
-				fmt.Printf("Error reporting withholding: %v\n", err)
+				log.Printf("Error reporting withholding: %v\n", err)
 			} else {
 				// Reset count after punishment to avoid looping penalties
 				activity.MissedProposals = 0
@@ -587,13 +587,13 @@ func (ce *ConsensusEngine) proposeBlock() error {
 
 	select {
 	case ce.broadcastChan <- proposal:
-		fmt.Printf("✅ Block %s successfully queued for broadcast\n", result.Block.Hash[:8])
+		log.Printf("✅ Block %s successfully queued for broadcast\n", result.Block.Hash[:8])
 	case <-ctx.Done():
 		// If this happens, your P2P routine (GossipSub) is stuck!
 		return fmt.Errorf("critical: broadcast channel blocked for 2s, proposal lost")
 	}
 
-	fmt.Printf("🚀 Block #%d (Hash: %s) produced with %d txs\n",
+	log.Printf("🚀 Block #%d (Hash: %s) produced with %d txs\n",
 		result.Block.Header.Index, result.Block.Hash[:8], result.TransactionCount)
 
 	return nil
@@ -658,11 +658,11 @@ func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 		if len(activeValidators) == 0 {
 			return "", fmt.Errorf("CRITICAL: No validators exist in world state (bootstrap required)")
 		}
-		fmt.Printf("⚠️ Recovery Mode: Using %d total validators (active+inactive) for consensus\n", len(activeValidators))
+		log.Printf("⚠️ Recovery Mode: Using %d total validators (active+inactive) for consensus\n", len(activeValidators))
 	}
 
 	// 🔍 DEBUG LOG
-	fmt.Printf("🔍 DEBUG getSlotProposer: slot=%d, candidates=%d\n", slot, len(activeValidators))
+	log.Printf("🔍 DEBUG getSlotProposer: slot=%d, candidates=%d\n", slot, len(activeValidators))
 
 	schedule, err := ce.validatorSet.BuildEpochSchedule(
 		activeValidators,
@@ -680,18 +680,18 @@ func (ce *ConsensusEngine) getSlotProposer(slot uint64) (string, error) {
 
 	selectedAddress := schedule[slotIndex]
 
-	fmt.Printf("✅ DEBUG: Selected proposer %s for slot %d\n", selectedAddress, slot)
+	log.Printf("✅ DEBUG: Selected proposer %s for slot %d\n", selectedAddress, slot)
 	return selectedAddress, nil
 }
 
 func (ce *ConsensusEngine) enqueueAttestation(attestation *types.Attestation) bool {
 	select {
 	case ce.broadcastChan <- attestation:
-		fmt.Printf("✅ Attestation broadcast queued for Slot %d\n", ce.currentSlot)
+		log.Printf("✅ Attestation broadcast queued for Slot %d\n", ce.currentSlot)
 		ce.lastAttestedEpoch = ce.currentEpoch
 		return true
 	default:
-		fmt.Printf("⚠️ Attestation broadcast channel full, retry deferred\n")
+		log.Printf("⚠️ Attestation broadcast channel full, retry deferred\n")
 		return false
 	}
 }
@@ -960,7 +960,7 @@ func (ce *ConsensusEngine) processAttestations() {
 		// Check for slashable offenses
 		if err := ce.slashingManager.ProcessAttestation(attestation); err != nil {
 			// Slashing violation detected!
-			fmt.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n",
+			log.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n",
 				attestation.ValidatorAddress, err)
 
 			// Create and broadcast slashing evidence
@@ -1111,45 +1111,45 @@ func (ce *ConsensusEngine) handleBlockProposal(proposal *BlockProposal) {
 
 	// [SEC-FIX] Verify signature is now backed by robust ChainID logic
 	if err := ce.verifyProposalSignature(proposal); err != nil {
-		fmt.Printf("❌ Invalid proposal signature: %v\n", err)
+		log.Printf("❌ Invalid proposal signature: %v\n", err)
 		return
 	}
 
 	// Add block signature verification
 	if err := ce.VerifyBlockWithSignatures(proposal.Block); err != nil {
-		fmt.Printf("❌ Invalid block signature: %v\n", err)
+		log.Printf("❌ Invalid block signature: %v\n", err)
 		return
 	}
 
 	// Then validate the block
 	if err := ce.blockValidator.ValidateBlock(proposal.Block); err != nil {
-		fmt.Printf("Invalid block proposal: %v\n", err)
+		log.Printf("Invalid block proposal: %v\n", err)
 		return
 	}
 
 	// Validate the block
 	// FIX: Remove .(*core.Block)
 	if err := ce.blockValidator.ValidateBlock(proposal.Block); err != nil {
-		fmt.Printf("Invalid block proposal: %v\n", err)
+		log.Printf("Invalid block proposal: %v\n", err)
 		return
 	}
 
 	// Check if proposer is correct for this slot
 	expectedProposer, err := ce.getSlotProposer(proposal.Slot)
 	if err != nil || expectedProposer != proposal.Proposer {
-		fmt.Printf("Invalid proposer for slot %d\n", proposal.Slot)
+		log.Printf("Invalid proposer for slot %d\n", proposal.Slot)
 		return
 	}
 
 	// Add block to world state
 	// FIX: Remove .(*core.Block)
 	if err := ce.worldState.AddBlock(proposal.Block); err != nil {
-		fmt.Printf("Failed to add block: %v\n", err)
+		log.Printf("Failed to add block: %v\n", err)
 		return
 	}
 
 	// FIX: Remove .(*core.Block)
-	fmt.Printf("Accepted block %s from validator %s\n", proposal.Block.Hash, proposal.Proposer)
+	log.Printf("Accepted block %s from validator %s\n", proposal.Block.Hash, proposal.Proposer)
 }
 
 // handleAttestation processes a received attestation
@@ -1159,12 +1159,12 @@ func (ce *ConsensusEngine) handleAttestation(attestation *types.Attestation) {
 
 	// ADD THIS: Verify signature
 	if err := ce.verifyAttestationSignature(attestation); err != nil {
-		fmt.Printf("❌ Invalid signature: %v\n", err)
+		log.Printf("❌ Invalid signature: %v\n", err)
 		return
 	}
 
 	if err := ce.validateAttestation(attestation); err != nil {
-		fmt.Printf("Invalid attestation: %v\n", err)
+		log.Printf("Invalid attestation: %v\n", err)
 		return
 	}
 
@@ -1183,7 +1183,7 @@ func (ce *ConsensusEngine) handleVote(vote *Vote) {
 
 	// [SEC-FIX] Verify signature with ChainID binding BEFORE processing
 	if err := ce.verifyVoteSignature(vote); err != nil {
-		fmt.Printf("❌ Invalid vote signature from %s: %v\n", vote.ValidatorAddress, err)
+		log.Printf("❌ Invalid vote signature from %s: %v\n", vote.ValidatorAddress, err)
 		// Do not process invalid votes
 		return
 	}
@@ -1191,18 +1191,18 @@ func (ce *ConsensusEngine) handleVote(vote *Vote) {
 	// 1. Persistence Check (Prevent Double Voting)
 	hasVoted, _ := ce.worldState.GetStateStorage().HasVoted(vote.TargetEpoch, vote.ValidatorAddress)
 	if hasVoted {
-		fmt.Printf("⚠️ Duplicate vote detected for validator %s at epoch %d\n", vote.ValidatorAddress, vote.TargetEpoch)
+		log.Printf("⚠️ Duplicate vote detected for validator %s at epoch %d\n", vote.ValidatorAddress, vote.TargetEpoch)
 		return
 	}
 
 	// Validate vote
 	if err := ce.validateVote(vote); err != nil {
-		fmt.Printf("Invalid vote: %v\n", err)
+		log.Printf("Invalid vote: %v\n", err)
 		return
 	}
 
 	if err := ce.slashingManager.ProcessVote(vote); err != nil {
-		fmt.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n", vote.ValidatorAddress, err)
+		log.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n", vote.ValidatorAddress, err)
 		if svErr, ok := err.(*SurroundVotingError); ok {
 			if slashErr := ce.slashingManager.ApplySurroundVoteSlashing(svErr.InnerVote, svErr.OuterVote); slashErr != nil {
 				log.Printf("❌ Failed to apply surround-vote slashing: %v", slashErr)
@@ -1223,7 +1223,7 @@ func (ce *ConsensusEngine) handleVote(vote *Vote) {
 	}
 
 	if err := ce.worldState.GetStateStorage().SaveConsensusVote(storageVote); err != nil {
-		fmt.Printf("❌ Failed to persist vote: %v\n", err)
+		log.Printf("❌ Failed to persist vote: %v\n", err)
 		return
 	}
 
@@ -1667,7 +1667,7 @@ func (bv *BlockValidator) validateProposer(block *core.Block) error {
 // cleanupChainCache should be called periodically (e.g., every epoch)
 func (ce *ConsensusEngine) cleanupChainCache() {
 	ce.chainCache.Clear()
-	fmt.Printf("🧹 Chain cache cleared\n")
+	log.Printf("🧹 Chain cache cleared\n")
 }
 
 // ============================================================================

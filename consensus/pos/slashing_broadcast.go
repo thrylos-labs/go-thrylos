@@ -392,7 +392,7 @@ func (ce *ConsensusEngine) createSlashingEvidenceFromAttestation(
 
 	dsErr, ok := violation.(*DoubleSigningError)
 	if !ok || dsErr.ConflictingRecord == nil {
-		fmt.Printf("⚠️ Cannot create evidence: violation does not contain conflicting data: %v\n", violation)
+		log.Printf("⚠️ Cannot create evidence: violation does not contain conflicting data: %v\n", violation)
 		return nil
 	}
 

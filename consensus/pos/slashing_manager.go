@@ -341,7 +341,7 @@ func (sm *SlashingManager) processDoubleVoteEvidence(evidence *SlashingEvidence)
 	}
 
 	// Evidence is already validated (signatures verified)
-	return sm.ApplyDoubleVoteSlashing(dvEvidence.Attestation1, dvEvidence.Attestation2)
+	return sm.applyDoubleVoteSlashingLocked(dvEvidence.Attestation1, dvEvidence.Attestation2)
 }
 
 func (sm *SlashingManager) processSurroundVoteEvidence(evidence *SlashingEvidence) error {
@@ -351,8 +351,11 @@ func (sm *SlashingManager) processSurroundVoteEvidence(evidence *SlashingEvidenc
 	}
 
 	// Evidence is already validated (signatures verified)
-	// Apply slashing for surround voting
-	return sm.ApplyDoubleVoteSlashing(svEvidence.InnerAttestation, svEvidence.OuterAttestation)
+	return sm.applySurroundVoteAttestationEvidenceLocked(
+		svEvidence.InnerAttestation,
+		svEvidence.OuterAttestation,
+		"validated surround-vote evidence",
+	)
 }
 
 func (sm *SlashingManager) processInvalidProposalEvidence(evidence *SlashingEvidence) error {
@@ -567,6 +570,11 @@ func (sm *SlashingManager) ApplyDoubleVoteSlashing(att1, att2 *types.Attestation
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	return sm.applyDoubleVoteSlashingLocked(att1, att2)
+}
+
+func (sm *SlashingManager) applyDoubleVoteSlashingLocked(att1, att2 *types.Attestation) error {
+
 	if att1 == nil || att2 == nil {
 		return fmt.Errorf("ApplyDoubleVoteSlashing: nil attestation")
 	}
@@ -611,10 +619,8 @@ func (sm *SlashingManager) ApplySurroundVoteSlashing(inner, outer *Vote) error {
 		return fmt.Errorf("ApplySurroundVoteSlashing: votes do not form a surround-vote pair")
 	}
 
-	validatorAddress := inner.ValidatorAddress
-
-	evidence := types.SlashingEvidence{
-		SurroundedAttestation: &types.Attestation{
+	return sm.applySurroundVoteAttestationEvidenceLocked(
+		&types.Attestation{
 			ValidatorAddress: inner.ValidatorAddress,
 			BlockHash:        inner.TargetBlockHash,
 			BlockHeight:      int64(inner.TargetEpoch * 32),
@@ -623,7 +629,7 @@ func (sm *SlashingManager) ApplySurroundVoteSlashing(inner, outer *Vote) error {
 			Signature:        append([]byte(nil), inner.Signature...),
 			Timestamp:        time.Now().Unix(),
 		},
-		SurroundingAttestation: &types.Attestation{
+		&types.Attestation{
 			ValidatorAddress: outer.ValidatorAddress,
 			BlockHash:        outer.TargetBlockHash,
 			BlockHeight:      int64(outer.TargetEpoch * 32),
@@ -631,6 +637,44 @@ func (sm *SlashingManager) ApplySurroundVoteSlashing(inner, outer *Vote) error {
 			Slot:             outer.TargetEpoch * 32,
 			Signature:        append([]byte(nil), outer.Signature...),
 			Timestamp:        time.Now().Unix(),
+		},
+		fmt.Sprintf(
+			"Surround voting: %d<%d<%d<%d",
+			outer.SourceEpoch,
+			inner.SourceEpoch,
+			inner.TargetEpoch,
+			outer.TargetEpoch,
+		),
+	)
+}
+
+func (sm *SlashingManager) applySurroundVoteAttestationEvidenceLocked(innerAtt, outerAtt *types.Attestation, reason string) error {
+	if innerAtt == nil || outerAtt == nil {
+		return fmt.Errorf("ApplySurroundVoteSlashing: nil attestation")
+	}
+	if innerAtt.ValidatorAddress != outerAtt.ValidatorAddress {
+		return fmt.Errorf("ApplySurroundVoteSlashing: attestations from different validators")
+	}
+
+	validatorAddress := innerAtt.ValidatorAddress
+	evidence := types.SlashingEvidence{
+		SurroundedAttestation: &types.Attestation{
+			ValidatorAddress: innerAtt.ValidatorAddress,
+			BlockHash:        innerAtt.BlockHash,
+			BlockHeight:      innerAtt.BlockHeight,
+			Epoch:            innerAtt.Epoch,
+			Slot:             innerAtt.Slot,
+			Signature:        append([]byte(nil), innerAtt.Signature...),
+			Timestamp:        innerAtt.Timestamp,
+		},
+		SurroundingAttestation: &types.Attestation{
+			ValidatorAddress: outerAtt.ValidatorAddress,
+			BlockHash:        outerAtt.BlockHash,
+			BlockHeight:      outerAtt.BlockHeight,
+			Epoch:            outerAtt.Epoch,
+			Slot:             outerAtt.Slot,
+			Signature:        append([]byte(nil), outerAtt.Signature...),
+			Timestamp:        outerAtt.Timestamp,
 		},
 	}
 
@@ -650,20 +694,18 @@ func (sm *SlashingManager) ApplySurroundVoteSlashing(inner, outer *Vote) error {
 		return fmt.Errorf("failed to calculate penalty: %v", err)
 	}
 
+	if reason == "" {
+		reason = "Surround voting evidence submitted"
+	}
+
 	record := &types.SlashingRecord{
 		ValidatorAddress: validatorAddress,
 		Condition:        types.SurroundVoting,
-		Epoch:            outer.TargetEpoch,
+		Epoch:            outerAtt.Epoch,
 		Timestamp:        time.Now(),
 		Evidence:         evidence,
 		SlashedAmount:    new(big.Int).Set(penaltyAmountBig),
-		Reason: fmt.Sprintf(
-			"Surround voting: %d<%d<%d<%d",
-			outer.SourceEpoch,
-			inner.SourceEpoch,
-			inner.TargetEpoch,
-			outer.TargetEpoch,
-		),
+		Reason:           reason,
 	}
 
 	return sm.applySlashing(record)
@@ -688,7 +730,7 @@ func (sm *SlashingManager) ReportBlockWithholding(validatorAddr string) error {
 
 	for _, record := range recentRecords {
 		if record.Condition == types.Downtime && record.Timestamp.After(cutoffTime) {
-			fmt.Printf("⏭️  Skipping: Validator %s already slashed for withholding in last 24h\n", validatorAddr)
+			log.Printf("⏭️  Skipping: Validator %s already slashed for withholding in last 24h\n", validatorAddr)
 			return nil
 		}
 	}
@@ -822,13 +864,13 @@ func (sm *SlashingManager) forceUnstake(validatorKey string) {
 	sm.validatorStatus[validatorKey] = storage.ValidatorSlashed
 	if sm.storage != nil {
 		if err := sm.storage.SaveValidatorStatus(validatorKey, storage.ValidatorSlashed); err != nil {
-			fmt.Printf("⚠️ Failed to persist forced unstake status for %s: %v\n", validatorKey, err)
+			log.Printf("⚠️ Failed to persist forced unstake status for %s: %v\n", validatorKey, err)
 		}
 	}
 }
 
 func (sm *SlashingManager) recordWarning(validatorKey string, reason string) {
-	fmt.Printf("⚠️  [SlashingManager] WARNING: Validator %s %s\n", validatorKey, reason)
+	log.Printf("⚠️  [SlashingManager] WARNING: Validator %s %s\n", validatorKey, reason)
 }
 
 // ReportInvalidProposal reports that a validator proposed an invalid block
@@ -978,7 +1020,7 @@ func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 			record.Condition.String(), // ✅ Fixed type conversion error
 			validatorAddress,
 		); err != nil {
-			fmt.Printf("⚠️  Failed to persist processed evidence: %v\n", err)
+			log.Printf("⚠️  Failed to persist processed evidence: %v\n", err)
 		}
 	}
 
@@ -1020,7 +1062,7 @@ func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 		sm.validatorStatus[validatorAddress] = storage.ValidatorSlashed
 		if sm.storage != nil {
 			if err := sm.storage.SaveValidatorStatus(validatorAddress, storage.ValidatorSlashed); err != nil {
-				fmt.Printf("⚠️  Failed to persist validator status: %v\n", err)
+				log.Printf("⚠️  Failed to persist validator status: %v\n", err)
 			}
 		}
 	}
@@ -1029,7 +1071,7 @@ func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 
 	if sm.storage != nil {
 		if err := sm.storage.SaveSlashingRecord(validatorAddress, record); err != nil {
-			fmt.Printf("⚠️  Failed to persist slashing record: %v\n", err)
+			log.Printf("⚠️  Failed to persist slashing record: %v\n", err)
 		}
 	}
 
@@ -1054,10 +1096,10 @@ func (sm *SlashingManager) jailValidator(validatorAddress string, reason types.S
 
 	if sm.storage != nil {
 		if err := sm.storage.SaveJailedValidator(validatorAddress, jail); err != nil {
-			fmt.Printf("⚠️  Failed to persist jailed validator %s: %v\n", validatorAddress, err)
+			log.Printf("⚠️  Failed to persist jailed validator %s: %v\n", validatorAddress, err)
 		}
 		if err := sm.storage.SaveValidatorStatus(validatorAddress, storage.ValidatorJailed); err != nil {
-			fmt.Printf("⚠️  Failed to persist validator status %s: %v\n", validatorAddress, err)
+			log.Printf("⚠️  Failed to persist validator status %s: %v\n", validatorAddress, err)
 		}
 	}
 }
@@ -1075,10 +1117,10 @@ func (sm *SlashingManager) isValidatorJailed(validatorAddress string) bool {
 
 		if sm.storage != nil {
 			if err := sm.storage.DeleteJailedValidator(validatorAddress); err != nil {
-				fmt.Printf("⚠️  Failed to delete jailed validator %s from storage: %v\n", validatorAddress, err)
+				log.Printf("⚠️  Failed to delete jailed validator %s from storage: %v\n", validatorAddress, err)
 			}
 			if err := sm.storage.SaveValidatorStatus(validatorAddress, storage.ValidatorActive); err != nil {
-				fmt.Printf("⚠️  Failed to persist validator status %s: %v\n", validatorAddress, err)
+				log.Printf("⚠️  Failed to persist validator status %s: %v\n", validatorAddress, err)
 			}
 		}
 

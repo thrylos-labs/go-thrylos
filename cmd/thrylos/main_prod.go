@@ -147,7 +147,7 @@ func main() {
 	}
 
 	log.Printf("Node started successfully")
-	select {}
+	waitForShutdown(thrylosNode.Stop)
 }
 
 func loadPrivateKeyFromFile(path string) (crypto.PrivateKey, error) {
