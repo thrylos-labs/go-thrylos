@@ -38,3 +38,18 @@ func TestEvidenceTracker_EvictsLeastRecentlyUsed(t *testing.T) {
 		t.Fatalf("expected new evidence to be tracked")
 	}
 }
+
+func TestApplySlashing_RequiresSlashingManager(t *testing.T) {
+	engine := &ConsensusEngine{}
+
+	err := engine.applySlashing(&SlashingEvidence{
+		ID:   "missing-manager",
+		Type: EvidenceDoubleVoting,
+	})
+	if err == nil {
+		t.Fatalf("expected error when slashing manager is not initialized")
+	}
+	if err.Error() != "slashing manager not initialized" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

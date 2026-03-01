@@ -103,10 +103,8 @@ func (ce *ConsensusEngine) HandleSlashingEvidence(evidence *SlashingEvidence) er
 
 // applySlashing applies the slashing penalty locally using existing SlashingManager
 func (ce *ConsensusEngine) applySlashing(evidence *SlashingEvidence) error {
-	// Skip if slashing manager not initialized (e.g., in tests)
 	if ce.slashingManager == nil {
-		log.Println("⚠️  Skipping slashing application (slashingManager not initialized)")
-		return nil
+		return fmt.Errorf("slashing manager not initialized")
 	}
 
 	switch evidence.Type {
