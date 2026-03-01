@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -57,30 +58,30 @@ type UserActivity struct {
 	RewardedTransfers map[string]bool `json:"rewarded_transfers"`
 
 	// Retention
-	CurrentStreak int `json:"current_streak"`
-	MaxStreak     int `json:"max_streak"`
+	CurrentStreak  int    `json:"current_streak"`
+	MaxStreak      int    `json:"max_streak"`
 	LastActiveDate string `json:"last_active_date"` // YYYY-MM-DD
 }
 
 type PointsPolicy struct {
-	TotalAirdropTHR      int    `json:"total_airdrop_thr"`
-	MaxPointsPerWallet   int    `json:"max_points_per_wallet"`
-	MinTransferWei       string `json:"min_transfer_wei"`
-	TransferDailyCap     int    `json:"transfer_daily_cap"`
-	TransferFullTier     int    `json:"transfer_full_tier_count"`
-	TransferPointsFull   int    `json:"transfer_points_full"`
-	TransferPointsReduced int   `json:"transfer_points_reduced"`
-	StakeDailyCap        int    `json:"stake_daily_cap"`
-	StakePoints          int    `json:"stake_points"`
-	UnstakeDailyCap      int    `json:"unstake_daily_cap"`
-	UnstakePoints        int    `json:"unstake_points"`
-	FaucetPoints         int    `json:"faucet_points"`
+	TotalAirdropTHR       int    `json:"total_airdrop_thr"`
+	MaxPointsPerWallet    int    `json:"max_points_per_wallet"`
+	MinTransferWei        string `json:"min_transfer_wei"`
+	TransferDailyCap      int    `json:"transfer_daily_cap"`
+	TransferFullTier      int    `json:"transfer_full_tier_count"`
+	TransferPointsFull    int    `json:"transfer_points_full"`
+	TransferPointsReduced int    `json:"transfer_points_reduced"`
+	StakeDailyCap         int    `json:"stake_daily_cap"`
+	StakePoints           int    `json:"stake_points"`
+	UnstakeDailyCap       int    `json:"unstake_daily_cap"`
+	UnstakePoints         int    `json:"unstake_points"`
+	FaucetPoints          int    `json:"faucet_points"`
 }
 
 type PointsStats struct {
-	TotalPointsIssued int `json:"total_points_issued"`
-	UniqueWallets     int `json:"unique_wallets"`
-	TotalAirdropTHR   int `json:"total_airdrop_thr"`
+	TotalPointsIssued  int `json:"total_points_issued"`
+	UniqueWallets      int `json:"unique_wallets"`
+	TotalAirdropTHR    int `json:"total_airdrop_thr"`
 	MaxPointsPerWallet int `json:"max_points_per_wallet"`
 }
 
@@ -106,7 +107,7 @@ func NewPointsManager(path string) *PointsManager {
 // --- CORE LOGIC ---
 
 // AwardFaucet updates faucet cooldown metadata but awards no points.
-func (pm *PointsManager) AwardFaucet(address string) (int, bool) {
+func (pm *PointsManager) AwardFaucet(address string) (int, bool, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -115,13 +116,24 @@ func (pm *PointsManager) AwardFaucet(address string) (int, bool) {
 	today := now.Format("2006-01-02")
 
 	if !user.LastFaucet.IsZero() && now.Sub(user.LastFaucet) < 24*time.Hour {
-		return user.TotalPoints, false
+		return user.TotalPoints, false, nil
 	}
+
+	previousLastFaucet := user.LastFaucet
+	previousCurrentStreak := user.CurrentStreak
+	previousMaxStreak := user.MaxStreak
+	previousLastActiveDate := user.LastActiveDate
 
 	user.LastFaucet = now
 	pm.updateStreak(user, today)
-	pm.save()
-	return user.TotalPoints, PointsFaucet > 0
+	if err := pm.save(); err != nil {
+		user.LastFaucet = previousLastFaucet
+		user.CurrentStreak = previousCurrentStreak
+		user.MaxStreak = previousMaxStreak
+		user.LastActiveDate = previousLastActiveDate
+		return user.TotalPoints, false, err
+	}
+	return user.TotalPoints, PointsFaucet > 0, nil
 }
 
 // SyncConfirmedTransfers awards transfer points idempotently based on confirmed txs.
@@ -146,7 +158,7 @@ func (pm *PointsManager) SyncConfirmedTransfers(address string, txs []*corepb.Tr
 	}
 
 	if changed {
-		pm.save()
+		_ = pm.save()
 	}
 	return user.TotalPoints
 }
@@ -174,7 +186,7 @@ func (pm *PointsManager) RecordTransaction(from, to string) int {
 	if awarded > 0 {
 		user.DailyTransferCount++
 		pm.updateStreak(user, day)
-		pm.save()
+		_ = pm.save()
 	}
 	return user.TotalPoints
 }
@@ -197,7 +209,7 @@ func (pm *PointsManager) RecordDelegation(address string) int {
 	if awarded > 0 {
 		pm.updateStreak(user, day)
 	}
-	pm.save()
+	_ = pm.save()
 	return user.TotalPoints
 }
 
@@ -219,7 +231,7 @@ func (pm *PointsManager) RecordUndelegation(address string) int {
 	if awarded > 0 {
 		pm.updateStreak(user, day)
 	}
-	pm.save()
+	_ = pm.save()
 	return user.TotalPoints
 }
 
@@ -343,9 +355,43 @@ func (pm *PointsManager) getOrCreate(address string) *UserActivity {
 	return pm.Users[address]
 }
 
-func (pm *PointsManager) save() {
+func (pm *PointsManager) save() error {
 	data, _ := json.MarshalIndent(pm.Users, "", "  ")
-	_ = os.WriteFile(pm.FilePath, data, 0644)
+	dir := filepath.Dir(pm.FilePath)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+
+	tmpFile, err := os.CreateTemp(dir, filepath.Base(pm.FilePath)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, pm.FilePath); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 func (pm *PointsManager) load() {

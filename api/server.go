@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -118,6 +119,8 @@ type governanceTxRequest struct {
 	Broadcast bool              `json:"broadcast,omitempty"`
 }
 
+const maxJSONRequestBodyBytes int64 = 4 << 20
+
 // NewServer creates a new API server
 func NewServer(worldState *state.WorldState, port int) *Server {
 	server := &Server{
@@ -206,9 +209,8 @@ func NewServerWithConfig(
 
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	// 1. Read the body
-	bodyBytes, err := io.ReadAll(r.Body)
+	bodyBytes, err := readLimitedBody(w, r, maxJSONRequestBodyBytes)
 	if err != nil {
-		s.writeError(w, "Failed to read body", http.StatusBadRequest)
 		return
 	}
 	// Restore body so the underlying handlers can read it again
@@ -894,7 +896,7 @@ func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) submitGovernanceProposalTransaction(w http.ResponseWriter, r *http.Request) {
-	req, err := decodeGovernanceSubmissionRequest(r)
+	req, err := decodeGovernanceSubmissionRequest(w, r)
 	if err != nil {
 		s.writeError(w, err.Error(), http.StatusBadRequest)
 		return
@@ -904,7 +906,7 @@ func (s *Server) submitGovernanceProposalTransaction(w http.ResponseWriter, r *h
 }
 
 func (s *Server) submitGovernanceVoteTransaction(w http.ResponseWriter, r *http.Request) {
-	req, err := decodeGovernanceSubmissionRequest(r)
+	req, err := decodeGovernanceSubmissionRequest(w, r)
 	if err != nil {
 		s.writeError(w, err.Error(), http.StatusBadRequest)
 		return
@@ -914,7 +916,7 @@ func (s *Server) submitGovernanceVoteTransaction(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) submitGovernanceFinalizeTransaction(w http.ResponseWriter, r *http.Request) {
-	req, err := decodeGovernanceSubmissionRequest(r)
+	req, err := decodeGovernanceSubmissionRequest(w, r)
 	if err != nil {
 		s.writeError(w, err.Error(), http.StatusBadRequest)
 		return
@@ -923,8 +925,8 @@ func (s *Server) submitGovernanceFinalizeTransaction(w http.ResponseWriter, r *h
 	s.submitGovernanceTransaction(w, req, core.TransactionType_GOVERNANCE_FINALIZE)
 }
 
-func decodeGovernanceSubmissionRequest(r *http.Request) (*governanceTxRequest, error) {
-	body, err := io.ReadAll(r.Body)
+func decodeGovernanceSubmissionRequest(w http.ResponseWriter, r *http.Request) (*governanceTxRequest, error) {
+	body, err := readLimitedBody(w, r, maxJSONRequestBodyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("invalid request format")
 	}
@@ -1362,7 +1364,12 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 	var newTotalPoints int
 	var awarded bool
 	if s.pointsManager != nil {
-		newTotalPoints, awarded = s.pointsManager.AwardFaucet(req.Address)
+		var pointsErr error
+		newTotalPoints, awarded, pointsErr = s.pointsManager.AwardFaucet(req.Address)
+		if pointsErr != nil {
+			s.writeError(w, "Failed to persist faucet cooldown", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Convert to human-readable THRYLOS for display (Balance / 10^18)
@@ -1892,6 +1899,23 @@ func (s *Server) writeError(w http.ResponseWriter, message string, statusCode in
 		"status":    statusCode,
 		"timestamp": time.Now().Unix(),
 	})
+}
+
+func readLimitedBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	body, err := io.ReadAll(r.Body)
+	if err == nil {
+		return body, nil
+	}
+
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		return nil, err
+	}
+
+	http.Error(w, "Failed to read body", http.StatusBadRequest)
+	return nil, err
 }
 
 // Middleware (keep existing)

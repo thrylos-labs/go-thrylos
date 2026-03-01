@@ -242,7 +242,11 @@ func (s *APIServer) handleFund(c *gin.Context) {
 	}
 
 	// Award points (limit: once per 24h)
-	newTotal, success := s.pointsManager.AwardFaucet(address)
+	newTotal, success, err := s.pointsManager.AwardFaucet(address)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to persist faucet cooldown"})
+		return
+	}
 
 	if !success {
 		c.JSON(429, gin.H{
