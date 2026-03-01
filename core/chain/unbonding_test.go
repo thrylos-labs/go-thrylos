@@ -73,7 +73,7 @@ func TestBlockProcessing_ProcessesUnbondingQueue(t *testing.T) {
 		Stake:          u("10000000000000000000000"), // 10,000 THRYLOS
 		SelfStake:      u("3000000000000000000000"),  // 3,000 THRYLOS
 		DelegatedStake: u("7000000000000000000000"),  // 7,000 THRYLOS
-		Commission:     0.10,                      // 10%
+		Commission:     0.10,                         // 10%
 		Active:         true,
 		Delegators:     make(map[string][]byte),
 		CreatedAt:      time.Now().Unix(),
@@ -96,7 +96,7 @@ func TestBlockProcessing_ProcessesUnbondingQueue(t *testing.T) {
 	// Give delegator initial balance
 	delegatorAccount := &core.Account{
 		Address:      delegatorAddr,
-		Balance:      nil,                      // No liquid balance (it's all staked)
+		Balance:      nil,                         // No liquid balance (it's all staked)
 		StakedAmount: u("7000000000000000000000"), // 7,000 THRYLOS staked
 		Nonce:        0,
 		DelegatedTo:  make(map[string][]byte),
@@ -136,7 +136,11 @@ func TestBlockProcessing_ProcessesUnbondingQueue(t *testing.T) {
 	ws.UnbondingQueue()[0].CompletionTime = time.Now().Add(-1 * time.Hour).Unix()
 	ws.UnbondingMu().Unlock()
 
-	// 8. Create and add a test block (this should trigger unbonding processing)
+	// 8. Seed genesis, then add a normal block (unbonding processing happens on the non-genesis path)
+	genesisBlock := createTestBlockForUnbonding(t, blockchain, validatorAddr)
+	err = blockchain.AddBlock(genesisBlock)
+	require.NoError(t, err, "Genesis block should succeed")
+
 	block := createTestBlockForUnbonding(t, blockchain, validatorAddr)
 	err = blockchain.AddBlock(block)
 	require.NoError(t, err, "AddBlock should succeed")
@@ -162,19 +166,23 @@ func createTestBlockForUnbonding(t *testing.T, bc *Blockchain, validatorAddr str
 	currentBlock := bc.worldState.GetCurrentBlock()
 	var parentHash string
 	var index int64
+	timestamp := time.Now().Unix()
 
 	if currentBlock != nil {
 		parentHash = currentBlock.Hash
 		index = currentBlock.Header.Index + 1
+		if timestamp <= currentBlock.Header.Timestamp {
+			timestamp = currentBlock.Header.Timestamp + 1
+		}
 	} else {
-		parentHash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-		index = 1
+		parentHash = ""
+		index = 0
 	}
 
 	block := &core.Block{
 		Header: &core.BlockHeader{
 			Index:     index,
-			Timestamp: time.Now().Unix(),
+			Timestamp: timestamp,
 			PrevHash:  parentHash, // ✅ Fixed: Use PrevHash
 			Validator: validatorAddr,
 			StateRoot: "",
@@ -350,14 +358,18 @@ func TestUnbondingQueue_DoesNotCompleteEarly(t *testing.T) {
 	err = stakingManager.Undelegate(delegatorAddr, validatorAddr, amount)
 	require.NoError(t, err)
 
-	// Process a block immediately (unbonding period NOT elapsed)
+	// Seed genesis, then process a normal block immediately (unbonding period NOT elapsed)
+	genesisBlock := createTestBlockForUnbonding(t, blockchain, validatorAddr)
+	err = blockchain.AddBlock(genesisBlock)
+	require.NoError(t, err)
+
 	block := createTestBlockForUnbonding(t, blockchain, validatorAddr)
 	err = blockchain.AddBlock(block)
 	require.NoError(t, err)
 
 	// Verify funds still NOT in balance
 	updatedDelegator, _ := ws.GetAccount(delegatorAddr)
-	assert.Equal(t, "0", updatedDelegator.Balance,
+	assert.Equal(t, "0", coremath.BigIntToString(coremath.ParseBigInt(updatedDelegator.Balance)),
 		"Funds should still be 0 (unbonding not complete)")
 
 	// Verify entry still in queue

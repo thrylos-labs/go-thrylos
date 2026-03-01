@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
+	"github.com/thrylos-labs/go-thrylos/core/account"
 	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
@@ -17,6 +18,20 @@ import (
 
 func u(v string) []byte {
 	return coremath.ParseBigInt(v).Bytes()
+}
+
+func testAddress(seed byte) string {
+	raw := make([]byte, account.GetAddressByteLength())
+	for i := range raw {
+		raw[i] = seed
+	}
+
+	addr, err := account.FormatAddress(raw)
+	if err != nil {
+		panic(err)
+	}
+
+	return addr
 }
 
 // Test Issue #8 Fix 1: Skip validators with zero stake
@@ -44,9 +59,12 @@ func TestDistributeRewards_SkipsZeroStakeValidator(t *testing.T) {
 	ws, err := NewWorldState(tmpDir, 0, 1, cfg, badgerStore)
 	require.NoError(t, err)
 
+	validatorWithStakeAddr := testAddress(1)
+	validatorZeroStakeAddr := testAddress(2)
+
 	// Create two validators: one with stake, one with zero stake
 	validatorWithStake := &core.Validator{
-		Address:        "validator_with_stake",
+		Address:        validatorWithStakeAddr,
 		Active:         true,
 		Stake:          u("10000000000000000000000"), // 10,000 THRYLOS
 		DelegatedStake: nil,
@@ -55,7 +73,7 @@ func TestDistributeRewards_SkipsZeroStakeValidator(t *testing.T) {
 	}
 
 	validatorZeroStake := &core.Validator{
-		Address:        "validator_zero_stake",
+		Address:        validatorZeroStakeAddr,
 		Active:         true,
 		Stake:          nil, // ❌ Zero stake
 		DelegatedStake: nil,
@@ -93,7 +111,7 @@ func TestDistributeRewards_SkipsZeroStakeValidator(t *testing.T) {
 
 	// Check logs for warning
 	logOutput := logBuffer.String()
-	assert.Contains(t, logOutput, "validator_zero_stake", "Should log warning about zero stake")
+	assert.Contains(t, logOutput, validatorZeroStakeAddr, "Should log warning about zero stake")
 	assert.Contains(t, logOutput, "zero stake", "Should mention zero stake in warning")
 
 	// Verify validator with stake got rewards
@@ -124,9 +142,12 @@ func TestDistributeRewards_SkipsZeroRewardValidator(t *testing.T) {
 	ws, err := NewWorldState(tmpDir, 0, 1, cfg, badgerStore)
 	require.NoError(t, err)
 
+	largeStakeValidatorAddr := testAddress(3)
+	tinyStakeValidatorAddr := testAddress(4)
+
 	// Create two validators: one with large stake, one with tiny stake
 	largeStakeValidator := &core.Validator{
-		Address:        "large_validator",
+		Address:        largeStakeValidatorAddr,
 		Active:         true,
 		Stake:          u("99999999999999999999999999"), // Massive stake
 		DelegatedStake: nil,
@@ -135,7 +156,7 @@ func TestDistributeRewards_SkipsZeroRewardValidator(t *testing.T) {
 	}
 
 	tinyStakeValidator := &core.Validator{
-		Address:        "tiny_validator",
+		Address:        tinyStakeValidatorAddr,
 		Active:         true,
 		Stake:          u("1"), // 1 wei - will round to zero reward
 		DelegatedStake: nil,
@@ -172,7 +193,7 @@ func TestDistributeRewards_SkipsZeroRewardValidator(t *testing.T) {
 
 	// Check logs
 	logOutput := logBuffer.String()
-	assert.Contains(t, logOutput, "tiny_validator", "Should log warning about tiny validator")
+	assert.Contains(t, logOutput, tinyStakeValidatorAddr, "Should log warning about tiny validator")
 	assert.Contains(t, logOutput, "rounded to zero", "Should mention zero reward")
 }
 
@@ -195,9 +216,13 @@ func TestDistributeRewards_TracksAndLogsDust(t *testing.T) {
 	ws, err := NewWorldState(tmpDir, 0, 1, cfg, badgerStore)
 	require.NoError(t, err)
 
+	val1Addr := testAddress(5)
+	val2Addr := testAddress(6)
+	val3Addr := testAddress(7)
+
 	// Create 3 validators with stakes that don't divide evenly
 	val1 := &core.Validator{
-		Address:        "validator1",
+		Address:        val1Addr,
 		Active:         true,
 		Stake:          u("3333333333333333333333333"), // Doesn't divide evenly
 		DelegatedStake: nil,
@@ -206,7 +231,7 @@ func TestDistributeRewards_TracksAndLogsDust(t *testing.T) {
 	}
 
 	val2 := &core.Validator{
-		Address:        "validator2",
+		Address:        val2Addr,
 		Active:         true,
 		Stake:          u("3333333333333333333333333"),
 		DelegatedStake: nil,
@@ -215,7 +240,7 @@ func TestDistributeRewards_TracksAndLogsDust(t *testing.T) {
 	}
 
 	val3 := &core.Validator{
-		Address:        "validator3",
+		Address:        val3Addr,
 		Active:         true,
 		Stake:          u("3333333333333333333333334"),
 		DelegatedStake: nil,
@@ -274,9 +299,12 @@ func TestDistributeRewards_LogsSummary(t *testing.T) {
 	ws, err := NewWorldState(tmpDir, 0, 1, cfg, badgerStore)
 	require.NoError(t, err)
 
+	val1Addr := testAddress(8)
+	val2Addr := testAddress(9)
+
 	// Create 2 validators
 	val1 := &core.Validator{
-		Address:        "validator1",
+		Address:        val1Addr,
 		Active:         true,
 		Stake:          u("5000000000000000000000"),
 		DelegatedStake: nil,
@@ -285,7 +313,7 @@ func TestDistributeRewards_LogsSummary(t *testing.T) {
 	}
 
 	val2 := &core.Validator{
-		Address:        "validator2",
+		Address:        val2Addr,
 		Active:         true,
 		Stake:          u("5000000000000000000000"),
 		DelegatedStake: nil,
@@ -348,9 +376,12 @@ func TestDistributeRewards_HandlesInvalidStake(t *testing.T) {
 	ws, err := NewWorldState(tmpDir, 0, 1, cfg, badgerStore)
 	require.NoError(t, err)
 
+	validatorInvalidAddr := testAddress(10)
+	validatorValidAddr := testAddress(11)
+
 	// Create validator with invalid stake string
 	validatorInvalid := &core.Validator{
-		Address:        "validator_invalid",
+		Address:        validatorInvalidAddr,
 		Active:         true,
 		Stake:          []byte{0x00, 0x01}, // Invalid canonical encoding
 		DelegatedStake: nil,
@@ -359,7 +390,7 @@ func TestDistributeRewards_HandlesInvalidStake(t *testing.T) {
 	}
 
 	validatorValid := &core.Validator{
-		Address:        "validator_valid",
+		Address:        validatorValidAddr,
 		Active:         true,
 		Stake:          u("10000000000000000000000"),
 		DelegatedStake: nil,
@@ -392,7 +423,7 @@ func TestDistributeRewards_HandlesInvalidStake(t *testing.T) {
 
 	// Check logs
 	logOutput := logBuffer.String()
-	assert.Contains(t, logOutput, "validator_invalid", "Should log about invalid validator")
+	assert.Contains(t, logOutput, validatorInvalidAddr, "Should log about invalid validator")
 	assert.Contains(t, logOutput, "zero stake", "Should mention zero/invalid stake")
 
 	// Valid validator should still get rewards
@@ -418,8 +449,10 @@ func TestDistributeRewards_DoesNotCreditBalanceUntilClaim(t *testing.T) {
 	ws, err := NewWorldState(tmpDir, 0, 1, cfg, badgerStore)
 	require.NoError(t, err)
 
+	validatorAddr := testAddress(12)
+
 	validator := &core.Validator{
-		Address:        "validator_claim_flow",
+		Address:        validatorAddr,
 		Active:         true,
 		Stake:          u("10000000000000000000000"),
 		DelegatedStake: nil,
@@ -479,7 +512,7 @@ func BenchmarkDistributeRewards_WithEdgeCases(b *testing.B) {
 		}
 
 		validator := &core.Validator{
-			Address:        "validator" + string(rune(i)),
+			Address:        testAddress(byte(i + 13)),
 			Active:         true,
 			Stake:          u(stake),
 			DelegatedStake: nil,
