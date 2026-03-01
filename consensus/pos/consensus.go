@@ -588,17 +588,6 @@ func (ce *ConsensusEngine) proposeBlock() error {
 	return nil
 }
 
-// getPreviousBlockHash returns the hash of the most recent block
-func (ce *ConsensusEngine) getPreviousBlockHash() string {
-	if ce.worldState != nil {
-		currentBlock := ce.worldState.GetCurrentBlock()
-		if currentBlock != nil {
-			return currentBlock.Hash
-		}
-	}
-	return ""
-}
-
 // createAttestation creates an attestation for the current head
 // createAttestation creates an attestation for the current head
 func (ce *ConsensusEngine) createAttestation() error {
@@ -829,97 +818,6 @@ func (ce *ConsensusEngine) calculateVRFStakeScore(vrfOutput []byte, stake []byte
 	return score
 }
 
-// verifyVRFProof verifies a VRF proof from another validator
-// verifyVRFProof verifies a VRF proof from another validator
-func (ce *ConsensusEngine) verifyVRFProof(validatorPubKey crypto.PublicKey, input []byte, proof *VRFProof) (bool, error) {
-	if validatorPubKey == nil {
-		return false, fmt.Errorf("validator public key is nil")
-	}
-
-	valid, output, err := VerifyVRFProof(validatorPubKey.Bytes(), input, proof)
-	if err != nil {
-		return false, fmt.Errorf("VRF verification failed: %w", err)
-	}
-
-	if !valid {
-		return false, fmt.Errorf("VRF proof is invalid")
-	}
-
-	// Optionally check that output matches
-	if len(output) != len(proof.Output) {
-		return false, fmt.Errorf("VRF output length mismatch")
-	}
-
-	return true, nil
-}
-
-// selectValidatorByStake selects a validator based on stake weight and randomness
-// selectValidatorByStake selects a validator based on stake weight and randomness
-func (ce *ConsensusEngine) selectValidatorByStake(validators []*core.Validator, seed []byte) (*core.Validator, error) {
-	if len(validators) == 0 {
-		return nil, fmt.Errorf("no validators provided")
-	}
-
-	// 1. Calculate Total Stake using BigInt
-	totalStakeBig := big.NewInt(0)
-	for _, v := range validators {
-		stakeVal := math.ParseBigInt(v.Stake)
-		totalStakeBig.Add(totalStakeBig, stakeVal)
-	}
-
-	// Check if total stake is zero
-	if totalStakeBig.Sign() == 0 {
-		return nil, fmt.Errorf("total stake is zero")
-	}
-
-	// 2. Generate random number from seed (0 to TotalStake)
-	// We treat the seed bytes as a massive number, then Modulo by TotalStake
-	seedInt := new(big.Int).SetBytes(seed)
-	randomStake := new(big.Int).Mod(seedInt, totalStakeBig)
-
-	// 3. Select validator based on cumulative stake
-	cumulativeStakeBig := big.NewInt(0)
-
-	for _, validator := range validators {
-		stakeVal := math.ParseBigInt(validator.Stake)
-
-		// Add current stake to cumulative
-		cumulativeStakeBig.Add(cumulativeStakeBig, stakeVal)
-
-		// Check: if randomStake < cumulativeStake
-		if randomStake.Cmp(cumulativeStakeBig) < 0 {
-			return validator, nil
-		}
-	}
-
-	// Fallback to last validator (should technically be unreachable if math is correct)
-	return validators[len(validators)-1], nil
-}
-
-// getRecentBlockHashes returns the last N block hashes
-func (ce *ConsensusEngine) getRecentBlockHashes(n int) [][]byte {
-	currentHeight := ce.worldState.GetHeight()
-	if currentHeight < 1 {
-		return nil
-	}
-
-	if int64(n) > currentHeight {
-		n = int(currentHeight)
-	}
-
-	blockHashes := make([][]byte, 0, n)
-	for i := 0; i < n; i++ {
-		height := currentHeight - int64(i)
-		block, err := ce.worldState.GetBlock(height)
-		if err != nil || block == nil {
-			continue
-		}
-		blockHashes = append(blockHashes, []byte(block.Hash))
-	}
-
-	return blockHashes
-}
-
 // IsValidator implements the chain.ConsensusEngine interface
 func (ce *ConsensusEngine) IsValidator(address string) bool {
 	validator, err := ce.worldState.GetValidator(address)
@@ -932,37 +830,6 @@ func (ce *ConsensusEngine) IsValidator(address string) bool {
 // Helper method for internal use
 func (ce *ConsensusEngine) isCurrentNodeValidator() bool {
 	return ce.IsValidator(ce.nodeAddress)
-}
-
-// processAttestations processes received attestations
-func (ce *ConsensusEngine) processAttestations() {
-	for _, attestation := range ce.attestations {
-		if err := ce.validateAttestation(attestation); err != nil {
-			continue
-		}
-
-		// Check for slashable offenses
-		if err := ce.slashingManager.ProcessAttestation(attestation); err != nil {
-			// Slashing violation detected!
-			log.Printf("🚨 SLASHING VIOLATION: Validator %s - %v\n",
-				attestation.ValidatorAddress, err)
-
-			// Create and broadcast slashing evidence
-			evidence := ce.createSlashingEvidenceFromAttestation(attestation, err)
-			if evidence != nil {
-				// ✅ FIX: Use Capital 'H' to match the defined method
-				if err := ce.HandleSlashingEvidence(evidence); err != nil {
-					log.Printf("❌ Failed to handle slashing evidence: %v", err)
-				}
-			}
-
-			// Skip this attestation
-			continue
-		}
-
-		// Add to fork choice (only if no slashing violation)
-		ce.forkChoice.ProcessAttestation(attestation)
-	}
 }
 
 // validateAttestation validates an attestation
@@ -1643,12 +1510,6 @@ func (bv *BlockValidator) validateProposer(block *core.Block) error {
 	}
 
 	return nil
-}
-
-// cleanupChainCache should be called periodically (e.g., every epoch)
-func (ce *ConsensusEngine) cleanupChainCache() {
-	ce.chainCache.Clear()
-	log.Printf("🧹 Chain cache cleared\n")
 }
 
 // ============================================================================
