@@ -451,27 +451,6 @@ func (im *InflationManager) GetInflationHistory() []float64 {
 	return history
 }
 
-// SimulateInflationScenarios simulates different inflation scenarios
-func (im *InflationManager) SimulateInflationScenarios() map[string]*InflationScenario {
-	scenarios := make(map[string]*InflationScenario)
-
-	supplyBig := im.worldState.GetTotalSupply()
-	if supplyBig == nil {
-		supplyBig = big.NewInt(0)
-	}
-
-	// Use float for simulation scenarios as they are estimates
-	// Convert BigInt supply to float64 (might lose precision but acceptable for simulation graphs)
-	supplyF := new(big.Float).SetInt(supplyBig)
-	baseSupply, _ := supplyF.Float64()
-
-	scenarios["conservative"] = im.simulateScenario(baseSupply, 0.02, 365)
-	scenarios["target"] = im.simulateScenario(baseSupply, 0.04, 365)
-	scenarios["aggressive"] = im.simulateScenario(baseSupply, 0.06, 365)
-
-	return scenarios
-}
-
 func (im *InflationManager) simulateScenario(initialSupply float64, inflationRate float64, epochs int) *InflationScenario {
 	scenario := &InflationScenario{
 		Name:                "Scenario",

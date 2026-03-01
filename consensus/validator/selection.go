@@ -340,54 +340,6 @@ func (vs *Set) BuildEpochSchedule(
 	return schedule, nil
 }
 
-// SelectCommittee selects a committee of validators for attestations or voting
-// SelectCommittee selects a committee of validators based on a seed
-func (vs *Set) SelectCommittee(seed []byte, committeeSize int, purpose string) (*Committee, error) {
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-
-	if len(vs.activeList) == 0 {
-		return nil, fmt.Errorf("no active validators")
-	}
-
-	if committeeSize <= 0 {
-		return nil, fmt.Errorf("committee size must be positive")
-	}
-
-	// Limit committee size to available validators
-	if committeeSize > len(vs.activeList) {
-		committeeSize = len(vs.activeList)
-	}
-
-	// Create deterministic shuffling based on seed
-	shuffledValidators := vs.shuffleValidators(vs.activeList, seed)
-
-	// Select top validators from shuffled list
-	selectedValidators := make([]*core.Validator, committeeSize)
-
-	// ✅ Fix: Initialize accumulator as BigInt
-	totalCommitteeStakeBig := big.NewInt(0)
-
-	for i := 0; i < committeeSize; i++ {
-		selectedValidators[i] = shuffledValidators[i]
-
-		// ✅ Fix: Parse string stake and add
-		stakeBig := math.ParseBigInt(shuffledValidators[i].Stake)
-		totalCommitteeStakeBig.Add(totalCommitteeStakeBig, stakeBig)
-	}
-
-	return &Committee{
-		Members: selectedValidators,
-
-		// ✅ Fix: Convert back to string (Assuming Committee.TotalStake is also a string now)
-		TotalStake: totalCommitteeStakeBig.String(),
-
-		SelectionSeed: seed,
-		CreatedAt:     time.Now().Unix(),
-		Purpose:       purpose,
-	}, nil
-}
-
 // shuffleValidators creates a deterministic shuffle of validators using Fisher-Yates
 func (vs *Set) shuffleValidators(validators []*core.Validator, seed []byte) []*core.Validator {
 	// Create a copy to avoid modifying the original
@@ -804,19 +756,6 @@ func (vs *Set) GetSelectionStats(validatorAddress string) (*SelectionStats, erro
 	return &statsCopy, nil
 }
 
-// GetAllSelectionStats returns selection statistics for all validators
-func (vs *Set) GetAllSelectionStats() map[string]*SelectionStats {
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-
-	stats := make(map[string]*SelectionStats)
-	for addr, stat := range vs.selectionHistory {
-		statsCopy := *stat
-		stats[addr] = &statsCopy
-	}
-	return stats
-}
-
 // Size returns the number of validators in the set
 func (vs *Set) Size() int {
 	vs.mu.RLock()
@@ -971,34 +910,6 @@ func (vs *Set) RotateValidatorSet(config *config.Config) ([]*core.Validator, []*
 	}
 
 	return toRemove, toAdd, nil
-}
-
-// SelectRandomSubset selects a random subset of validators for various purposes
-func (vs *Set) SelectRandomSubset(seed []byte, subsetSize int) ([]*core.Validator, error) {
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-
-	if len(vs.activeList) == 0 {
-		return nil, fmt.Errorf("no active validators")
-	}
-
-	if subsetSize <= 0 {
-		return nil, fmt.Errorf("subset size must be positive")
-	}
-
-	// Limit subset size to available validators
-	if subsetSize > len(vs.activeList) {
-		subsetSize = len(vs.activeList)
-	}
-
-	// Create deterministic shuffle
-	shuffled := vs.shuffleValidators(vs.activeList, seed)
-
-	// Return the first 'subsetSize' validators
-	subset := make([]*core.Validator, subsetSize)
-	copy(subset, shuffled[:subsetSize])
-
-	return subset, nil
 }
 
 // ValidateSelectionFairness analyzes selection fairness and returns metrics

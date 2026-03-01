@@ -4,18 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/thrylos-labs/go-thrylos/config"
 )
-
-func TestSetSelectionStrategy_RestrictsUnsafeModesOutsideDevelopment(t *testing.T) {
-	productionProposer := NewBlockProposer(&config.Config{}, nil, "")
-	productionProposer.SetSelectionStrategy(StrategyHighestGasPrice)
-	require.Equal(t, StrategyBalanced, productionProposer.selectionStrategy)
-
-	developmentProposer := NewBlockProposer(&config.Config{Environment: "development"}, nil, "")
-	developmentProposer.SetSelectionStrategy(StrategyHighestGasPrice)
-	require.Equal(t, StrategyHighestGasPrice, developmentProposer.selectionStrategy)
-}
 
 func TestEnqueueAttestation_OnlyAdvancesEpochOnSuccessfulQueue(t *testing.T) {
 	engine := &ConsensusEngine{

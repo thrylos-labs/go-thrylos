@@ -35,20 +35,7 @@ type BlockProposer struct {
 	avgBlockTime        time.Duration
 	avgTransactionCount int
 	totalFeesCollected  string // BigInt string
-
-	// Transaction selection strategy
-	selectionStrategy TransactionSelectionStrategy
 }
-
-// TransactionSelectionStrategy defines how transactions are selected for blocks
-type TransactionSelectionStrategy string
-
-const (
-	StrategyHighestGasPrice TransactionSelectionStrategy = "highest_gas_price"
-	StrategyFIFO            TransactionSelectionStrategy = "fifo"
-	StrategyBalanced        TransactionSelectionStrategy = "balanced"
-	StrategyOptimalPacking  TransactionSelectionStrategy = "optimal_packing"
-)
 
 // BlockConstructionResult contains the result of block construction
 type BlockConstructionResult struct {
@@ -81,21 +68,8 @@ func NewBlockProposer(config *config.Config, worldState *state.WorldState, nodeA
 		maxBlockSize:       config.Consensus.MaxBlockSize,
 		maxTransactions:    config.Consensus.MaxTxPerBlock,
 		minGasPrice:        config.Consensus.MinGasPrice,
-		selectionStrategy:  StrategyBalanced,
 		totalFeesCollected: "0",
 	}
-}
-
-// SetSelectionStrategy sets the transaction selection strategy
-func (bp *BlockProposer) SetSelectionStrategy(strategy TransactionSelectionStrategy) {
-	if bp.config != nil && bp.config.Environment != "development" {
-		if strategy == StrategyHighestGasPrice || strategy == StrategyOptimalPacking {
-			log.Printf("⚠️ Unsafe selection strategy %q disabled outside development; using balanced", strategy)
-			bp.selectionStrategy = StrategyBalanced
-			return
-		}
-	}
-	bp.selectionStrategy = strategy
 }
 
 // ProposeBlock creates and proposes a new block with optimal transaction selection
@@ -108,8 +82,8 @@ func (bp *BlockProposer) ProposeBlock(slot uint64, epoch uint64) (*BlockConstruc
 		return bp.createEmptyBlock(slot, epoch, startTime)
 	}
 
-	// Select transactions for the block based on strategy
-	selectedTxs, excludedTxs, err := bp.selectTransactions(availableTxs)
+	// Select transactions for the block with the fixed balanced policy
+	selectedTxs, excludedTxs, err := bp.selectBalanced(availableTxs)
 	if err != nil {
 		return nil, fmt.Errorf("transaction selection failed: %v", err)
 	}
@@ -145,49 +119,18 @@ func (bp *BlockProposer) ProposeBlock(slot uint64, epoch uint64) (*BlockConstruc
 	}, nil
 }
 
-// selectTransactions selects transactions based on the configured strategy
-func (bp *BlockProposer) selectTransactions(availableTxs []*core.Transaction) ([]*core.Transaction, []*core.Transaction, error) {
-	switch bp.selectionStrategy {
-	case StrategyHighestGasPrice:
-		return bp.selectByHighestGasPrice(availableTxs)
-	case StrategyFIFO:
-		return bp.selectByFIFO(availableTxs)
-	case StrategyBalanced:
-		return bp.selectBalanced(availableTxs)
-	case StrategyOptimalPacking:
-		return bp.selectOptimalPacking(availableTxs)
-	default:
-		return bp.selectBalanced(availableTxs)
-	}
-}
-
-// selectByHighestGasPrice selects transactions with highest gas prices first
-func (bp *BlockProposer) selectByHighestGasPrice(availableTxs []*core.Transaction) ([]*core.Transaction, []*core.Transaction, error) {
-	sort.Slice(availableTxs, func(i, j int) bool {
-		gasI := coremath.ParseBigInt(availableTxs[i].GasPrice)
-		gasJ := coremath.ParseBigInt(availableTxs[j].GasPrice)
-		return gasI.Cmp(gasJ) > 0
-	})
-
-	return bp.packTransactions(availableTxs)
-}
-
-// selectByFIFO selects transactions in first-in-first-out order
-func (bp *BlockProposer) selectByFIFO(availableTxs []*core.Transaction) ([]*core.Transaction, []*core.Transaction, error) {
-	sort.Slice(availableTxs, func(i, j int) bool {
-		return availableTxs[i].Timestamp < availableTxs[j].Timestamp
-	})
-
-	return bp.packTransactions(availableTxs)
-}
-
 // selectBalanced uses a balanced approach considering gas price, age, and account distribution
 func (bp *BlockProposer) selectBalanced(availableTxs []*core.Transaction) ([]*core.Transaction, []*core.Transaction, error) {
 	txsWithPriority := make([]*TransactionWithPriority, 0, len(availableTxs))
 	currentTime := time.Now().Unix()
+	senderCounts := make(map[string]int, len(availableTxs))
 
 	for _, tx := range availableTxs {
-		priority := bp.calculateTransactionPriority(tx, currentTime)
+		senderCounts[tx.From]++
+	}
+
+	for _, tx := range availableTxs {
+		priority := bp.calculateTransactionPriority(tx, currentTime, senderCounts)
 
 		gasPriceBig := coremath.ParseBigInt(tx.GasPrice)
 		minGasPriceBig := coremath.ParseBigInt(bp.minGasPrice)
@@ -222,13 +165,8 @@ func (bp *BlockProposer) selectBalanced(availableTxs []*core.Transaction) ([]*co
 	return bp.packTransactions(sortedTxs)
 }
 
-// selectOptimalPacking uses knapsack-like optimization for maximum value
-func (bp *BlockProposer) selectOptimalPacking(availableTxs []*core.Transaction) ([]*core.Transaction, []*core.Transaction, error) {
-	return bp.knapsackTransactionSelection(availableTxs)
-}
-
 // calculateTransactionPriority calculates priority score for balanced selection
-func (bp *BlockProposer) calculateTransactionPriority(tx *core.Transaction, currentTime int64) float64 {
+func (bp *BlockProposer) calculateTransactionPriority(tx *core.Transaction, currentTime int64, senderCounts map[string]int) float64 {
 	gasPriceBig := coremath.ParseBigInt(tx.GasPrice)
 	minGasPriceBig := coremath.ParseBigInt(bp.minGasPrice)
 
@@ -244,7 +182,7 @@ func (bp *BlockProposer) calculateTransactionPriority(tx *core.Transaction, curr
 	ageBonusScore := float64(age) / 3600.0
 
 	typeBonusScore := bp.getTransactionTypeBonus(tx)
-	diversityBonusScore := bp.getAccountDiversityBonus(tx.From)
+	diversityBonusScore := bp.getAccountDiversityBonus(tx.From, senderCounts)
 
 	priority := (gasPriorityScore * 0.4) +
 		(ageBonusScore * 0.2) +
@@ -271,15 +209,8 @@ func (bp *BlockProposer) getTransactionTypeBonus(tx *core.Transaction) float64 {
 }
 
 // getAccountDiversityBonus returns bonus for account diversity
-func (bp *BlockProposer) getAccountDiversityBonus(fromAddress string) float64 {
-	pendingFromAccount := 0
-	pendingTxs := bp.worldState.GetPendingTransactions()
-
-	for _, tx := range pendingTxs {
-		if tx.From == fromAddress {
-			pendingFromAccount++
-		}
-	}
+func (bp *BlockProposer) getAccountDiversityBonus(fromAddress string, senderCounts map[string]int) float64 {
+	pendingFromAccount := senderCounts[fromAddress]
 
 	if pendingFromAccount > 10 {
 		return 0.5
@@ -354,51 +285,6 @@ func (bp *BlockProposer) packTransactions(sortedTxs []*core.Transaction) ([]*cor
 	}
 
 	return selectedTxs, excludedTxs, nil
-}
-
-// knapsackTransactionSelection uses dynamic programming for optimal selection
-func (bp *BlockProposer) knapsackTransactionSelection(availableTxs []*core.Transaction) ([]*core.Transaction, []*core.Transaction, error) {
-	n := len(availableTxs)
-	if n == 0 {
-		return []*core.Transaction{}, []*core.Transaction{}, nil
-	}
-
-	type txValue struct {
-		tx    *core.Transaction
-		ratio float64
-		index int
-	}
-
-	txValues := make([]txValue, n)
-	for i, tx := range availableTxs {
-		gasPriceBig := coremath.ParseBigInt(tx.GasPrice)
-		gasBig := big.NewInt(tx.Gas)
-
-		totalFeeBig := new(big.Int).Mul(gasPriceBig, gasBig)
-		totalFeeF := new(big.Float).SetInt(totalFeeBig)
-
-		weightF := new(big.Float).SetInt64(tx.Gas)
-
-		ratioF := new(big.Float).Quo(totalFeeF, weightF)
-		ratio, _ := ratioF.Float64()
-
-		txValues[i] = txValue{
-			tx:    tx,
-			ratio: ratio,
-			index: i,
-		}
-	}
-
-	sort.Slice(txValues, func(i, j int) bool {
-		return txValues[i].ratio > txValues[j].ratio
-	})
-
-	sortedTxs := make([]*core.Transaction, n)
-	for i, tv := range txValues {
-		sortedTxs[i] = tv.tx
-	}
-
-	return bp.packTransactions(sortedTxs)
 }
 
 // constructBlock creates a block with the selected transactions
@@ -596,45 +482,10 @@ func (bp *BlockProposer) GetProposerStats() map[string]interface{} {
 		"avg_block_time_ms":     bp.avgBlockTime.Milliseconds(),
 		"avg_transaction_count": bp.avgTransactionCount,
 		"total_fees_collected":  bp.totalFeesCollected,
-		"selection_strategy":    string(bp.selectionStrategy),
 		"max_block_size":        bp.maxBlockSize,
 		"max_transactions":      bp.maxTransactions,
 		"min_gas_price":         bp.minGasPrice,
 	}
-}
-
-// GetConfig returns the proposer configuration
-func (bp *BlockProposer) GetConfig() map[string]interface{} {
-	return map[string]interface{}{
-		"max_block_size":     bp.maxBlockSize,
-		"max_transactions":   bp.maxTransactions,
-		"min_gas_price":      bp.minGasPrice,
-		"selection_strategy": string(bp.selectionStrategy),
-		"node_address":       bp.nodeAddress,
-	}
-}
-
-// SetMaxBlockSize updates the maximum block size
-func (bp *BlockProposer) SetMaxBlockSize(size int64) {
-	bp.maxBlockSize = size
-}
-
-// SetMaxTransactions updates the maximum transactions per block
-func (bp *BlockProposer) SetMaxTransactions(count int) {
-	bp.maxTransactions = count
-}
-
-// SetMinGasPrice updates the minimum gas price
-func (bp *BlockProposer) SetMinGasPrice(price string) {
-	bp.minGasPrice = price
-}
-
-// ResetMetrics resets the proposer metrics
-func (bp *BlockProposer) ResetMetrics() {
-	bp.blocksProposed = 0
-	bp.avgBlockTime = 0
-	bp.avgTransactionCount = 0
-	bp.totalFeesCollected = "0"
 }
 
 func (bp *BlockProposer) ProposeBlockWithVRF(
@@ -651,8 +502,8 @@ func (bp *BlockProposer) ProposeBlockWithVRF(
 		return bp.createEmptyBlockWithVRF(slot, epoch, vrfOutput, vrfProof, startTime)
 	}
 
-	// Select transactions for the block based on strategy
-	selectedTxs, excludedTxs, err := bp.selectTransactions(availableTxs)
+	// Select transactions for the block with the fixed balanced policy
+	selectedTxs, excludedTxs, err := bp.selectBalanced(availableTxs)
 	if err != nil {
 		return nil, fmt.Errorf("transaction selection failed: %v", err)
 	}
