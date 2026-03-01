@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	corepb "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
@@ -422,7 +423,7 @@ func (pm *PointsManager) applyConfirmedTransferReward(user *UserActivity, tx *co
 		return true
 	}
 
-	amount := mustBigInt(tx.Amount)
+	amount := coremath.ParseBigInt(tx.Amount)
 	if amount.Sign() <= 0 || amount.Cmp(minTransferWei) < 0 {
 		return true
 	}

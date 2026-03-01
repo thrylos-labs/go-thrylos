@@ -859,21 +859,18 @@ func (s *Server) submitUnstakeTransaction(w http.ResponseWriter, r *http.Request
 	}
 
 	// Get current delegation to this validator
-	delegatedAmountStr := "0"
+	var delegatedAmountRaw []byte
 	if account.DelegatedTo != nil {
 		if amount, exists := account.DelegatedTo[req.To]; exists {
-			delegatedAmountStr = amount
+			delegatedAmountRaw = amount
 		}
 	}
 
-	delegatedBig, ok := new(big.Int).SetString(delegatedAmountStr, 10)
-	if !ok {
-		delegatedBig = big.NewInt(0)
-	}
+	delegatedBig := math.ParseBigInt(delegatedAmountRaw)
 
 	// Check if user has enough delegation
 	if amountBig.Cmp(delegatedBig) > 0 {
-		s.writeError(w, fmt.Sprintf("Insufficient delegation: have %s wei delegated, requested %s wei", delegatedAmountStr, req.Amount), http.StatusBadRequest)
+		s.writeError(w, fmt.Sprintf("Insufficient delegation: have %s wei delegated, requested %s wei", math.BigIntToString(delegatedBig), req.Amount), http.StatusBadRequest)
 		return
 	}
 
@@ -1062,22 +1059,25 @@ func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get additional staking information
-	stakedAmount := account.StakedAmount
-	rewards := account.Rewards
+	stakedAmount := math.BigIntToString(math.ParseBigInt(account.StakedAmount))
+	rewards := math.BigIntToString(math.ParseBigInt(account.Rewards))
 	delegations := account.DelegatedTo
 
-	// FIX: Update type to map[string]string
+	delegationStrings := make(map[string]string)
 	if delegations == nil {
-		delegations = make(map[string]string)
+		delegations = make(map[string][]byte)
+	}
+	for validatorAddr, amount := range delegations {
+		delegationStrings[validatorAddr] = math.BigIntToString(math.ParseBigInt(amount))
 	}
 
 	response := map[string]interface{}{
 		"address":       account.Address,
-		"balance":       account.Balance,
+		"balance":       math.BigIntToString(math.ParseBigInt(account.Balance)),
 		"nonce":         account.Nonce,
 		"staked_amount": stakedAmount,
 		"rewards":       rewards,
-		"delegated_to":  delegations,
+		"delegated_to":  delegationStrings,
 	}
 
 	s.writeJSON(w, response)
@@ -1396,17 +1396,17 @@ func (s *Server) fundAddress(w http.ResponseWriter, r *http.Request) {
 		// Account doesn't exist, create a new one
 		account = &core.Account{
 			Address:      req.Address,
-			Balance:      math.BigIntToString(amountBig),
+			Balance:      amountBig.Bytes(),
 			Nonce:        0,
-			StakedAmount: "0",
-			DelegatedTo:  make(map[string]string),
-			Rewards:      "0",
+			StakedAmount: nil,
+			DelegatedTo:  make(map[string][]byte),
+			Rewards:      nil,
 		}
 	} else {
 		// Account exists, add funding to existing balance
 		currentBal := math.ParseBigInt(account.Balance)
 		newBal := new(big.Int).Add(currentBal, amountBig)
-		account.Balance = math.BigIntToString(newBal)
+		account.Balance = newBal.Bytes()
 	}
 
 	// Update storage (Send Tokens)
@@ -1587,10 +1587,10 @@ func (s *Server) getTransaction(w http.ResponseWriter, r *http.Request) {
 		Hash:      tx.Id,
 		From:      tx.From,
 		To:        tx.To,
-		Amount:    tx.Amount,
+		Amount:    math.BigIntToString(math.ParseBigInt(tx.Amount)),
 		Nonce:     tx.Nonce,
 		Gas:       tx.Gas,
-		GasPrice:  tx.GasPrice,
+		GasPrice:  math.BigIntToString(math.ParseBigInt(tx.GasPrice)),
 		Timestamp: tx.Timestamp,
 		Status:    "confirmed", // or determine actual status
 	}
@@ -1620,10 +1620,10 @@ func (s *Server) getPendingTransactions(w http.ResponseWriter, r *http.Request) 
 			Hash:      tx.Id,
 			From:      tx.From,
 			To:        tx.To,
-			Amount:    tx.Amount,
+			Amount:    math.BigIntToString(math.ParseBigInt(tx.Amount)),
 			Nonce:     tx.Nonce,
 			Gas:       tx.Gas,
-			GasPrice:  tx.GasPrice,
+			GasPrice:  math.BigIntToString(math.ParseBigInt(tx.GasPrice)),
 			Timestamp: tx.Timestamp,
 			Status:    "pending",
 		}
@@ -1741,10 +1741,10 @@ func (s *Server) getRecentTransactions(w http.ResponseWriter, r *http.Request) {
 				Hash:      tx.Id,
 				From:      tx.From,
 				To:        tx.To,
-				Amount:    tx.Amount,
+				Amount:    math.BigIntToString(math.ParseBigInt(tx.Amount)),
 				Nonce:     tx.Nonce,
 				Gas:       tx.Gas,
-				GasPrice:  tx.GasPrice,
+				GasPrice:  math.BigIntToString(math.ParseBigInt(tx.GasPrice)),
 				Timestamp: tx.Timestamp,
 				Status:    "confirmed",
 			})
@@ -1853,10 +1853,10 @@ func (s *Server) formatBlock(block *core.Block) map[string]interface{} {
 			Hash:     tx.Id,
 			From:     tx.From,
 			To:       tx.To,
-			Amount:   tx.Amount,
+			Amount:   math.BigIntToString(math.ParseBigInt(tx.Amount)),
 			Nonce:    tx.Nonce,
 			Gas:      tx.Gas,
-			GasPrice: tx.GasPrice,
+			GasPrice: math.BigIntToString(math.ParseBigInt(tx.GasPrice)),
 		}
 		transactions = append(transactions, txResponse)
 	}
@@ -1893,16 +1893,22 @@ func (s *Server) formatValidator(validator *core.Validator) map[string]interface
 		"description":    validator.Description,
 		"website":        validator.Website,
 		"commission":     validator.Commission,
-		"totalStaked":    validator.Stake + validator.DelegatedStake, // Combined stake
+		"totalStaked":    new(big.Int).Add(math.ParseBigInt(validator.Stake), math.ParseBigInt(validator.DelegatedStake)).String(),
 		"uptime":         s.calculateValidatorUptime(validator),
 		"status":         status, // ✅ Fixed: string instead of boolean
-		"selfStake":      validator.SelfStake,
+		"selfStake":      math.BigIntToString(math.ParseBigInt(validator.SelfStake)),
 		"delegatorCount": len(validator.Delegators),
 		"blocksProposed": validator.BlocksProposed,
 		"blocksMissed":   validator.BlocksMissed,
 		"createdAt":      validator.CreatedAt,
 		"updatedAt":      validator.UpdatedAt,
-		"delegations":    validator.Delegators,
+		"delegations":    func() map[string]string {
+			out := make(map[string]string, len(validator.Delegators))
+			for addr, amount := range validator.Delegators {
+				out[addr] = math.BigIntToString(math.ParseBigInt(amount))
+			}
+			return out
+		}(),
 
 		// Keep the old fields for backward compatibility
 		"active":          validator.Active,
@@ -2137,10 +2143,10 @@ func (s *Server) getStakingValidators(w http.ResponseWriter, r *http.Request) {
 			Description:    validator.Description,
 			Website:        validator.Website,
 			Commission:     validator.Commission,
-			TotalStaked:    validator.Stake,
+			TotalStaked:    math.BigIntToString(math.ParseBigInt(validator.Stake)),
 			Uptime:         uptime,
 			Status:         status,
-			SelfStake:      validator.SelfStake,
+			SelfStake:      math.BigIntToString(math.ParseBigInt(validator.SelfStake)),
 			DelegatorCount: len(validator.Delegators),
 			BlocksProposed: validator.BlocksProposed,
 			BlocksMissed:   validator.BlocksMissed,
@@ -2250,7 +2256,7 @@ func (s *Server) getDelegationHistory(w http.ResponseWriter, r *http.Request) {
 
 				history = append(history, DelegationHistoryItem{
 					Validator: validator,
-					Amount:    amount,
+					Amount:    math.BigIntToString(math.ParseBigInt(amount)),
 					Timestamp: time.Now().Unix(),
 					Status:    "active",
 					TxHash:    "", // Would need transaction indexing for real tx hash
@@ -2295,8 +2301,8 @@ func (s *Server) getDetailedRewards(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// 1. Parse staked amount string to BigFloat
-			stakeInt, ok := new(big.Int).SetString(stakedAmountStr, 10)
-			if !ok {
+			stakeInt := math.ParseBigInt(stakedAmountStr)
+			if stakeInt.Sign() == 0 {
 				continue
 			}
 			stakeFloat := new(big.Float).SetInt(stakeInt)
@@ -2628,8 +2634,7 @@ func (s *Server) getDelegationActivity(address string, validator *core.Validator
 	var activity []ValidatorActivityItem
 
 	for delegatorAddr, amountStr := range validator.Delegators {
-		// 1. Create a local copy to safely take the address
-		currentAmount := amountStr
+		currentAmount := math.BigIntToString(math.ParseBigInt(amountStr))
 
 		readableAmount := formatToThrylos(currentAmount)
 
@@ -2761,10 +2766,10 @@ func (s *Server) getValidatorActivityEnhanced(w http.ResponseWriter, r *http.Req
 	pendingTxs := s.worldState.GetPendingTransactions()
 	for _, tx := range pendingTxs {
 		if tx.To == address && (tx.Type == core.TransactionType_DELEGATE) {
-			amount := tx.Amount
+			amount := math.BigIntToString(math.ParseBigInt(tx.Amount))
 			activity = append(activity, ValidatorActivityItem{
 				Type:      "delegation",
-				Details:   fmt.Sprintf("New delegation: %s THR", formatToThrylos(tx.Amount)),
+				Details:   fmt.Sprintf("New delegation: %s THR", formatToThrylos(amount)),
 				Time:      formatTimeAgo(tx.Timestamp),
 				Timestamp: tx.Timestamp,
 				Amount:    &amount,
@@ -2774,10 +2779,10 @@ func (s *Server) getValidatorActivityEnhanced(w http.ResponseWriter, r *http.Req
 		}
 
 		if tx.From == address && (tx.Type == core.TransactionType_UNDELEGATE) {
-			amount := tx.Amount
+			amount := math.BigIntToString(math.ParseBigInt(tx.Amount))
 			activity = append(activity, ValidatorActivityItem{
 				Type:      "withdrawal",
-				Details:   fmt.Sprintf("Undelegation processed: %s THR", formatToThrylos(tx.Amount)),
+				Details:   fmt.Sprintf("Undelegation processed: %s THR", formatToThrylos(amount)),
 				Time:      formatTimeAgo(tx.Timestamp),
 				Timestamp: tx.Timestamp,
 				Amount:    &amount,

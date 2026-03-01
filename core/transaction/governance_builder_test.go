@@ -29,7 +29,7 @@ func TestCreateGovernanceProposalTransaction_BuildsCanonicalPayload(t *testing.T
 	)
 	require.NoError(t, err)
 	require.Equal(t, core.TransactionType_GOVERNANCE_PROPOSE, tx.Type)
-	require.Equal(t, "0", tx.Amount)
+	require.Len(t, tx.Amount, 0)
 	require.Equal(t, uint64(7), tx.Nonce)
 
 	var payload map[string]string

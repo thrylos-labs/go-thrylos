@@ -8,10 +8,15 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
 	accountpkg "github.com/thrylos-labs/go-thrylos/core/account"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 )
+
+func ub(v string) []byte {
+	return coremath.ParseBigInt(v).Bytes()
+}
 
 func newTestValidatorManager(t *testing.T, cfg *config.Config) (*Manager, *state.WorldState) {
 	t.Helper()
@@ -53,10 +58,10 @@ func TestBeginUnbonding_UsesConfiguredBlockTime(t *testing.T) {
 	err := ws.SetValidator(validatorAddr, &core.Validator{
 		Address:        validatorAddr,
 		Active:         true,
-		Stake:          "1000",
-		DelegatedStake: "500",
-		Delegators: map[string]string{
-			delegatorAddr: "500",
+		Stake:          ub("1000"),
+		DelegatedStake: ub("500"),
+		Delegators: map[string][]byte{
+			delegatorAddr: ub("500"),
 		},
 	})
 	require.NoError(t, err)
@@ -90,18 +95,18 @@ func TestProcessUnbondings_ReturnsPrincipalToBalance(t *testing.T) {
 	err := ws.SetValidator(validatorAddr, &core.Validator{
 		Address:        validatorAddr,
 		Active:         true,
-		Stake:          amount,
-		DelegatedStake: amount,
-		Delegators: map[string]string{
-			delegatorAddr: amount,
+		Stake:          ub(amount),
+		DelegatedStake: ub(amount),
+		Delegators: map[string][]byte{
+			delegatorAddr: ub(amount),
 		},
 	})
 	require.NoError(t, err)
 
 	err = ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: delegatorAddr,
-		Balance: "7",
-		Rewards: "0",
+		Balance: ub("7"),
+		Rewards: nil,
 	})
 	require.NoError(t, err)
 
@@ -120,13 +125,13 @@ func TestProcessUnbondings_ReturnsPrincipalToBalance(t *testing.T) {
 
 	delegator, err := ws.GetAccount(delegatorAddr)
 	require.NoError(t, err)
-	require.Equal(t, "10000000000000000007", delegator.Balance)
-	require.Equal(t, "0", delegator.Rewards)
+	require.Equal(t, "10000000000000000007", coremath.BigIntToString(coremath.ParseBigInt(delegator.Balance)))
+	require.Equal(t, "0", coremath.BigIntToString(coremath.ParseBigInt(delegator.Rewards)))
 
 	validator, err := ws.GetValidator(validatorAddr)
 	require.NoError(t, err)
-	require.Equal(t, "0", validator.Stake)
-	require.Equal(t, "0", validator.DelegatedStake)
+	require.Equal(t, "0", coremath.BigIntToString(coremath.ParseBigInt(validator.Stake)))
+	require.Equal(t, "0", coremath.BigIntToString(coremath.ParseBigInt(validator.DelegatedStake)))
 	require.Empty(t, validator.Delegators)
 	require.NotContains(t, vm.unbondingQueue, delegatorAddr)
 }
@@ -155,11 +160,11 @@ func TestSlashValidator_ApportionsLossAcrossDelegationAndPendingUnbonding(t *tes
 	err := ws.SetValidator(validatorAddr, &core.Validator{
 		Address:        validatorAddr,
 		Active:         true,
-		Stake:          "1000",
-		SelfStake:      "400",
-		DelegatedStake: "600",
-		Delegators: map[string]string{
-			delegatorAddr: "600",
+		Stake:          ub("1000"),
+		SelfStake:      ub("400"),
+		DelegatedStake: ub("600"),
+		Delegators: map[string][]byte{
+			delegatorAddr: ub("600"),
 		},
 		CreatedAt: time.Now().Add(-48 * time.Hour).Unix(),
 		UpdatedAt: time.Now().Add(-48 * time.Hour).Unix(),
@@ -168,8 +173,8 @@ func TestSlashValidator_ApportionsLossAcrossDelegationAndPendingUnbonding(t *tes
 
 	err = ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: delegatorAddr,
-		Balance: "0",
-		Rewards: "0",
+		Balance: nil,
+		Rewards: nil,
 	})
 	require.NoError(t, err)
 
@@ -188,10 +193,10 @@ func TestSlashValidator_ApportionsLossAcrossDelegationAndPendingUnbonding(t *tes
 
 	validator, err := ws.GetValidator(validatorAddr)
 	require.NoError(t, err)
-	require.Equal(t, "500", validator.Stake)
-	require.Equal(t, "200", validator.SelfStake)
-	require.Equal(t, "300", validator.DelegatedStake)
-	require.Equal(t, "300", validator.Delegators[delegatorAddr])
+	require.Equal(t, "500", coremath.BigIntToString(coremath.ParseBigInt(validator.Stake)))
+	require.Equal(t, "200", coremath.BigIntToString(coremath.ParseBigInt(validator.SelfStake)))
+	require.Equal(t, "300", coremath.BigIntToString(coremath.ParseBigInt(validator.DelegatedStake)))
+	require.Equal(t, "300", coremath.BigIntToString(coremath.ParseBigInt(validator.Delegators[delegatorAddr])))
 	require.Equal(t, "100", vm.unbondingQueue[delegatorAddr][0].Amount)
 
 	err = vm.ProcessUnbondings()
@@ -199,12 +204,12 @@ func TestSlashValidator_ApportionsLossAcrossDelegationAndPendingUnbonding(t *tes
 
 	delegator, err := ws.GetAccount(delegatorAddr)
 	require.NoError(t, err)
-	require.Equal(t, "100", delegator.Balance)
+	require.Equal(t, "100", coremath.BigIntToString(coremath.ParseBigInt(delegator.Balance)))
 
 	validator, err = ws.GetValidator(validatorAddr)
 	require.NoError(t, err)
-	require.Equal(t, "200", validator.Delegators[delegatorAddr])
-	require.Equal(t, "200", validator.DelegatedStake)
+	require.Equal(t, "200", coremath.BigIntToString(coremath.ParseBigInt(validator.Delegators[delegatorAddr])))
+	require.Equal(t, "200", coremath.BigIntToString(coremath.ParseBigInt(validator.DelegatedStake)))
 }
 
 func TestUpdateValidatorCommission_EnforcesDailyCooldown(t *testing.T) {
@@ -267,7 +272,7 @@ func TestRegisterValidator_EnforcesRegistrationStakeLimits(t *testing.T) {
 	err = ws.SetValidator("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &core.Validator{
 		Address: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		Active:  true,
-		Stake:   "900",
+		Stake:   ub("900"),
 	})
 	require.NoError(t, err)
 	ws.UpdateTotalStaked()

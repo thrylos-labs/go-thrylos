@@ -828,7 +828,7 @@ func (ce *ConsensusEngine) generateDeterministicVRFOutput(input []byte) []byte {
 // calculateVRFStakeScore calculates a score that gives higher stake better odds
 // Formula: VRF_output / stake
 // Lower score = better chance (inversely proportional to stake)
-func (ce *ConsensusEngine) calculateVRFStakeScore(vrfOutput []byte, stake string) *big.Int {
+func (ce *ConsensusEngine) calculateVRFStakeScore(vrfOutput []byte, stake []byte) *big.Int {
 	// Convert VRF output to a big integer
 	vrfNumber := new(big.Int).SetBytes(vrfOutput)
 
@@ -1705,8 +1705,8 @@ func (ce *ConsensusEngine) RegisterDiscoveredValidator(validator *core.Validator
 	}
 
 	// Validate stake is non-zero
-	stake, ok := new(big.Int).SetString(validator.Stake, 10)
-	if !ok || stake.Sign() <= 0 {
+	stake := math.ParseBigInt(validator.Stake)
+	if stake.Sign() <= 0 {
 		return fmt.Errorf("invalid stake amount: %s", validator.Stake)
 	}
 

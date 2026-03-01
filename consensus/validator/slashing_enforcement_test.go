@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 )
 
@@ -152,7 +153,7 @@ func (tm *TestManager) SlashValidator(
 		stakeBig.SetInt64(0)
 	}
 
-	validator.Stake = stakeBig.String()
+	validator.Stake = stakeBig.Bytes()
 	validator.JailUntil = time.Now().Add(jailDuration).Unix()
 	validator.Active = false
 	validator.UpdatedAt = time.Now().Unix()
@@ -222,7 +223,7 @@ func createTestValidator(address string, stake string) *core.Validator {
 	return &core.Validator{
 		Address: address,
 		Pubkey:  []byte("test-pubkey"),
-		Stake:   stake,
+		Stake:   coremath.ParseBigInt(stake).Bytes(),
 		Active:  true,
 	}
 }
@@ -253,13 +254,9 @@ func setupTestManager() (*TestManager, *MockWorldState) {
 	return manager, ws
 }
 
-// Helper to parse big.Int from string
-func parseBigInt(s string) *big.Int {
-	result, ok := new(big.Int).SetString(s, 10)
-	if !ok {
-		return big.NewInt(0)
-	}
-	return result
+// Helper to parse big.Int from either decimal strings or canonical bytes.
+func parseBigInt[T ~string | ~[]byte](v T) *big.Int {
+	return coremath.ParseBigInt(v)
 }
 
 // ============================================================================

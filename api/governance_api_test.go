@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
 	accountpkg "github.com/thrylos-labs/go-thrylos/core/account"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	thryloscrypto "github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -42,11 +43,11 @@ func TestGovernanceProposalEndpoint_ConstructsSignedTransaction(t *testing.T) {
 
 	err = ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address:      from,
-		Balance:      "1000000",
+		Balance:      coremath.ParseBigInt("1000000").Bytes(),
 		Nonce:        0,
-		StakedAmount: "0",
-		DelegatedTo:  map[string]string{},
-		Rewards:      "0",
+		StakedAmount: nil,
+		DelegatedTo:  map[string][]byte{},
+		Rewards:      nil,
 	})
 	require.NoError(t, err)
 

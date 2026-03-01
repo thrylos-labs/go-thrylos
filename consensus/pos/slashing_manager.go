@@ -489,7 +489,7 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 				err := sm.forkChoice.ValidateReorganization(
 					approxDepth,
 					att.Epoch,
-					validator.Stake,
+					coremath.BigIntToString(coremath.ParseBigInt(validator.Stake)),
 					totalStake,
 				)
 				if err != nil {

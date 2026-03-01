@@ -203,7 +203,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 
 	// 5. Update block score using BigInt math
 	currentScore := fc.blockScores[blockHash]
-	newScore := addBigIntStrings(currentScore, validatorStake)
+	newScore := addBigIntStrings(currentScore, coremath.BigIntToString(coremath.ParseBigInt(validatorStake)))
 	fc.blockScores[blockHash] = newScore
 
 	// Track epoch mapping
@@ -215,7 +215,7 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 		fc.metrics.TotalEpochs++
 	}
 	currentEpochScore := fc.epochAttestations[epoch][blockHash]
-	newEpochScore := addBigIntStrings(currentEpochScore, validatorStake)
+	newEpochScore := addBigIntStrings(currentEpochScore, coremath.BigIntToString(coremath.ParseBigInt(validatorStake)))
 	fc.epochAttestations[epoch][blockHash] = newEpochScore
 
 	// 7. Check Quorum (2/3 of total stake)

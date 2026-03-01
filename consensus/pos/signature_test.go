@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -56,7 +57,7 @@ func TestConsensusSignatureSecurity(t *testing.T) {
 		Pubkey:  pubKey.Bytes(),
 		Active:  true,
 		// ✅ FIX: Use string for BigInt field
-		Stake: "1000",
+		Stake: coremath.ParseBigInt("1000").Bytes(),
 	}
 	err = ws.AddValidator(val)
 	require.NoError(t, err)

@@ -224,11 +224,8 @@ func ConvertPointsToThrylos(
 		if err != nil {
 			return fmt.Errorf("failed to get account %s: %w", addr, err)
 		}
-		balance, _ := new(big.Int).SetString(account.Balance, 10)
-		if balance == nil {
-			balance = big.NewInt(0)
-		}
-		account.Balance = new(big.Int).Add(balance, amount).String()
+		balance := new(big.Int).SetBytes(account.Balance)
+		account.Balance = new(big.Int).Add(balance, amount).Bytes()
 		if err := ws.UpdateAccountWithStorage(account); err != nil {
 			return fmt.Errorf("failed to credit %s: %w", addr, err)
 		}

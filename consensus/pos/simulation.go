@@ -138,7 +138,7 @@ func RunAdversarialSimulation(cfg SimulationConfig) (*SimulationResult, error) {
 		}
 		converted := &core.Validator{
 			Address: val.Address,
-			Stake:   val.Stake,
+			Stake:   math.ParseBigInt(val.Stake).Bytes(),
 			Active:  true,
 		}
 		validatorsByAddr[val.Address] = converted
@@ -330,7 +330,7 @@ func activeValidators(all []SimulationValidator) []*core.Validator {
 		if val.Active {
 			active = append(active, &core.Validator{
 				Address: val.Address,
-				Stake:   val.Stake,
+				Stake:   math.ParseBigInt(val.Stake).Bytes(),
 				Active:  true,
 			})
 		}

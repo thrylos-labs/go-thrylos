@@ -86,8 +86,7 @@ func TestStateSnapshotSecurity(t *testing.T) {
 	maliciousSnapshot := &p2p.StateSnapshot{
 		Height:    trustedHeight,
 		StateRoot: "0x666_MALICIOUS_ROOT_666", // MISMATCH
-		// NEW (Fixed) - Note the quotes around the balance
-		Accounts:  map[string]*core.Account{"0x1": {Address: "0x1", Balance: "1000000000"}},
+		Accounts:  map[string]*core.Account{"0x1": {Address: "0x1", Balance: []byte{0x3b, 0x9a, 0xca, 0x00}}},
 		Timestamp: 0,
 	}
 	// Calculate checksum based on malicious data (integrity check passes, but root check fails)

@@ -24,7 +24,7 @@ func (m *slashingTestWorldState) GetHeight() int64 {
 }
 
 func (m *slashingTestWorldState) GetValidator(address string) (*core.Validator, error) {
-	return &core.Validator{Address: address, Stake: "1000000000"}, nil
+	return &core.Validator{Address: address, Stake: []byte{0x3b, 0x9a, 0xca, 0x00}}, nil
 }
 
 func (m *slashingTestWorldState) UpdateValidator(validator *core.Validator) error {

@@ -21,6 +21,7 @@ import (
 	"github.com/thrylos-labs/go-thrylos/core/account"
 	"github.com/thrylos-labs/go-thrylos/core/chain"
 	"github.com/thrylos-labs/go-thrylos/core/evm"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	"github.com/thrylos-labs/go-thrylos/network"
@@ -748,18 +749,14 @@ func (n *Node) RegisterValidator(stake string, commission float64) error {
 		Address: n.nodeAddress,
 		Pubkey:  pubkey,
 
-		// Fix 1: Assign string directly (matches protobuf)
-		Stake:     stake,
-		SelfStake: stake,
-
-		// Fix 2: Use string "0" instead of integer 0
-		DelegatedStake: "0",
+		Stake:     coremath.ParseBigInt(stake).Bytes(),
+		SelfStake: coremath.ParseBigInt(stake).Bytes(),
+		DelegatedStake: nil,
 
 		Commission: commission,
 		Active:     true,
 
-		// Fix 3: Use map[string]string (matches protobuf)
-		Delegators: make(map[string]string),
+		Delegators: make(map[string][]byte),
 
 		CreatedAt: time.Now().Unix(),
 		UpdatedAt: time.Now().Unix(),
@@ -1177,12 +1174,12 @@ func (n *Node) initializeGenesis() error {
 			{
 				Address:        n.nodeAddress,
 				Pubkey:         n.nodePrivateKey.PublicKey().Bytes(),
-				Stake:          n.config.Staking.MinValidatorStake,
-				SelfStake:      n.config.Staking.MinValidatorStake,
-				DelegatedStake: "0",
+				Stake:          coremath.ParseBigInt(n.config.Staking.MinValidatorStake).Bytes(),
+				SelfStake:      coremath.ParseBigInt(n.config.Staking.MinValidatorStake).Bytes(),
+				DelegatedStake: nil,
 				Commission:     0.1,
 				Active:         true,
-				Delegators:     make(map[string]string),
+				Delegators:     make(map[string][]byte),
 				CreatedAt:      time.Now().Unix(),
 				UpdatedAt:      time.Now().Unix(),
 			},

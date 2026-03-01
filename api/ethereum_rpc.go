@@ -969,9 +969,9 @@ func (h *EthereumRPCHandler) convertEthTxToThrylosTx(ethTx *types.Transaction) (
 		Id:        ethTx.Hash().Hex(),
 		From:      sender.Hex(),
 		To:        "", // Set below
-		Amount:    ethTx.Value().String(),
+		Amount:    ethTx.Value().Bytes(),
 		Gas:       int64(ethTx.Gas()),
-		GasPrice:  ethTx.GasPrice().String(),
+		GasPrice:  ethTx.GasPrice().Bytes(),
 		Nonce:     ethTx.Nonce(),
 		Data:      ethTx.Data(),
 		Type:      txType,

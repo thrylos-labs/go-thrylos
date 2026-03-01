@@ -8,9 +8,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 )
+
+func fuzzU(v string) []byte {
+	return coremath.ParseBigInt(v).Bytes()
+}
 
 // TestStateRootDeterminism_WithBadger uses a real (temp) BadgerDB to ensure full integration accuracy.
 // It verifies that regardless of map iteration order, the state root remains identical.
@@ -44,7 +49,7 @@ func TestStateRootDeterminism_WithBadger(t *testing.T) {
 		val := &core.Validator{
 			Address: addr,
 			Pubkey:  []byte(fmt.Sprintf("pubkey-%d", i)),
-			Stake:   fmt.Sprintf("%d", stakeVal), // ✅ Fix: Convert to string
+			Stake:   fuzzU(fmt.Sprintf("%d", stakeVal)),
 			Active:  true,
 		}
 		ws.validators[addr] = val
@@ -60,10 +65,10 @@ func TestStateRootDeterminism_WithBadger(t *testing.T) {
 
 		acc := &core.Account{
 			Address:     addr,
-			Balance:     fmt.Sprintf("%d", balanceVal), // ✅ Fix: Convert to string
+			Balance:     fuzzU(fmt.Sprintf("%d", balanceVal)),
 			Nonce:       rng.Uint64(),
-			DelegatedTo: make(map[string]string),       // ✅ Fix: map[string]string
-			Rewards:     fmt.Sprintf("%d", rewardsVal), // ✅ Fix: Convert to string
+			DelegatedTo: make(map[string][]byte),
+			Rewards:     fuzzU(fmt.Sprintf("%d", rewardsVal)),
 		}
 
 		// Random delegations pointing to valid validator addresses
@@ -74,7 +79,7 @@ func TestStateRootDeterminism_WithBadger(t *testing.T) {
 
 			if _, exists := acc.DelegatedTo[valAddr]; !exists {
 				amount := rng.Int63n(100000) + 1
-				acc.DelegatedTo[valAddr] = fmt.Sprintf("%d", amount) // ✅ Fix: Convert to string
+				acc.DelegatedTo[valAddr] = fuzzU(fmt.Sprintf("%d", amount))
 				totalDelegated += amount
 			}
 		}
@@ -82,7 +87,7 @@ func TestStateRootDeterminism_WithBadger(t *testing.T) {
 		// Ensure StakedAmount is >= TotalDelegated
 		// Fix: Convert total staked calculation to string
 		stakedVal := totalDelegated + rng.Int63n(50000)
-		acc.StakedAmount = fmt.Sprintf("%d", stakedVal) // ✅ Fix: Convert to string
+		acc.StakedAmount = fuzzU(fmt.Sprintf("%d", stakedVal))
 
 		// Save to AccountManager
 		err := ws.accountManager.UpdateAccount(acc)

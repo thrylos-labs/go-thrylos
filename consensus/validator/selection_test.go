@@ -358,7 +358,7 @@ func TestSelectionSimulation_CartelStakeSplitting(t *testing.T) {
 			cartelMembers[addr] = true
 			assert.NoError(t, set.AddValidator(&core.Validator{
 				Address: addr,
-				Stake:   stake,
+				Stake:   u(stake),
 				Active:  true,
 			}))
 		}
@@ -366,7 +366,7 @@ func TestSelectionSimulation_CartelStakeSplitting(t *testing.T) {
 		for i := 0; i < scenario.honestCount; i++ {
 			assert.NoError(t, set.AddValidator(&core.Validator{
 				Address: fmt.Sprintf("honest_%d", i),
-				Stake:   scenario.honestStake,
+				Stake:   u(scenario.honestStake),
 				Active:  true,
 			}))
 		}

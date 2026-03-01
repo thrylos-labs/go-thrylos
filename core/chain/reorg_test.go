@@ -63,14 +63,14 @@ func TestReorgDoubleExecution(t *testing.T) {
 	initialBalanceStr := "100000"
 	ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: aliceAddr,
-		Balance: initialBalanceStr,
+		Balance: math.ParseBigInt(initialBalanceStr).Bytes(),
 		Nonce:   0,
 	})
 
 	// ✅ Create recipient account (needed for transaction execution)
 	ws.GetAccountManager().UpdateAccount(&core.Account{
 		Address: recipientAddr,
-		Balance: "0",
+		Balance: nil,
 		Nonce:   0,
 	})
 
@@ -84,9 +84,9 @@ func TestReorgDoubleExecution(t *testing.T) {
 		Hash:      "0xTx1Hash",
 		From:      aliceAddr,
 		To:        recipientAddr, // ✅ Use proper address
-		Amount:    txAmountStr,
+		Amount:    math.ParseBigInt(txAmountStr).Bytes(),
 		Gas:       txGas,
-		GasPrice:  txGasPriceStr,
+		GasPrice:  math.ParseBigInt(txGasPriceStr).Bytes(),
 		Nonce:     0,
 		Timestamp: time.Now().Unix(),
 		Signature: []byte("mock-signature"),

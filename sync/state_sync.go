@@ -2,6 +2,7 @@ package sync
 
 // network/sync/state_sync.go - World state synchronization implementation
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -859,7 +860,7 @@ func (sc *StateComparator) compareAccounts(
 			}
 		} else if hasLocal && hasRemote {
 			// Account exists in both, check for differences
-			if localAcc.Balance != remoteAcc.Balance || localAcc.Nonce != remoteAcc.Nonce {
+			if !bytes.Equal(localAcc.Balance, remoteAcc.Balance) || localAcc.Nonce != remoteAcc.Nonce {
 				result.AccountDiffs[addr] = &AccountDiff{
 					Type:          DiffTypeModified,
 					LocalAccount:  localAcc,
@@ -911,8 +912,8 @@ func (sc *StateComparator) compareValidators(
 }
 
 func (sc *StateComparator) validatorsDiffer(local, remote *core.Validator) bool {
-	return local.Stake != remote.Stake ||
-		local.DelegatedStake != remote.DelegatedStake ||
+	return !bytes.Equal(local.Stake, remote.Stake) ||
+		!bytes.Equal(local.DelegatedStake, remote.DelegatedStake) ||
 		local.Commission != remote.Commission ||
 		local.Active != remote.Active
 }

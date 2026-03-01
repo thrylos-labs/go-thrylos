@@ -8,12 +8,17 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 	"github.com/thrylos-labs/go-thrylos/types"
 )
+
+func u(v string) []byte {
+	return coremath.ParseBigInt(v).Bytes()
+}
 
 // setupConsensusEngine creates a test consensus engine with minimal configuration
 func setupConsensusEngine(t *testing.T) *ConsensusEngine {
@@ -76,19 +81,19 @@ func TestVRFValidatorSelection(t *testing.T) {
 	// Create validators with different stakes
 	val1 := &core.Validator{
 		Address: "val1",
-		Stake:   "1000000", // 1M
+		Stake:   u("1000000"), // 1M
 		Active:  true,
 		Pubkey:  []byte("pubkey1"),
 	}
 	val2 := &core.Validator{
 		Address: "val2",
-		Stake:   "5000000", // 5M (5x more stake)
+		Stake:   u("5000000"), // 5M (5x more stake)
 		Active:  true,
 		Pubkey:  []byte("pubkey2"),
 	}
 	val3 := &core.Validator{
 		Address: "val3",
-		Stake:   "10000000", // 10M (10x more stake)
+		Stake:   u("10000000"), // 10M (10x more stake)
 		Active:  true,
 		Pubkey:  []byte("pubkey3"),
 	}
@@ -133,7 +138,7 @@ func TestVRFValidatorSelection_SingleValidator(t *testing.T) {
 	// Test with only one validator
 	val := &core.Validator{
 		Address: "only_validator",
-		Stake:   "1000000",
+		Stake:   u("1000000"),
 		Active:  true,
 		Pubkey:  []byte("pubkey"),
 	}
@@ -154,13 +159,13 @@ func TestVRFValidatorSelection_EqualStake(t *testing.T) {
 	// Create validators with equal stakes
 	val1 := &core.Validator{
 		Address: "val1",
-		Stake:   "1000000",
+		Stake:   u("1000000"),
 		Active:  true,
 		Pubkey:  []byte("pubkey1"),
 	}
 	val2 := &core.Validator{
 		Address: "val2",
-		Stake:   "1000000", // Same stake
+		Stake:   u("1000000"), // Same stake
 		Active:  true,
 		Pubkey:  []byte("pubkey2"),
 	}
@@ -187,8 +192,8 @@ func TestVRFValidatorSelection_Deterministic(t *testing.T) {
 	ce := setupConsensusEngine(t)
 
 	validators := []*core.Validator{
-		{Address: "val1", Stake: "1000000", Active: true, Pubkey: []byte("pubkey1")},
-		{Address: "val2", Stake: "2000000", Active: true, Pubkey: []byte("pubkey2")},
+		{Address: "val1", Stake: u("1000000"), Active: true, Pubkey: []byte("pubkey1")},
+		{Address: "val2", Stake: u("2000000"), Active: true, Pubkey: []byte("pubkey2")},
 	}
 
 	// Same slot should always select the same validator
@@ -212,8 +217,8 @@ func TestVRFValidatorSelection_DifferentSlotsGiveDifferentResults(t *testing.T) 
 	ce := setupConsensusEngine(t)
 
 	validators := []*core.Validator{
-		{Address: "val1", Stake: "1000000", Active: true, Pubkey: []byte("pubkey1")},
-		{Address: "val2", Stake: "1000000", Active: true, Pubkey: []byte("pubkey2")},
+		{Address: "val1", Stake: u("1000000"), Active: true, Pubkey: []byte("pubkey1")},
+		{Address: "val2", Stake: u("1000000"), Active: true, Pubkey: []byte("pubkey2")},
 	}
 
 	// Different slots should (likely) give different results
@@ -245,7 +250,7 @@ func TestVRFValidatorSelection_ZeroStake(t *testing.T) {
 	// Validator with zero stake
 	val := &core.Validator{
 		Address: "zero_stake",
-		Stake:   "0",
+		Stake:   nil,
 		Active:  true,
 		Pubkey:  []byte("pubkey"),
 	}

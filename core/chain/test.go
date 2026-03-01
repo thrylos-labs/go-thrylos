@@ -10,11 +10,16 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
 	"github.com/thrylos-labs/go-thrylos/storage"
 )
+
+func u(v string) []byte {
+	return coremath.ParseBigInt(v).Bytes()
+}
 
 func TestBlockProcessing_ProcessesUnbondingQueue(t *testing.T) {
 	// 1. Setup blockchain with temporary storage
@@ -65,12 +70,12 @@ func TestBlockProcessing_ProcessesUnbondingQueue(t *testing.T) {
 		Address:        validatorAddr,
 		Pubkey:         validatorPrivKey.PublicKey().Bytes(),
 		Name:           "Test Validator",
-		Stake:          "10000000000000000000000", // 10,000 THRYLOS
-		SelfStake:      "3000000000000000000000",  // 3,000 THRYLOS
-		DelegatedStake: "7000000000000000000000",  // 7,000 THRYLOS
+		Stake:          u("10000000000000000000000"), // 10,000 THRYLOS
+		SelfStake:      u("3000000000000000000000"),  // 3,000 THRYLOS
+		DelegatedStake: u("7000000000000000000000"),  // 7,000 THRYLOS
 		Commission:     0.10,                      // 10%
 		Active:         true,
-		Delegators:     make(map[string]string),
+		Delegators:     make(map[string][]byte),
 		CreatedAt:      time.Now().Unix(),
 		UpdatedAt:      time.Now().Unix(),
 	}
@@ -78,7 +83,7 @@ func TestBlockProcessing_ProcessesUnbondingQueue(t *testing.T) {
 	// Create validator account
 	validatorAccount := &core.Account{
 		Address: validatorAddr,
-		Balance: "0",
+		Balance: nil,
 		Nonce:   0,
 	}
 	ws.GetAccountManager().UpdateAccount(validatorAccount)
@@ -91,18 +96,18 @@ func TestBlockProcessing_ProcessesUnbondingQueue(t *testing.T) {
 	// Give delegator initial balance
 	delegatorAccount := &core.Account{
 		Address:      delegatorAddr,
-		Balance:      "0",                      // No liquid balance (it's all staked)
-		StakedAmount: "7000000000000000000000", // 7,000 THRYLOS staked
+		Balance:      nil,                      // No liquid balance (it's all staked)
+		StakedAmount: u("7000000000000000000000"), // 7,000 THRYLOS staked
 		Nonce:        0,
-		DelegatedTo:  make(map[string]string),
+		DelegatedTo:  make(map[string][]byte),
 	}
 	// Track delegation
-	delegatorAccount.DelegatedTo[validatorAddr] = "7000000000000000000000" // 7,000 THRYLOS
+	delegatorAccount.DelegatedTo[validatorAddr] = u("7000000000000000000000") // 7,000 THRYLOS
 
 	ws.GetAccountManager().UpdateAccount(delegatorAccount)
 
 	// Update validator's delegators map
-	validator.Delegators[delegatorAddr] = "7000000000000000000000"
+	validator.Delegators[delegatorAddr] = u("7000000000000000000000")
 	ws.SetValidator(validatorAddr, validator)
 
 	// 4. Undelegate some tokens
@@ -124,7 +129,7 @@ func TestBlockProcessing_ProcessesUnbondingQueue(t *testing.T) {
 	// 6. Verify funds NOT in balance yet
 	updatedDelegator, err := ws.GetAccount(delegatorAddr)
 	require.NoError(t, err)
-	assert.Equal(t, "0", updatedDelegator.Balance, "Balance should still be 0 (funds in unbonding)")
+	assert.Equal(t, "0", coremath.BigIntToString(coremath.ParseBigInt(updatedDelegator.Balance)), "Balance should still be 0 (funds in unbonding)")
 
 	// 7. Manually set completion time to past (simulate 7 days passing)
 	ws.UnbondingMu().Lock()
@@ -139,7 +144,7 @@ func TestBlockProcessing_ProcessesUnbondingQueue(t *testing.T) {
 	// 9. Verify funds were released to balance
 	finalDelegator, err := ws.GetAccount(delegatorAddr)
 	require.NoError(t, err)
-	assert.Equal(t, unstakeAmount.String(), finalDelegator.Balance,
+	assert.Equal(t, unstakeAmount.String(), coremath.BigIntToString(coremath.ParseBigInt(finalDelegator.Balance)),
 		"Funds should now be in balance after unbonding period")
 
 	// 10. Verify unbonding queue is empty
@@ -148,7 +153,7 @@ func TestBlockProcessing_ProcessesUnbondingQueue(t *testing.T) {
 
 	// 11. Verify staked amount decreased
 	expectedStaked := "6000000000000000000000" // 7,000 - 1,000 = 6,000
-	assert.Equal(t, expectedStaked, finalDelegator.StakedAmount,
+	assert.Equal(t, expectedStaked, coremath.BigIntToString(coremath.ParseBigInt(finalDelegator.StakedAmount)),
 		"Staked amount should have decreased")
 }
 
@@ -225,18 +230,18 @@ func TestUnbondingQueue_MultipleEntries(t *testing.T) {
 
 	validator := &core.Validator{
 		Address:        validatorAddr,
-		Stake:          "100000000000000000000000", // 100,000 THRYLOS
-		DelegatedStake: "50000000000000000000000",  // 50,000 THRYLOS
+		Stake:          u("100000000000000000000000"), // 100,000 THRYLOS
+		DelegatedStake: u("50000000000000000000000"),  // 50,000 THRYLOS
 		Active:         true,
-		Delegators:     map[string]string{delegatorAddr: "50000000000000000000000"},
+		Delegators:     map[string][]byte{delegatorAddr: u("50000000000000000000000")},
 	}
 	ws.SetValidator(validatorAddr, validator)
 
 	delegator := &core.Account{
 		Address:      delegatorAddr,
-		Balance:      "0",
-		StakedAmount: "50000000000000000000000",
-		DelegatedTo:  map[string]string{validatorAddr: "50000000000000000000000"},
+		Balance:      nil,
+		StakedAmount: u("50000000000000000000000"),
+		DelegatedTo:  map[string][]byte{validatorAddr: u("50000000000000000000000")},
 	}
 	ws.GetAccountManager().UpdateAccount(delegator)
 
@@ -322,18 +327,18 @@ func TestUnbondingQueue_DoesNotCompleteEarly(t *testing.T) {
 
 	validator := &core.Validator{
 		Address:        validatorAddr,
-		Stake:          "10000000000000000000000",
-		DelegatedStake: "5000000000000000000000",
+		Stake:          u("10000000000000000000000"),
+		DelegatedStake: u("5000000000000000000000"),
 		Active:         true,
-		Delegators:     map[string]string{delegatorAddr: "5000000000000000000000"},
+		Delegators:     map[string][]byte{delegatorAddr: u("5000000000000000000000")},
 	}
 	ws.SetValidator(validatorAddr, validator)
 
 	delegator := &core.Account{
 		Address:      delegatorAddr,
-		Balance:      "0",
-		StakedAmount: "5000000000000000000000",
-		DelegatedTo:  map[string]string{validatorAddr: "5000000000000000000000"},
+		Balance:      nil,
+		StakedAmount: u("5000000000000000000000"),
+		DelegatedTo:  map[string][]byte{validatorAddr: u("5000000000000000000000")},
 	}
 	ws.GetAccountManager().UpdateAccount(delegator)
 

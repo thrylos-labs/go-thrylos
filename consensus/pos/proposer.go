@@ -204,7 +204,7 @@ func (bp *BlockProposer) selectBalanced(availableTxs []*core.Transaction) ([]*co
 			Transaction: tx,
 			Priority:    priority,
 			GasRatio:    gasRatio,
-			FeePerGas:   tx.GasPrice,
+			FeePerGas:   coremath.BigIntToString(coremath.ParseBigInt(tx.GasPrice)),
 			Age:         time.Duration(currentTime-tx.Timestamp) * time.Second,
 		}
 		txsWithPriority = append(txsWithPriority, txWithPriority)
@@ -450,7 +450,7 @@ func (bp *BlockProposer) constructBlock(transactions []*core.Transaction, slot u
 		GasLimit:   bp.maxBlockSize,
 		Slot:       slot,
 		Epoch:      epoch,
-		TotalFees:  totalFees,
+		TotalFees:  coremath.ParseBigInt(totalFees).Bytes(),
 		MerkleRoot: merkleRoot,
 	}
 
@@ -726,7 +726,7 @@ func (bp *BlockProposer) constructBlockWithVRF(
 		GasLimit:   bp.maxBlockSize,
 		Slot:       slot,
 		Epoch:      epoch,
-		TotalFees:  totalFees,
+		TotalFees:  coremath.ParseBigInt(totalFees).Bytes(),
 		MerkleRoot: merkleRoot,
 		VrfOutput:  vrfOutput, // ✅ Add VRF output
 		VrfProof:   vrfProof,  // ✅ Add VRF proof

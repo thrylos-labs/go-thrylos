@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thrylos-labs/go-thrylos/config"
 	"github.com/thrylos-labs/go-thrylos/core/account"
+	coremath "github.com/thrylos-labs/go-thrylos/core/math"
 	"github.com/thrylos-labs/go-thrylos/core/state"
 	"github.com/thrylos-labs/go-thrylos/crypto"
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -31,6 +32,10 @@ type TPSResult struct {
 	Duration          time.Duration
 	TPS               float64
 	AvgTxPerBlock     float64
+}
+
+func u(v string) []byte {
+	return coremath.ParseBigInt(v).Bytes()
 }
 
 // TestSimpleTPS - Minimal working TPS test
@@ -157,10 +162,10 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 	validator := &core.Validator{
 		Address:        genesisAddress,
 		Pubkey:         genesisPrivKey.PublicKey().Bytes(),
-		Stake:          stakeAmount.String(),
-		SelfStake:      stakeAmount.String(),
-		DelegatedStake: "0",
-		Delegators:     make(map[string]string),
+		Stake:          stakeAmount.Bytes(),
+		SelfStake:      stakeAmount.Bytes(),
+		DelegatedStake: nil,
+		Delegators:     make(map[string][]byte),
 		Commission:     0.05,
 		Active:         true,
 		CreatedAt:      time.Now().Unix(),
@@ -201,11 +206,11 @@ func runTPSTest(t *testing.T, cfg TPSTestConfig) TPSResult {
 				Id:        txID,
 				From:      genesisAddress,
 				To:        recipient,
-				Amount:    amountBig.String(),
+				Amount:    amountBig.Bytes(),
 				Timestamp: time.Now().Unix(),
 				Nonce:     nonce,
 				Gas:       21000,
-				GasPrice:  gasPriceStr,
+				GasPrice:  u(gasPriceStr),
 				Signature: []byte("test_signature"),
 			}
 
@@ -626,7 +631,6 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 
 		testConfig.Genesis.Accounts = append(testConfig.Genesis.Accounts, config.GenesisAccount{
 			Address: genesisAddress,
-			// 2. Convert result to string
 			Balance: balanceBig.String(),
 		})
 	} else {
@@ -651,7 +655,7 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 	// Explicitly create Genesis Account in DB
 	genesisAcc := &core.Account{
 		Address: genesisAddress,
-		Balance: testConfig.Genesis.Accounts[0].Balance,
+		Balance: u(testConfig.Genesis.Accounts[0].Balance),
 		Nonce:   0,
 	}
 	err = worldState.UpdateAccountWithStorage(genesisAcc)
@@ -669,14 +673,14 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 		Pubkey:  genesisPrivKey.PublicKey().Bytes(),
 
 		// ✅ Fix: Assign as string
-		Stake:     stakeAmount.String(),
-		SelfStake: stakeAmount.String(),
+		Stake:     stakeAmount.Bytes(),
+		SelfStake: stakeAmount.Bytes(),
 
 		// ✅ Fix: Use string "0" instead of int 0
-		DelegatedStake: "0",
+		DelegatedStake: nil,
 
 		// ✅ Fix: Map values must be strings now
-		Delegators: make(map[string]string),
+		Delegators: make(map[string][]byte),
 
 		Commission: 0.05,
 		Active:     true,
@@ -728,14 +732,14 @@ func runTPSTestWithMetrics(t *testing.T, cfg TPSTestConfig) DetailedTPSResult {
 				To:   recipient,
 
 				// ✅ Fix: Assign as string
-				Amount: amountBig.String(),
+				Amount: amountBig.Bytes(),
 
 				Timestamp: time.Now().Unix(),
 				Nonce:     nonce,
 				Gas:       21000, // Gas limit is still int64
 
 				// ✅ Fix: Assign as string
-				GasPrice: gasPriceStr,
+				GasPrice: u(gasPriceStr),
 
 				Signature: []byte("test_signature"),
 			}
