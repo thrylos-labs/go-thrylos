@@ -23,6 +23,9 @@ const MAX_CALLDATA_SIZE: usize = 1_048_576; // 1 MB max calldata
 const MAX_BYTECODE_SIZE: usize = 24_576; // 24 KB (EIP-170 limit)
 const EXECUTOR_MAGIC: u64 = 0xDEADBEEF_CAFEBABE;
 const EXECUTOR_FREED_MAGIC: u64 = 0xDEADDEAD_DEADBEEF;
+const DEFAULT_MAX_GAS_PER_WINDOW: u64 = 300_000_000;
+const DEFAULT_MAX_TX_PER_WINDOW: u64 = 1000;
+const DEFAULT_CIRCUIT_BREAKER_WINDOW_SECS: u64 = 10;
 
 use revm::{
     db::CacheDB,
@@ -30,6 +33,7 @@ use revm::{
     Database, Evm,
 };
 use std::collections::HashMap;
+use std::env;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
@@ -319,6 +323,25 @@ impl CircuitBreaker {
     }
 }
 
+fn read_circuit_breaker_limit(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn circuit_breaker_config_from_env() -> (u64, u64, u64) {
+    (
+        read_circuit_breaker_limit("THRYLOS_EVM_MAX_GAS_PER_WINDOW", DEFAULT_MAX_GAS_PER_WINDOW),
+        read_circuit_breaker_limit("THRYLOS_EVM_MAX_TX_PER_WINDOW", DEFAULT_MAX_TX_PER_WINDOW),
+        read_circuit_breaker_limit(
+            "THRYLOS_EVM_WINDOW_DURATION_SECS",
+            DEFAULT_CIRCUIT_BREAKER_WINDOW_SECS,
+        ),
+    )
+}
+
 // ============================================================================
 // EVM Executor - WITH ATOMIC NONCE VALIDATION & RESERVATION SYSTEM
 // ============================================================================
@@ -348,11 +371,12 @@ impl EVMExecutor {
             cache: CacheDB::new(EmptyDB),
         };
 
-        // Circuit breaker: 300M gas per 10 seconds, max 1000 tx
+        let (max_gas_per_window, max_tx_per_window, window_duration_secs) =
+            circuit_breaker_config_from_env();
         let circuit_breaker = Arc::new(CircuitBreaker::new(
-            300_000_000, // 300M gas per window
-            1000,        // 1000 tx per window
-            10,          // 10 second window
+            max_gas_per_window,
+            max_tx_per_window,
+            window_duration_secs,
         ));
 
         Self {

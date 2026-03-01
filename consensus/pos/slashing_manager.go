@@ -482,9 +482,18 @@ func (sm *SlashingManager) ProcessAttestation(att *types.Attestation) error {
 			validator, err := sm.worldState.GetValidator(validatorAddress) //
 
 			if err == nil && validator != nil {
-				// Perform the reorg security check before recording the attestation
-				// Depth is calculated as the difference between current height and fork point
-				approxDepth := int(sm.worldState.GetHeight() - int64(att.Slot))
+				// Perform the reorg security check before recording the attestation.
+				// Use explicit block height, not slot count, because skipped slots break
+				// any assumption that slots and blocks advance 1:1.
+				if att.BlockHeight <= 0 {
+					return fmt.Errorf("attestation rejected for security: missing block height for reorg validation")
+				}
+
+				currentHeight := sm.worldState.GetHeight()
+				approxDepth := 0
+				if currentHeight > att.BlockHeight {
+					approxDepth = int(currentHeight - att.BlockHeight)
+				}
 
 				err := sm.forkChoice.ValidateReorganization(
 					approxDepth,

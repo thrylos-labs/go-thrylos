@@ -84,6 +84,7 @@ func NewForkChoiceWithConfig(config *config.Config, worldState WorldStateReader,
 		validatorAttestations: make(map[string]map[string]bool),
 		epochAttestations:     make(map[uint64]map[string]string),
 		blockEpochMap:         make(map[string]uint64),
+		epochBlockOrder:       make(map[uint64][]string),
 		totalActiveStake:      "0",
 		totalActiveStakeTime:  time.Time{},
 		metrics:               &ForkChoiceMetrics{},
@@ -216,6 +217,11 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 			blockHashShort, fc.fcConfig.MaxAttestationsPerBlock)
 	}
 
+	isNewBlock := false
+	if _, exists := fc.blockScores[blockHash]; !exists {
+		isNewBlock = true
+	}
+
 	// 5. Update block score using BigInt math
 	currentScore := fc.blockScores[blockHash]
 	newScore := addBigIntStrings(currentScore, coremath.BigIntToString(coremath.ParseBigInt(validatorStake)))
@@ -223,6 +229,10 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 
 	// Track epoch mapping
 	fc.blockEpochMap[blockHash] = epoch
+	if isNewBlock {
+		fc.epochBlockOrder[epoch] = append(fc.epochBlockOrder[epoch], blockHash)
+		fc.pruneEpochBlocksLocked(epoch)
+	}
 
 	// 6. Update epoch attestations
 	createdEpochWindow := false
@@ -272,6 +282,56 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 		// Check justification (passing strings)
 		fc.checkJustification(epoch, blockHash, attestingStakeBig.String(), totalStakeBig.String())
 	}
+}
+
+func (fc *ForkChoice) pruneEpochBlocksLocked(epoch uint64) {
+	if fc.fcConfig == nil || fc.fcConfig.MaxBlocksPerEpoch <= 0 {
+		return
+	}
+
+	order := fc.epochBlockOrder[epoch]
+	for len(order) > fc.fcConfig.MaxBlocksPerEpoch {
+		oldest := order[0]
+		order = order[1:]
+		fc.removeTrackedBlockLocked(oldest)
+	}
+
+	if len(order) == 0 {
+		delete(fc.epochBlockOrder, epoch)
+		return
+	}
+	fc.epochBlockOrder[epoch] = order
+}
+
+func (fc *ForkChoice) removeTrackedBlockLocked(blockHash string) {
+	epoch, hasEpoch := fc.blockEpochMap[blockHash]
+	if hasEpoch {
+		if order := fc.epochBlockOrder[epoch]; len(order) > 0 {
+			filtered := order[:0]
+			for _, candidate := range order {
+				if candidate != blockHash {
+					filtered = append(filtered, candidate)
+				}
+			}
+			if len(filtered) == 0 {
+				delete(fc.epochBlockOrder, epoch)
+			} else {
+				fc.epochBlockOrder[epoch] = filtered
+			}
+		}
+
+		if blocks := fc.epochAttestations[epoch]; blocks != nil {
+			delete(blocks, blockHash)
+			if len(blocks) == 0 {
+				delete(fc.epochAttestations, epoch)
+			}
+		}
+	}
+
+	delete(fc.blockScores, blockHash)
+	delete(fc.attestationsByBlock, blockHash)
+	delete(fc.validatorAttestations, blockHash)
+	delete(fc.blockEpochMap, blockHash)
 }
 
 func (fc *ForkChoice) findValidatorAttestation(blockHash, validatorAddr string, epoch uint64) *types.Attestation {

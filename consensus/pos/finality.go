@@ -336,6 +336,7 @@ func (fc *ForkChoice) cleanupOldEpochsLocked(startTime time.Time) {
 	for epoch := range fc.epochAttestations {
 		if epoch < cutoffEpoch {
 			delete(fc.epochAttestations, epoch)
+			delete(fc.epochBlockOrder, epoch)
 			epochsRemoved++
 		}
 	}
@@ -364,10 +365,7 @@ func (fc *ForkChoice) cleanupOldEpochsLocked(startTime time.Time) {
 			}
 
 			// Remove all data for this block
-			delete(fc.blockScores, blockHash)
-			delete(fc.attestationsByBlock, blockHash)
-			delete(fc.validatorAttestations, blockHash)
-			delete(fc.blockEpochMap, blockHash)
+			fc.removeTrackedBlockLocked(blockHash)
 			blocksRemoved++
 		}
 	}

@@ -8,7 +8,7 @@ cd revm_wrapper
 
 # Keep the Rust archive aligned with the Go linker target on macOS.
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-26.0}"
+    export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
     export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}"
     echo "🍎 Using macOS deployment target ${MACOSX_DEPLOYMENT_TARGET}"
 fi

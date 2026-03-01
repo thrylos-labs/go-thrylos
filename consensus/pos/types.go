@@ -149,6 +149,7 @@ type ForkChoice struct {
 	validatorAttestations map[string]map[string]bool   // blockHash -> validatorAddress -> hasAttested
 	epochAttestations     map[uint64]map[string]string // epoch -> blockHash -> totalStake (BigInt string)
 	blockEpochMap         map[string]uint64            // blockHash -> epoch (for cleanup)
+	epochBlockOrder       map[uint64][]string          // epoch -> insertion order for per-epoch pruning
 
 	// Track latest attestation per validator (epoch -> validator -> blockHash)
 	latestMessages map[uint64]map[string]string

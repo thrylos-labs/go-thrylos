@@ -44,3 +44,31 @@ func TestForkChoiceProcessAttestation_CleansOldEpochStateOnEpochGrowth(t *testin
 		require.GreaterOrEqual(t, epoch, uint64(2))
 	}
 }
+
+func TestForkChoiceProcessAttestation_PrunesBlocksWithinEpoch(t *testing.T) {
+	cfg := &config.Config{}
+	ws := NewMockWorldStateForFork()
+	ws.validators["0x1"] = &core.Validator{Address: "0x1", Active: true, Stake: coremath.ParseBigInt("1").Bytes()}
+	ws.validators["0x2"] = &core.Validator{Address: "0x2", Active: true, Stake: coremath.ParseBigInt("1").Bytes()}
+	ws.validators["0x3"] = &core.Validator{Address: "0x3", Active: true, Stake: coremath.ParseBigInt("1").Bytes()}
+
+	fcCfg := DefaultForkChoiceConfig()
+	fcCfg.CleanupInterval = 0
+	fcCfg.MaxBlocksPerEpoch = 2
+
+	fc := NewForkChoiceWithConfig(cfg, ws, nil, fcCfg)
+
+	for idx, validator := range []string{"0x1", "0x2", "0x3"} {
+		fc.ProcessAttestation(&types.Attestation{
+			ValidatorAddress: validator,
+			BlockHash:        fmt.Sprintf("epoch-1-block-%d", idx+1),
+			Epoch:            1,
+		})
+	}
+
+	require.Len(t, fc.blockScores, 2)
+	require.NotContains(t, fc.blockScores, "epoch-1-block-1")
+	require.Contains(t, fc.blockScores, "epoch-1-block-2")
+	require.Contains(t, fc.blockScores, "epoch-1-block-3")
+	require.Len(t, fc.epochBlockOrder[1], 2)
+}

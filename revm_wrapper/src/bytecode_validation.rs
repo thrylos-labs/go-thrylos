@@ -284,15 +284,15 @@ fn get_stack_impact(op: u8) -> (i32, i32) {
         0xa0..=0xa4 => ((op - 0xa0 + 2) as i32, 0),
 
         // System
-        0xf0 => (3, 1), // CREATE
-        0xf1 => (7, 1), // CALL
-        0xf2 => (7, 1), // CALLCODE
+        0xf0 => (3, 1),            // CREATE
+        0xf1 => (7, 1),            // CALL
+        0xf2 => (7, 1),            // CALLCODE
         opcodes::RETURN => (2, 0), // RETURN
-        0xf4 => (6, 1), // DELEGATECALL
-        0xf5 => (4, 1), // CREATE2
-        0xfa => (6, 1), // STATICCALL
+        0xf4 => (6, 1),            // DELEGATECALL
+        0xf5 => (4, 1),            // CREATE2
+        0xfa => (6, 1),            // STATICCALL
         opcodes::REVERT => (2, 0), // REVERT
-        0xff => (1, 0), // SELFDESTRUCT
+        0xff => (1, 0),            // SELFDESTRUCT
 
         _ => (0, 0), // Assume neutral for unknowns to prevent breaking valid new EIPs
     }

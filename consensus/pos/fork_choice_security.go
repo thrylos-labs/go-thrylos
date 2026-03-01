@@ -297,11 +297,29 @@ func (fc *ForkChoice) GetSecurityMetrics() map[string]interface{} {
 	// Alerting logic: multiple blocks with quorum suggests a network partition or attack
 	if competingHeads > 0 {
 		metrics["security_status"] = "CRITICAL_FORK_DETECTED"
-	} else if len(fc.blockScores) > 100 { // Arbitrary threshold for uncleaned state
+	} else if len(fc.blockScores) > fc.stateBloatThresholdLocked() {
 		metrics["security_status"] = "DEGRADED_STATE_BLOAT"
 	}
 
 	return metrics
+}
+
+func (fc *ForkChoice) stateBloatThresholdLocked() int {
+	if fc.fcConfig == nil {
+		return 100
+	}
+
+	maxBlocks := fc.fcConfig.MaxBlocksPerEpoch
+	if maxBlocks <= 0 {
+		maxBlocks = 100
+	}
+
+	epochs := int(fc.fcConfig.MaxEpochsToKeep) + 1
+	if epochs < 2 {
+		epochs = 2
+	}
+
+	return maxBlocks * epochs
 }
 
 // ValidateCheckpoint validates a checkpoint's integrity
