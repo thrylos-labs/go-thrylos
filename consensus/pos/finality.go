@@ -280,6 +280,14 @@ func (fc *ForkChoice) CleanupOldEpochs() {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 
+	fc.cleanupOldEpochsLocked(startTime)
+}
+
+func (fc *ForkChoice) cleanupOldEpochsLocked(startTime time.Time) {
+	if fc.fcConfig == nil {
+		return
+	}
+
 	currentEpoch := fc.getCurrentEpoch()
 
 	// 1. Define Safety Cap (Hard Limit)
@@ -329,6 +337,13 @@ func (fc *ForkChoice) CleanupOldEpochs() {
 		if epoch < cutoffEpoch {
 			delete(fc.epochAttestations, epoch)
 			epochsRemoved++
+		}
+	}
+
+	// Cleanup old latest messages tracked by epoch.
+	for epoch := range fc.latestMessages {
+		if epoch < cutoffEpoch {
+			delete(fc.latestMessages, epoch)
 		}
 	}
 

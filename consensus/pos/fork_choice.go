@@ -225,13 +225,21 @@ func (fc *ForkChoice) ProcessAttestation(attestation *types.Attestation) {
 	fc.blockEpochMap[blockHash] = epoch
 
 	// 6. Update epoch attestations
+	createdEpochWindow := false
 	if fc.epochAttestations[epoch] == nil {
 		fc.epochAttestations[epoch] = make(map[string]string)
 		fc.metrics.TotalEpochs++
+		createdEpochWindow = true
 	}
 	currentEpochScore := fc.epochAttestations[epoch][blockHash]
 	newEpochScore := addBigIntStrings(currentEpochScore, coremath.BigIntToString(coremath.ParseBigInt(validatorStake)))
 	fc.epochAttestations[epoch][blockHash] = newEpochScore
+
+	// Bound epoch-indexed state immediately on epoch growth instead of waiting
+	// for the background cleanup ticker.
+	if createdEpochWindow {
+		fc.cleanupOldEpochsLocked(time.Now())
+	}
 
 	// 7. Check Quorum (2/3 of total stake)
 	totalStakeStr := fc.getTotalActiveStake()

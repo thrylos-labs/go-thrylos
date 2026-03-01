@@ -74,6 +74,49 @@ func TestBeginUnbonding_UsesConfiguredBlockTime(t *testing.T) {
 	require.Equal(t, int64(4), entries[0].CompletionBlock)
 }
 
+func TestRemoveDelegation_QueuesUnbondingWithoutReducingStake(t *testing.T) {
+	const (
+		validatorAddr = "0x2323232323232323232323232323232323232323"
+		delegatorAddr = "0x1212121212121212121212121212121212121212"
+	)
+
+	cfg := &config.Config{
+		Consensus: config.ConsensusConfig{
+			BlockTime: 3 * time.Second,
+		},
+		Staking: config.StakingConfig{
+			UnbondingPeriod: 12 * time.Second,
+		},
+	}
+
+	vm, ws := newTestValidatorManager(t, cfg)
+	err := ws.SetValidator(validatorAddr, &core.Validator{
+		Address:        validatorAddr,
+		Active:         true,
+		Stake:          ub("1000"),
+		DelegatedStake: ub("500"),
+		Delegators: map[string][]byte{
+			delegatorAddr: ub("500"),
+		},
+	})
+	require.NoError(t, err)
+
+	err = vm.RemoveDelegation(validatorAddr, delegatorAddr, "100")
+	require.NoError(t, err)
+
+	validator, err := ws.GetValidator(validatorAddr)
+	require.NoError(t, err)
+	require.Equal(t, "1000", coremath.BigIntToString(coremath.ParseBigInt(validator.Stake)))
+	require.Equal(t, "500", coremath.BigIntToString(coremath.ParseBigInt(validator.DelegatedStake)))
+	require.Equal(t, "500", coremath.BigIntToString(coremath.ParseBigInt(validator.Delegators[delegatorAddr])))
+
+	entries := vm.unbondingQueue[delegatorAddr]
+	require.Len(t, entries, 1)
+	require.Equal(t, validatorAddr, entries[0].ValidatorAddress)
+	require.Equal(t, "100", entries[0].Amount)
+	require.Equal(t, int64(4), entries[0].CompletionBlock)
+}
+
 func TestProcessUnbondings_ReturnsPrincipalToBalance(t *testing.T) {
 	const (
 		validatorAddr = "0x4444444444444444444444444444444444444444"

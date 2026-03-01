@@ -143,51 +143,7 @@ func (vm *Manager) BeginUnbonding(validatorAddr, delegatorAddr string, amount st
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
-	validator, err := vm.worldState.GetValidator(validatorAddr)
-	if err != nil {
-		return fmt.Errorf("validator not found: %v", err)
-	}
-
-	// Check delegation exists
-	amountBig := math.ParseBigInt(amount)
-	var currentDelegationStr []byte
-	if val, exists := validator.Delegators[delegatorAddr]; exists {
-		currentDelegationStr = val
-	}
-	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
-
-	if math.Cmp(currentDelegationBig, amountBig) < 0 {
-		return fmt.Errorf("insufficient delegation: have %s, trying to unbond %s",
-			currentDelegationStr, amount)
-	}
-
-	// Calculate completion block (current block + unbonding period in blocks)
-	currentBlock := vm.worldState.GetHeight()
-	blockTime := vm.config.Consensus.BlockTime
-	if blockTime <= 0 {
-		blockTime = defaultUnbondingBlockTime
-	}
-	unbondingBlocks := int64(vm.config.Staking.UnbondingPeriod / blockTime)
-	if unbondingBlocks < 1 {
-		unbondingBlocks = 1
-	}
-	completionBlock := currentBlock + unbondingBlocks
-
-	// Create unbonding entry
-	entry := &UnbondingEntry{
-		ValidatorAddress: validatorAddr,
-		DelegatorAddress: delegatorAddr, // ✅ Now included
-		Amount:           amount,
-		CompletionBlock:  completionBlock,
-		CreatedAt:        time.Now().Unix(),
-	}
-
-	if vm.unbondingQueue[delegatorAddr] == nil {
-		vm.unbondingQueue[delegatorAddr] = make([]*UnbondingEntry, 0)
-	}
-	vm.unbondingQueue[delegatorAddr] = append(vm.unbondingQueue[delegatorAddr], entry)
-
-	return nil
+	return vm.queueUnbondingLocked(validatorAddr, delegatorAddr, amount)
 }
 
 // ProcessUnbondings processes completed unbonding entries
@@ -1118,58 +1074,52 @@ func (vm *Manager) RemoveDelegation(validatorAddr, delegatorAddr string, amount 
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
+	return vm.queueUnbondingLocked(validatorAddr, delegatorAddr, amount)
+}
+
+func (vm *Manager) queueUnbondingLocked(validatorAddr, delegatorAddr string, amount string) error {
 	validator, err := vm.worldState.GetValidator(validatorAddr)
 	if err != nil {
 		return fmt.Errorf("validator not found: %v", err)
 	}
 
-	// 1. Parse Input Amount
 	amountBig := math.ParseBigInt(amount)
-
-	// 2. Get Current Delegation
 	var currentDelegationStr []byte
 	if val, exists := validator.Delegators[delegatorAddr]; exists {
 		currentDelegationStr = val
 	}
 	currentDelegationBig := math.ParseBigInt(currentDelegationStr)
 
-	// 3. Check Insufficient Funds: if current < amount
-	if currentDelegationBig.Cmp(amountBig) < 0 {
-		return fmt.Errorf("insufficient delegation: have %s, trying to remove %s",
+	if math.Cmp(currentDelegationBig, amountBig) < 0 {
+		return fmt.Errorf("insufficient delegation: have %s, trying to unbond %s",
 			currentDelegationStr, amount)
 	}
 
-	// 4. Remove Delegation: Current - Amount
-	currentDelegationBig.Sub(currentDelegationBig, amountBig)
+	currentBlock := vm.worldState.GetHeight()
+	blockTime := vm.config.Consensus.BlockTime
+	if blockTime <= 0 {
+		blockTime = defaultUnbondingBlockTime
+	}
+	unbondingBlocks := int64(vm.config.Staking.UnbondingPeriod / blockTime)
+	if unbondingBlocks < 1 {
+		unbondingBlocks = 1
+	}
+	completionBlock := currentBlock + unbondingBlocks
 
-	// Update Map
-	if currentDelegationBig.Sign() == 0 {
-		delete(validator.Delegators, delegatorAddr)
-	} else {
-		validator.Delegators[delegatorAddr] = currentDelegationBig.Bytes()
+	entry := &UnbondingEntry{
+		ValidatorAddress: validatorAddr,
+		DelegatorAddress: delegatorAddr,
+		Amount:           amountBig.String(),
+		CompletionBlock:  completionBlock,
+		CreatedAt:        time.Now().Unix(),
 	}
 
-	// 5. Update Total Delegated Stake
-	delegatedStakeBig := math.ParseBigInt(validator.DelegatedStake)
-	delegatedStakeBig.Sub(delegatedStakeBig, amountBig)
-	validator.DelegatedStake = delegatedStakeBig.Bytes()
-
-	// 6. Update Total Stake (Self + Delegated)
-	totalStakeBig := math.ParseBigInt(validator.Stake)
-	totalStakeBig.Sub(totalStakeBig, amountBig)
-	validator.Stake = totalStakeBig.Bytes()
-
-	validator.UpdatedAt = time.Now().Unix()
-
-	// 7. Check Minimum Requirements
-	minStakeBig := math.ParseBigInt(vm.config.Staking.MinValidatorStake)
-
-	// if Stake < MinStake
-	if validator.Active && totalStakeBig.Cmp(minStakeBig) < 0 {
-		validator.Active = false
+	if vm.unbondingQueue[delegatorAddr] == nil {
+		vm.unbondingQueue[delegatorAddr] = make([]*UnbondingEntry, 0)
 	}
+	vm.unbondingQueue[delegatorAddr] = append(vm.unbondingQueue[delegatorAddr], entry)
 
-	return vm.worldState.UpdateValidator(validator)
+	return nil
 }
 
 // GetValidatorMetrics returns metrics for a validator
