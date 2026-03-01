@@ -162,3 +162,8 @@ func TestGovernanceFinalizeRejectsBeforeVotingEnds(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "still in the voting period")
 }
+
+func TestGovernanceCanApplyEvmCircuitBreakerParameter(t *testing.T) {
+	err := governance.ValidateParameterChange("economics.evm_max_tx_per_window", "1500")
+	require.NoError(t, err)
+}

@@ -223,10 +223,13 @@ type EconomicsConfig struct {
 	BaseGasPrice string `json:"base_gas_price"` // ⚠️ CHANGE THIS
 	MinimumFee   string `json:"minimum_fee"`    // ⚠️ CHANGE THIS
 
-	MinGasLimit int64  `json:"min_gas_limit"`
-	MaxGasPerTx int64  `json:"max_gas_per_tx"`
-	MaxGasPrice string `json:"max_gas_price"` // ⚠️ CHANGE THIS
-	MaxBlockGas int64  `json:"max_block_gas"`
+	MinGasLimit              int64  `json:"min_gas_limit"`
+	MaxGasPerTx              int64  `json:"max_gas_per_tx"`
+	MaxGasPrice              string `json:"max_gas_price"` // ⚠️ CHANGE THIS
+	MaxBlockGas              int64  `json:"max_block_gas"`
+	EVMMaxGasPerWindow       int64  `json:"evm_max_gas_per_window"`
+	EVMMaxTxPerWindow        int    `json:"evm_max_tx_per_window"`
+	EVMWindowDurationSeconds int64  `json:"evm_window_duration_seconds"`
 
 	BlockReward         string  `json:"block_reward"` // ⚠️ CHANGE THIS
 	CommunityTax        float64 `json:"community_tax"`
@@ -367,29 +370,32 @@ func DefaultConfig() *Config {
 		},
 
 		Economics: EconomicsConfig{
-			TotalSupply:         math.BigIntToString(TotalSupply),
-			GenesisSupply:       math.BigIntToString(GenesisSupply),
-			CirculatingSupply:   math.BigIntToString(GenesisSupply),
-			InflationRate:       0.04,
-			InflationMax:        0.07,
-			InflationMin:        0.02,
-			GoalBonded:          0.70,
-			BaseGasPrice:        math.BigIntToString(BaseGasPrice),
-			MinimumFee:          math.BigIntToString(new(big.Int).Mul(BaseGasPrice, big.NewInt(StandardTxGas))),
-			MinGasLimit:         StandardTxGas,
-			MaxGasPerTx:         2000000,
-			MaxGasPrice:         "10000", // Needs adjustment if using BigInt
-			MaxBlockGas:         MaxGasPerBlock,
-			BlockReward:         math.BigIntToString(BlockReward),
-			CommunityTax:        0.03,
-			BaseProposerReward:  0.015,
-			BonusProposerReward: 0.035,
-			ValidatorRewardRate: 0.12,
-			DelegatorRewardRate: 0.08,
-			MinBalance:          math.BigIntToString(MinimumBalance),
-			MinTransfer:         math.BigIntToString(MinimumTransfer),
-			MinStake:            math.BigIntToString(MinimumStakeAmount),
-			MinDelegation:       math.BigIntToString(MinimumDelegation),
+			TotalSupply:              math.BigIntToString(TotalSupply),
+			GenesisSupply:            math.BigIntToString(GenesisSupply),
+			CirculatingSupply:        math.BigIntToString(GenesisSupply),
+			InflationRate:            0.04,
+			InflationMax:             0.07,
+			InflationMin:             0.02,
+			GoalBonded:               0.70,
+			BaseGasPrice:             math.BigIntToString(BaseGasPrice),
+			MinimumFee:               math.BigIntToString(new(big.Int).Mul(BaseGasPrice, big.NewInt(StandardTxGas))),
+			MinGasLimit:              StandardTxGas,
+			MaxGasPerTx:              2000000,
+			MaxGasPrice:              "10000", // Needs adjustment if using BigInt
+			MaxBlockGas:              MaxGasPerBlock,
+			EVMMaxGasPerWindow:       300_000_000,
+			EVMMaxTxPerWindow:        1000,
+			EVMWindowDurationSeconds: 10,
+			BlockReward:              math.BigIntToString(BlockReward),
+			CommunityTax:             0.03,
+			BaseProposerReward:       0.015,
+			BonusProposerReward:      0.035,
+			ValidatorRewardRate:      0.12,
+			DelegatorRewardRate:      0.08,
+			MinBalance:               math.BigIntToString(MinimumBalance),
+			MinTransfer:              math.BigIntToString(MinimumTransfer),
+			MinStake:                 math.BigIntToString(MinimumStakeAmount),
+			MinDelegation:            math.BigIntToString(MinimumDelegation),
 
 			// Percentages of Total Supply
 			GenesisDistribution: math.BigIntToString(new(big.Int).Div(new(big.Int).Mul(TotalSupply, big.NewInt(15)), big.NewInt(100))),
@@ -754,6 +760,15 @@ func (c *Config) ValidateConfig() error {
 	// 1. Validate simple float parameters
 	if c.Economics.InflationRate < 0 || c.Economics.InflationRate > 1 {
 		return fmt.Errorf("inflation rate must be between 0 and 1")
+	}
+	if c.Economics.EVMMaxGasPerWindow <= 0 {
+		return fmt.Errorf("evm max gas per window must be positive")
+	}
+	if c.Economics.EVMMaxTxPerWindow <= 0 {
+		return fmt.Errorf("evm max tx per window must be positive")
+	}
+	if c.Economics.EVMWindowDurationSeconds <= 0 {
+		return fmt.Errorf("evm window duration seconds must be positive")
 	}
 
 	if c.Staking.MaxCommission < 0 || c.Staking.MaxCommission > 1 {

@@ -105,12 +105,18 @@ type StateReader interface {
 type RevmExecutor struct {
 	executor   unsafe.Pointer
 	worldState StateReader
+	config     *config.Config
 	chainID    uint64
 
 	// Gas tracking
 	blockGasUsed  uint64
 	blockGasLimit uint64
 	gasTrackingMu sync.Mutex
+
+	windowMu      sync.Mutex
+	windowStart   time.Time
+	windowGasUsed uint64
+	windowTxCount uint64
 }
 
 func (e *RevmExecutor) GetStorageAt(address common.Address, key common.Hash) common.Hash {
@@ -165,6 +171,84 @@ func (e *RevmExecutor) RefundGas(gasRefund uint64) {
 	} else {
 		e.blockGasUsed -= gasRefund
 	}
+}
+
+func (e *RevmExecutor) circuitBreakerLimits() (uint64, uint64, time.Duration) {
+	const (
+		defaultMaxGasPerWindow = 300_000_000
+		defaultMaxTxPerWindow  = 1000
+		defaultWindowSeconds   = 10
+	)
+
+	maxGas := uint64(defaultMaxGasPerWindow)
+	maxTx := uint64(defaultMaxTxPerWindow)
+	windowDuration := time.Duration(defaultWindowSeconds) * time.Second
+
+	if e.config != nil {
+		if e.config.Economics.EVMMaxGasPerWindow > 0 {
+			maxGas = uint64(e.config.Economics.EVMMaxGasPerWindow)
+		}
+		if e.config.Economics.EVMMaxTxPerWindow > 0 {
+			maxTx = uint64(e.config.Economics.EVMMaxTxPerWindow)
+		}
+		if e.config.Economics.EVMWindowDurationSeconds > 0 {
+			windowDuration = time.Duration(e.config.Economics.EVMWindowDurationSeconds) * time.Second
+		}
+	}
+
+	return maxGas, maxTx, windowDuration
+}
+
+func (e *RevmExecutor) CheckAndReserveWindowGas(gasLimit uint64) error {
+	maxGas, maxTx, windowDuration := e.circuitBreakerLimits()
+
+	e.windowMu.Lock()
+	defer e.windowMu.Unlock()
+
+	now := time.Now()
+	if e.windowStart.IsZero() || now.Sub(e.windowStart) >= windowDuration {
+		e.windowStart = now
+		e.windowGasUsed = 0
+		e.windowTxCount = 0
+	}
+
+	if e.windowTxCount+1 > maxTx {
+		return fmt.Errorf("circuit breaker: too many transactions in window (%d/%d)", e.windowTxCount+1, maxTx)
+	}
+	if e.windowGasUsed+gasLimit > maxGas {
+		return fmt.Errorf("circuit breaker: gas limit exceeded for window (%d/%d)", e.windowGasUsed+gasLimit, maxGas)
+	}
+
+	e.windowTxCount++
+	e.windowGasUsed += gasLimit
+	return nil
+}
+
+func (e *RevmExecutor) refundWindowReservation(gasRefund uint64, releaseTx bool) {
+	_, _, windowDuration := e.circuitBreakerLimits()
+
+	e.windowMu.Lock()
+	defer e.windowMu.Unlock()
+
+	if e.windowStart.IsZero() || time.Since(e.windowStart) >= windowDuration {
+		e.windowStart = time.Now()
+		e.windowGasUsed = 0
+		e.windowTxCount = 0
+		return
+	}
+
+	if releaseTx && e.windowTxCount > 0 {
+		e.windowTxCount--
+	}
+	if gasRefund >= e.windowGasUsed {
+		e.windowGasUsed = 0
+	} else {
+		e.windowGasUsed -= gasRefund
+	}
+}
+
+func (e *RevmExecutor) RefundWindowGas(gasRefund uint64) {
+	e.refundWindowReservation(gasRefund, false)
 }
 
 const FFISentinelError = ^uint64(0)
@@ -226,20 +310,27 @@ func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte
 		return nil, 0, fmt.Errorf("gas limit cannot be zero")
 	}
 
+	if err := e.CheckAndReserveWindowGas(gas); err != nil {
+		return nil, 0, err
+	}
+
 	// NEW: Check block gas limit
 	if err := e.CheckAndReserveGas(gas); err != nil {
+		e.refundWindowReservation(gas, true)
 		return nil, 0, fmt.Errorf("block gas limit check failed: %w", err)
 	}
 
 	// CRITICAL: ATOMIC NONCE VALIDATION
 	success, currentNonce, err := e.worldState.AtomicIncrementNonce(caller.Hex(), nonce)
 	if err != nil {
+		e.refundWindowReservation(gas, true)
 		e.RefundGas(gas) // Refund on validation failure
 		e.ReleaseNonce(caller, nonce)
 		return nil, 0, fmt.Errorf("nonce validation failed: %w", err)
 	}
 
 	if !success {
+		e.refundWindowReservation(gas, true)
 		e.RefundGas(gas)
 		e.ReleaseNonce(caller, nonce)
 		return nil, 0, fmt.Errorf("nonce mismatch: expected %d, but account nonce is %d", nonce, currentNonce)
@@ -269,10 +360,10 @@ func (e *RevmExecutor) ExecuteCall(caller, contract common.Address, input []byte
 	// Refund unused gas
 	if gasUsed < gas {
 		e.RefundGas(gas - gasUsed)
+		e.RefundWindowGas(gas - gasUsed)
 	}
 
 	if err != nil {
-
 		return data, gasUsed, err
 	}
 
@@ -297,8 +388,13 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 		return common.Address{}, 0, fmt.Errorf("cannot deploy empty bytecode")
 	}
 
+	if err := e.CheckAndReserveWindowGas(gas); err != nil {
+		return common.Address{}, 0, err
+	}
+
 	// ✅ FIX: Add block gas limit check
 	if err := e.CheckAndReserveGas(gas); err != nil {
+		e.refundWindowReservation(gas, true)
 		return common.Address{}, 0, fmt.Errorf("block gas limit check failed: %w", err)
 	}
 
@@ -306,12 +402,14 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 	success, currentNonce, err := e.worldState.AtomicIncrementNonce(deployer.Hex(), nonce)
 
 	if err != nil {
+		e.refundWindowReservation(gas, true)
 		e.RefundGas(gas) // ✅ FIX: Refund on validation failure
 		e.ReleaseNonce(deployer, nonce)
 		return common.Address{}, 0, fmt.Errorf("nonce validation failed: %w", err)
 	}
 
 	if !success {
+		e.refundWindowReservation(gas, true)
 		e.RefundGas(gas) // ✅ FIX: Refund on nonce mismatch
 		e.ReleaseNonce(deployer, nonce)
 		return common.Address{}, 0, fmt.Errorf("nonce mismatch: expected %d, but account nonce is %d", nonce, currentNonce)
@@ -338,6 +436,7 @@ func (e *RevmExecutor) DeployContract(deployer common.Address, bytecode []byte, 
 	// Refund unused gas
 	if gasUsed < gas {
 		e.RefundGas(gas - gasUsed)
+		e.RefundWindowGas(gas - gasUsed)
 	}
 
 	if err != nil {
@@ -551,6 +650,7 @@ func NewRevmExecutor(cfg *config.Config, worldState StateReader) (*RevmExecutor,
 
 	executor := &RevmExecutor{
 		worldState: worldState,
+		config:     cfg,
 		chainID:    chainID,
 	}
 

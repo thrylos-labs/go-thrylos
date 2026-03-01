@@ -168,7 +168,7 @@ func ValidateParameterChange(parameter, value string) error {
 			return fmt.Errorf("%s must be between 0 and 1", parameter)
 		}
 		return nil
-	case "consensus.min_active_validators":
+	case "consensus.min_active_validators", "economics.evm_max_gas_per_window", "economics.evm_max_tx_per_window", "economics.evm_window_duration_seconds":
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
 			return fmt.Errorf("invalid integer value for %s: %w", parameter, err)
@@ -372,6 +372,15 @@ func (gm *Manager) applyApprovedParameterChange(parameter, value string) error {
 	case "consensus.min_active_validators":
 		parsed, _ := strconv.Atoi(value)
 		gm.config.Consensus.MinActiveValidators = parsed
+	case "economics.evm_max_gas_per_window":
+		parsed, _ := strconv.ParseInt(value, 10, 64)
+		gm.config.Economics.EVMMaxGasPerWindow = parsed
+	case "economics.evm_max_tx_per_window":
+		parsed, _ := strconv.Atoi(value)
+		gm.config.Economics.EVMMaxTxPerWindow = parsed
+	case "economics.evm_window_duration_seconds":
+		parsed, _ := strconv.ParseInt(value, 10, 64)
+		gm.config.Economics.EVMWindowDurationSeconds = parsed
 	default:
 		return fmt.Errorf("parameter %s is not governance-managed", parameter)
 	}
