@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"time"
 
 	core "github.com/thrylos-labs/go-thrylos/proto/core"
@@ -83,7 +84,7 @@ type SlashingRecord struct {
 	Epoch            uint64
 	Timestamp        time.Time
 	Evidence         SlashingEvidence
-	SlashedAmount    int64
+	SlashedAmount    *big.Int
 	Reason           string
 }
 

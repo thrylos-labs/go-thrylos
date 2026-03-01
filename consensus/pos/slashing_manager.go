@@ -305,7 +305,7 @@ func (sm *SlashingManager) ProcessEvidence(evidence *SlashingEvidence) error {
 		// Create slashing record for invalid proposal
 		slashingRecord := &types.SlashingRecord{
 			ValidatorAddress: evidence.ValidatorAddress,
-			SlashedAmount:    penalty.Int64(),
+			SlashedAmount:    new(big.Int).Set(penalty),
 			Condition:        types.InvalidProposal,
 			Timestamp:        time.Now(),
 		}
@@ -647,7 +647,7 @@ func (sm *SlashingManager) ApplySurroundVoteSlashing(inner, outer *Vote) error {
 		Epoch:            outer.TargetEpoch,
 		Timestamp:        time.Now(),
 		Evidence:         evidence,
-		SlashedAmount:    penaltyAmountBig.Int64(),
+		SlashedAmount:    new(big.Int).Set(penaltyAmountBig),
 		Reason: fmt.Sprintf(
 			"Surround voting: %d<%d<%d<%d",
 			outer.SourceEpoch,
@@ -713,7 +713,7 @@ func (sm *SlashingManager) ReportBlockWithholding(validatorAddr string) error {
 		Timestamp:        time.Now(),
 		Evidence:         evidence,
 		// ✅ FIX: Convert BigInt to int64 for the struct
-		SlashedAmount: penaltyAmountBig.Int64(),
+		SlashedAmount: new(big.Int).Set(penaltyAmountBig),
 		Reason:        "Block Withholding: Exceeded consecutive missed proposal limit",
 	}
 
@@ -798,7 +798,7 @@ func (sm *SlashingManager) slashValidator(validatorKey string, percent int64, re
 		Timestamp:        time.Now(),
 		Evidence:         evidence,
 		// ✅ FIX: Convert BigInt to int64 for the struct
-		SlashedAmount: penaltyAmountBig.Int64(),
+		SlashedAmount: new(big.Int).Set(penaltyAmountBig),
 		Reason:        fmt.Sprintf("%s (Missed: %d)", reason, history.MissedSlots),
 	}
 
@@ -857,7 +857,7 @@ func (sm *SlashingManager) ReportInvalidProposal(proposal *types.BlockProposal, 
 		Timestamp:        time.Now(),
 		Evidence:         evidence,
 		// ✅ FIX: Convert BigInt to int64 for the struct
-		SlashedAmount: penaltyAmountBig.Int64(),
+		SlashedAmount: new(big.Int).Set(penaltyAmountBig),
 		Reason:        fmt.Sprintf("Invalid proposal: %s", reason),
 	}
 
@@ -906,7 +906,7 @@ func (sm *SlashingManager) slashDoubleVoting(att *types.Attestation, first, seco
 		Timestamp:        time.Now(),
 		Evidence:         evidence,
 		// ✅ FIX: Convert BigInt to int64 for the struct
-		SlashedAmount: penaltyAmountBig.Int64(),
+		SlashedAmount: new(big.Int).Set(penaltyAmountBig),
 		Reason:        fmt.Sprintf("Double voting at epoch %d", att.Epoch),
 	}
 
@@ -943,7 +943,7 @@ func (sm *SlashingManager) slashDowntime(validatorAddress string, history *stora
 		Timestamp:        time.Now(),
 		Evidence:         evidence,
 		// ✅ FIX: Convert BigInt to int64 for the struct
-		SlashedAmount: penaltyAmountBig.Int64(),
+		SlashedAmount: new(big.Int).Set(penaltyAmountBig),
 		Reason:        fmt.Sprintf("Missed %d attestations out of %d", history.MissedSlots, history.TotalSlots),
 	}
 
@@ -979,8 +979,11 @@ func (sm *SlashingManager) applySlashing(record *types.SlashingRecord) error {
 		return fmt.Errorf("failed to get validator balance: %w", err)
 	}
 
-	// 2. Parse SlashedAmount (Convert int64 back to BigInt)
-	slashedAmountBig := big.NewInt(record.SlashedAmount)
+	// 2. Read the exact slashed amount without narrowing.
+	slashedAmountBig := new(big.Int)
+	if record.SlashedAmount != nil {
+		slashedAmountBig.Set(record.SlashedAmount)
+	}
 
 	// 3. Subtract (BigInt)
 	newBalance := coremath.Sub(currentBalance, slashedAmountBig)
