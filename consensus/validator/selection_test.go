@@ -96,6 +96,18 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 		assert.NotEqual(t, seed1, seed2, "Different slots should produce different seeds")
 	})
 
+	t.Run("DifferentVRFOutputs_DifferentSeeds", func(t *testing.T) {
+		blocks := [][]byte{
+			[]byte("block1hash"),
+			[]byte("block2hash"),
+		}
+
+		seed1 := GenerateSeedFromInputs(blocks, [][]byte{[]byte("vrf-a")}, 100)
+		seed2 := GenerateSeedFromInputs(blocks, [][]byte{[]byte("vrf-b")}, 100)
+
+		assert.NotEqual(t, seed1, seed2, "Different VRF outputs should produce different seeds")
+	})
+
 	t.Run("EmptyBlocks_UsesSlotFallback", func(t *testing.T) {
 		emptyBlocks := [][]byte{}
 		slot := uint64(100)
@@ -308,6 +320,50 @@ func TestGenerateSeedFromBlocks(t *testing.T) {
 		assert.Equal(t, 5, domainCounts["B"])
 		assert.Equal(t, 4, addressCounts["A1"])
 		assert.Equal(t, 1, addressCounts["A2"])
+	})
+
+	t.Run("EpochSchedule_UsesPreviousEpochCommittedEntropy", func(t *testing.T) {
+		history := &mockProposerHistory{
+			blocks: map[int64]*core.Block{
+				0: {
+					Header: &core.BlockHeader{Index: 0, Epoch: 0, VrfOutput: []byte("g")},
+					Hash:   "genesis",
+				},
+				1: {
+					Header: &core.BlockHeader{Index: 1, Epoch: 1, VrfOutput: []byte("vrf-1a")},
+					Hash:   "epoch1-a",
+				},
+				2: {
+					Header: &core.BlockHeader{Index: 2, Epoch: 1, VrfOutput: []byte("vrf-1b")},
+					Hash:   "epoch1-b",
+				},
+			},
+			height: 2,
+		}
+
+		set := NewSet(10)
+		set.SetHistoryReader(history)
+		candidates := []*core.Validator{
+			{Address: "A", Stake: u("600"), Active: true},
+			{Address: "B", Stake: u("400"), Active: true},
+		}
+		for _, candidate := range candidates {
+			assert.NoError(t, set.AddValidator(candidate))
+		}
+
+		schedule1, err := set.BuildEpochSchedule(candidates, 2, 6, 1)
+		assert.NoError(t, err)
+		assert.Len(t, schedule1, 6)
+
+		history.blocks[3] = &core.Block{
+			Header: &core.BlockHeader{Index: 3, Epoch: 2, VrfOutput: []byte("vrf-2a")},
+			Hash:   "epoch2-a",
+		}
+		history.height = 3
+
+		schedule2, err := set.BuildEpochSchedule(candidates, 2, 6, 1)
+		assert.NoError(t, err)
+		assert.Equal(t, schedule1, schedule2, "current-epoch head changes should not alter the already committed epoch schedule")
 	})
 }
 

@@ -12,6 +12,7 @@
 package validator
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math/big"
@@ -55,6 +56,8 @@ type Set struct {
 
 	// Performance adjustments
 	performanceMultipliers map[string]float64
+
+	scheduleCache *epochScheduleCache
 }
 
 // SelectionStats tracks validator selection statistics
@@ -97,6 +100,12 @@ type domainScheduleState struct {
 	index int
 }
 
+type epochScheduleCache struct {
+	epoch uint64
+	key   []byte
+	value []string
+}
+
 // NewSet creates a new validator set
 func NewSet(maxValidators int) *Set {
 	return &Set{
@@ -113,6 +122,7 @@ func (vs *Set) SetHistoryReader(reader ProposerHistoryReader) {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 	vs.historyReader = reader
+	vs.clearScheduleCacheUnsafe()
 }
 
 // AddValidator adds a validator to the set
@@ -143,6 +153,8 @@ func (vs *Set) AddValidator(validator *core.Validator) error {
 		vs.performanceMultipliers[validator.Address] = 1.0
 	}
 
+	vs.clearScheduleCacheUnsafe()
+
 	return nil
 }
 
@@ -157,6 +169,7 @@ func (vs *Set) RemoveValidator(address string) error {
 
 	delete(vs.validators, address)
 	vs.updateActiveListUnsafe()
+	vs.clearScheduleCacheUnsafe()
 
 	return nil
 }
@@ -172,6 +185,7 @@ func (vs *Set) UpdateValidator(validator *core.Validator) error {
 
 	vs.validators[validator.Address] = validator
 	vs.updateActiveListUnsafe()
+	vs.clearScheduleCacheUnsafe()
 
 	return nil
 }
@@ -262,9 +276,6 @@ func (vs *Set) BuildEpochSchedule(
 	slotsPerEpoch int,
 	cooldownWindow int,
 ) ([]string, error) {
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no validator candidates")
 	}
@@ -275,6 +286,7 @@ func (vs *Set) BuildEpochSchedule(
 		cooldownWindow = 0
 	}
 
+	vs.mu.RLock()
 	snapshot := make([]*core.Validator, 0, len(candidates))
 	totalStakeBig := big.NewInt(0)
 	for _, validator := range candidates {
@@ -290,13 +302,20 @@ func (vs *Set) BuildEpochSchedule(
 	}
 
 	if len(snapshot) == 0 || totalStakeBig.Sign() <= 0 {
+		vs.mu.RUnlock()
 		return nil, fmt.Errorf("total stake is zero")
 	}
 
-	seed := vs.buildEpochSeed(epoch)
+	seed := vs.buildEpochSeed(epoch, slotsPerEpoch)
 	domainGroups, err := vs.groupValidatorsByDomain(snapshot)
 	if err != nil {
+		vs.mu.RUnlock()
 		return nil, err
+	}
+	cacheKey := buildScheduleCacheKey(epoch, slotsPerEpoch, cooldownWindow, seed, domainGroups)
+	if cached := vs.copyCachedScheduleUnsafe(epoch, cacheKey); cached != nil {
+		vs.mu.RUnlock()
+		return cached, nil
 	}
 
 	domainAllocations := allocateStakeQuotas(domainGroups, slotsPerEpoch)
@@ -334,8 +353,18 @@ func (vs *Set) BuildEpochSchedule(
 	}
 
 	if len(schedule) != slotsPerEpoch {
+		vs.mu.RUnlock()
 		return nil, fmt.Errorf("failed to build complete epoch schedule")
 	}
+	vs.mu.RUnlock()
+
+	vs.mu.Lock()
+	vs.scheduleCache = &epochScheduleCache{
+		epoch: epoch,
+		key:   append([]byte(nil), cacheKey...),
+		value: append([]string(nil), schedule...),
+	}
+	vs.mu.Unlock()
 
 	return schedule, nil
 }
@@ -365,33 +394,50 @@ func (vs *Set) shuffleValidators(validators []*core.Validator, seed []byte) []*c
 	return shuffled
 }
 
-func (vs *Set) buildEpochSeed(epoch uint64) []byte {
+func (vs *Set) buildEpochSeed(epoch uint64, slotsPerEpoch int) []byte {
 	if vs.historyReader == nil {
-		return GenerateSeedFromBlocks(nil, epoch)
+		return GenerateSeedFromInputs(nil, nil, epoch)
 	}
 
 	height := vs.historyReader.GetHeight()
 	if height < 0 {
-		return GenerateSeedFromBlocks(nil, epoch)
+		return GenerateSeedFromInputs(nil, nil, epoch)
 	}
 
-	window := recentProposerWindow
-	if int(height+1) < window {
-		window = int(height + 1)
+	if epoch == 0 {
+		return GenerateSeedFromInputs(nil, nil, epoch)
 	}
 
-	blockHashes := make([][]byte, 0, window)
-	for i := 0; i < window; i++ {
-		block, err := vs.historyReader.GetBlock(height - int64(i))
+	blockHashes := make([][]byte, 0, slotsPerEpoch)
+	vrfOutputs := make([][]byte, 0, slotsPerEpoch)
+	targetEpoch := epoch - 1
+
+	for i := height; i >= 0; i-- {
+		block, err := vs.historyReader.GetBlock(i)
 		if err != nil || block == nil {
 			continue
+		}
+		if block.Header == nil {
+			continue
+		}
+		if block.Header.Epoch > targetEpoch {
+			continue
+		}
+		if block.Header.Epoch < targetEpoch {
+			break
 		}
 		if block.Hash != "" {
 			blockHashes = append(blockHashes, []byte(block.Hash))
 		}
+		if len(block.Header.VrfOutput) > 0 {
+			vrfOutputs = append(vrfOutputs, append([]byte(nil), block.Header.VrfOutput...))
+		}
+		if len(blockHashes) >= slotsPerEpoch {
+			break
+		}
 	}
 
-	return GenerateSeedFromBlocks(blockHashes, epoch)
+	return GenerateSeedFromInputs(blockHashes, vrfOutputs, epoch)
 }
 
 func (vs *Set) shuffleSchedule(schedule []string, seed []byte) {
@@ -1174,7 +1220,11 @@ func (vs *Set) CleanupInactiveValidators(maxInactiveTime time.Duration) []string
 
 // GenerateSeedFromBlocks creates randomness seed from recent block hashes
 func GenerateSeedFromBlocks(blockHashes [][]byte, slot uint64) []byte {
-	if len(blockHashes) == 0 {
+	return GenerateSeedFromInputs(blockHashes, nil, slot)
+}
+
+func GenerateSeedFromInputs(blockHashes [][]byte, vrfOutputs [][]byte, slot uint64) []byte {
+	if len(blockHashes) == 0 && len(vrfOutputs) == 0 {
 		slotBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(slotBytes, slot)
 		return hash.Keccak256(slotBytes)
@@ -1184,12 +1234,72 @@ func GenerateSeedFromBlocks(blockHashes [][]byte, slot uint64) []byte {
 	for _, hashBytes := range blockHashes {
 		combined = append(combined, hashBytes...)
 	}
+	for _, vrfOutput := range vrfOutputs {
+		combined = append(combined, vrfOutput...)
+	}
 
 	slotBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(slotBytes, slot)
 	combined = append(combined, slotBytes...)
 
 	return hash.Keccak256(combined)
+}
+
+func buildScheduleCacheKey(
+	epoch uint64,
+	slotsPerEpoch int,
+	cooldownWindow int,
+	seed []byte,
+	domainGroups map[string][]*core.Validator,
+) []byte {
+	combined := make([]byte, 0)
+	combined = append(combined, seed...)
+
+	epochBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(epochBytes, epoch)
+	combined = append(combined, epochBytes...)
+
+	paramBytes := make([]byte, 8)
+	binary.BigEndian.PutUint32(paramBytes[:4], uint32(slotsPerEpoch))
+	binary.BigEndian.PutUint32(paramBytes[4:], uint32(cooldownWindow))
+	combined = append(combined, paramBytes...)
+
+	domainIDs := make([]string, 0, len(domainGroups))
+	for domainID := range domainGroups {
+		domainIDs = append(domainIDs, domainID)
+	}
+	sort.Strings(domainIDs)
+
+	for _, domainID := range domainIDs {
+		combined = append(combined, []byte(domainID)...)
+		members := append([]*core.Validator(nil), domainGroups[domainID]...)
+		sort.Slice(members, func(i, j int) bool {
+			return members[i].Address < members[j].Address
+		})
+		for _, member := range members {
+			combined = append(combined, []byte(member.Address)...)
+			combined = append(combined, member.Stake...)
+		}
+	}
+
+	return hash.Keccak256(combined)
+}
+
+func (vs *Set) copyCachedScheduleUnsafe(epoch uint64, cacheKey []byte) []string {
+	if vs.scheduleCache == nil {
+		return nil
+	}
+	if vs.scheduleCache.epoch != epoch {
+		return nil
+	}
+	if !bytes.Equal(vs.scheduleCache.key, cacheKey) {
+		return nil
+	}
+	return append([]string(nil), vs.scheduleCache.value...)
+}
+
+func (vs *Set) clearScheduleCacheUnsafe() {
+	vs.scheduleCache = nil
 }
 
 // Clear removes all validators and resets the set state
@@ -1209,4 +1319,5 @@ func (vs *Set) Clear() {
 	// Optional: If you want a truly fresh start, reset history and multipliers too
 	vs.selectionHistory = make(map[string]*SelectionStats)
 	vs.performanceMultipliers = make(map[string]float64)
+	vs.clearScheduleCacheUnsafe()
 }
